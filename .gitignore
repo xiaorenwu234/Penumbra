@@ -1,0 +1,34 @@
+# ===== General =====
+*.log
+.env
+
+# ===== ShadowFS (Go) =====
+# Compiled binary
+ShadowFS/shadowfs
+# Demo directories
+ShadowFS/.demo/
+# IDE
+ShadowFS/.idea/
+# Test artifacts
+*.test
+*.out
+*.coverprofile
+
+# ===== ShadowProc (Rust) =====
+ShadowProc/target/
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== Build artifacts =====
+demo/test_programs/agent_worker
+demo/test_programs/cgroup_exec
+demo/test_programs/file_reader_writer
+ShadowFS/tests/__pycache__/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+ShadowProc/tests/test_target
