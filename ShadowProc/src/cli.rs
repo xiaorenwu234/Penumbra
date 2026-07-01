@@ -97,6 +97,48 @@ impl Cli {
                 }
             }
 
+            "speculative" | "spec" => {
+                if parts.len() < 2 {
+                    println!("Usage: speculative <pid>");
+                    return Ok(false);
+                }
+                let pid: u32 = parts[1].parse().unwrap_or(0);
+                let mut pm = self.process_manager.lock().unwrap();
+                match pm.begin_speculative(pid) {
+                    Ok(()) => println!("\x1b[32m[OK]\x1b[0m COW tracking started for pid {}", pid),
+                    Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
+                }
+            }
+
+            "rollback" | "rb" => {
+                if parts.len() < 2 {
+                    println!("Usage: rollback <pid>");
+                    return Ok(false);
+                }
+                let pid: u32 = parts[1].parse().unwrap_or(0);
+                let mut pm = self.process_manager.lock().unwrap();
+                match pm.rollback_process(pid) {
+                    Ok(stats) => println!(
+                        "\x1b[32m[OK]\x1b[0m Rolled back pid {}: {} dirty pages, {} restored ({} bytes)",
+                        pid, stats.pages_dirty, stats.pages_restored, stats.bytes_restored
+                    ),
+                    Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
+                }
+            }
+
+            "commit" => {
+                if parts.len() < 2 {
+                    println!("Usage: commit <pid>");
+                    return Ok(false);
+                }
+                let pid: u32 = parts[1].parse().unwrap_or(0);
+                let mut pm = self.process_manager.lock().unwrap();
+                match pm.commit_process(pid) {
+                    Ok(()) => println!("\x1b[32m[OK]\x1b[0m Committed pid {} - COW shadow discarded", pid),
+                    Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
+                }
+            }
+
             "help" | "h" | "?" => {
                 println!("Commands:");
                 println!("  list (ls)              - List all frozen processes");
@@ -104,6 +146,9 @@ impl Cli {
                 println!("  discard (d) <pid>      - Kill a frozen process");
                 println!("  checkpoint (cp) <pid>  - CRIU checkpoint a frozen process");
                 println!("  restore <path>         - Restore from a CRIU checkpoint");
+                println!("  speculative (spec) <pid> - Start COW memory tracking");
+                println!("  rollback (rb) <pid>    - Rollback memory and kill process");
+                println!("  commit <pid>           - Commit (discard COW shadow)");
                 println!("  quit (q)               - Exit ShadowProc");
                 println!("  help (h)               - Show this help");
             }

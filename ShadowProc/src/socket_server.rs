@@ -31,6 +31,17 @@ struct Response {
     frozen: Option<Vec<FrozenInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pids: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rollback_stats: Option<Vec<RollbackInfo>>,
+}
+
+#[derive(Serialize, Clone)]
+struct RollbackInfo {
+    pid: u32,
+    pages_scanned: u64,
+    pages_dirty: u64,
+    pages_restored: u64,
+    bytes_restored: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -160,6 +171,7 @@ impl SocketServer {
                         message: Some(format!("invalid JSON: {}", e)),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     };
                     let resp_str = serde_json::to_string(&resp)?;
                     writeln!(writer, "{}", resp_str)?;
@@ -194,6 +206,7 @@ impl SocketServer {
                         message: Some("cgroup_path required".into()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     };
                 };
                 match bpf_manager.add_cgroup(Path::new(path)) {
@@ -202,12 +215,14 @@ impl SocketServer {
                         message: None,
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     },
                     Err(e) => Response {
                         status: "error".into(),
                         message: Some(e.to_string()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     },
                 }
             }
@@ -227,6 +242,7 @@ impl SocketServer {
                     message: None,
                     frozen: Some(frozen),
                     pids: None,
+                    rollback_stats: None,
                 }
             }
 
@@ -237,6 +253,7 @@ impl SocketServer {
                         message: Some("cgroup_id required".into()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     };
                 };
                 let pm = process_manager.lock().unwrap();
@@ -253,6 +270,7 @@ impl SocketServer {
                     message: None,
                     frozen: Some(frozen),
                     pids: None,
+                    rollback_stats: None,
                 }
             }
 
@@ -263,6 +281,7 @@ impl SocketServer {
                         message: Some("cgroup_id required".into()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     };
                 };
                 let mut pm = process_manager.lock().unwrap();
@@ -272,12 +291,14 @@ impl SocketServer {
                         message: None,
                         frozen: None,
                         pids: Some(pids),
+                        rollback_stats: None,
                     },
                     Err(e) => Response {
                         status: "error".into(),
                         message: Some(e.to_string()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     },
                 }
             }
@@ -289,6 +310,7 @@ impl SocketServer {
                         message: Some("cgroup_id required".into()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     };
                 };
                 let mut pm = process_manager.lock().unwrap();
@@ -298,12 +320,14 @@ impl SocketServer {
                         message: None,
                         frozen: None,
                         pids: Some(pids),
+                        rollback_stats: None,
                     },
                     Err(e) => Response {
                         status: "error".into(),
                         message: Some(e.to_string()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     },
                 }
             }
@@ -315,6 +339,7 @@ impl SocketServer {
                         message: Some("pid required".into()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     };
                 };
                 let mut pm = process_manager.lock().unwrap();
@@ -324,12 +349,43 @@ impl SocketServer {
                         message: None,
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     },
                     Err(e) => Response {
                         status: "error".into(),
                         message: Some(e.to_string()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
+                    },
+                }
+            }
+
+            "resume_pid" => {
+                let Some(pid) = req.pid else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("pid required".into()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    };
+                };
+                let mut pm = process_manager.lock().unwrap();
+                match pm.resume_process(pid) {
+                    Ok(()) => Response {
+                        status: "ok".into(),
+                        message: Some(format!("Resumed pid {} (will be intercepted again)", pid)),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
                     },
                 }
             }
@@ -341,6 +397,7 @@ impl SocketServer {
                         message: Some("pid required".into()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     };
                 };
                 let mut pm = process_manager.lock().unwrap();
@@ -350,12 +407,268 @@ impl SocketServer {
                         message: None,
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
                     },
                     Err(e) => Response {
                         status: "error".into(),
                         message: Some(e.to_string()),
                         frozen: None,
                         pids: None,
+                        rollback_stats: None,
+                    },
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════
+            // COW Memory Tracking commands
+            // ═══════════════════════════════════════════════════════════
+
+            "begin_speculative" => {
+                if let Some(cgroup_id) = &req.cgroup_id {
+                    let mut pm = process_manager.lock().unwrap();
+                    match pm.begin_speculative_by_cgroup(cgroup_id) {
+                        Ok(pids) => Response {
+                            status: "ok".into(),
+                            message: Some(format!("COW tracking started for {} processes", pids.len())),
+                            frozen: None,
+                            pids: Some(pids),
+                            rollback_stats: None,
+                        },
+                        Err(e) => Response {
+                            status: "error".into(),
+                            message: Some(e.to_string()),
+                            frozen: None,
+                            pids: None,
+                            rollback_stats: None,
+                        },
+                    }
+                } else if let Some(pid) = req.pid {
+                    let mut pm = process_manager.lock().unwrap();
+                    match pm.begin_speculative(pid) {
+                        Ok(()) => Response {
+                            status: "ok".into(),
+                            message: Some(format!("COW tracking started for pid {}", pid)),
+                            frozen: None,
+                            pids: None,
+                            rollback_stats: None,
+                        },
+                        Err(e) => Response {
+                            status: "error".into(),
+                            message: Some(e.to_string()),
+                            frozen: None,
+                            pids: None,
+                            rollback_stats: None,
+                        },
+                    }
+                } else {
+                    Response {
+                        status: "error".into(),
+                        message: Some("cgroup_id or pid required".into()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    }
+                }
+            }
+
+            "rollback_by_cgroup" => {
+                let Some(cgroup_id) = &req.cgroup_id else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("cgroup_id required".into()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    };
+                };
+                let mut pm = process_manager.lock().unwrap();
+                match pm.rollback_by_cgroup(cgroup_id) {
+                    Ok(results) => {
+                        let stats: Vec<RollbackInfo> = results.iter().map(|(pid, s)| RollbackInfo {
+                            pid: *pid,
+                            pages_scanned: s.pages_scanned,
+                            pages_dirty: s.pages_dirty,
+                            pages_restored: s.pages_restored,
+                            bytes_restored: s.bytes_restored,
+                        }).collect();
+                        let pids: Vec<u32> = results.iter().map(|(pid, _)| *pid).collect();
+                        Response {
+                            status: "ok".into(),
+                            message: Some(format!("Rolled back {} processes", results.len())),
+                            frozen: None,
+                            pids: Some(pids),
+                            rollback_stats: Some(stats),
+                        }
+                    }
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    },
+                }
+            }
+
+            "rollback_pid" => {
+                let Some(pid) = req.pid else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("pid required".into()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    };
+                };
+                let mut pm = process_manager.lock().unwrap();
+                match pm.rollback_process(pid) {
+                    Ok(stats) => Response {
+                        status: "ok".into(),
+                        message: Some(format!(
+                            "Rolled back pid {}: {} pages restored ({} bytes)",
+                            pid, stats.pages_restored, stats.bytes_restored
+                        )),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: Some(vec![RollbackInfo {
+                            pid,
+                            pages_scanned: stats.pages_scanned,
+                            pages_dirty: stats.pages_dirty,
+                            pages_restored: stats.pages_restored,
+                            bytes_restored: stats.bytes_restored,
+                        }]),
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    },
+                }
+            }
+
+            "commit_by_cgroup" => {
+                let Some(cgroup_id) = &req.cgroup_id else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("cgroup_id required".into()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    };
+                };
+                let mut pm = process_manager.lock().unwrap();
+                match pm.commit_by_cgroup(cgroup_id) {
+                    Ok(pids) => Response {
+                        status: "ok".into(),
+                        message: Some(format!("Committed {} processes", pids.len())),
+                        frozen: None,
+                        pids: Some(pids),
+                        rollback_stats: None,
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    },
+                }
+            }
+
+            "commit_pid" => {
+                let Some(pid) = req.pid else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("pid required".into()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    };
+                };
+                let mut pm = process_manager.lock().unwrap();
+                match pm.commit_process(pid) {
+                    Ok(()) => Response {
+                        status: "ok".into(),
+                        message: Some(format!("Committed pid {}", pid)),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    },
+                }
+            }
+
+            "restore_memory_pid" => {
+                let Some(pid) = req.pid else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("pid required".into()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    };
+                };
+                let mut pm = process_manager.lock().unwrap();
+                match pm.restore_memory_only(pid) {
+                    Ok(stats) => Response {
+                        status: "ok".into(),
+                        message: Some(format!(
+                            "Memory restored for pid {}: {} pages ({} bytes)",
+                            pid, stats.pages_restored, stats.bytes_restored
+                        )),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: Some(vec![RollbackInfo {
+                            pid,
+                            pages_scanned: stats.pages_scanned,
+                            pages_dirty: stats.pages_dirty,
+                            pages_restored: stats.pages_restored,
+                            bytes_restored: stats.bytes_restored,
+                        }]),
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    },
+                }
+            }
+
+            "freeze_by_cgroup" => {
+                let Some(cgroup_id) = &req.cgroup_id else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("cgroup_id required".into()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    };
+                };
+                let mut pm = process_manager.lock().unwrap();
+                match pm.freeze_by_cgroup(cgroup_id) {
+                    Ok(pids) => Response {
+                        status: "ok".into(),
+                        message: Some(format!("Froze {} processes", pids.len())),
+                        frozen: None,
+                        pids: Some(pids),
+                        rollback_stats: None,
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
                     },
                 }
             }
@@ -365,6 +678,7 @@ impl SocketServer {
                 message: Some(format!("unknown action: {}", req.action)),
                 frozen: None,
                 pids: None,
+                rollback_stats: None,
             },
         }
     }

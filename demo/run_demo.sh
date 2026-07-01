@@ -84,6 +84,8 @@ ORCH_PID=""
 AGENT_WORKER="$DEMO_DIR/test_programs/agent_worker"
 FILE_RW="$DEMO_DIR/test_programs/file_reader_writer"
 CGROUP_EXEC="$DEMO_DIR/test_programs/cgroup_exec"
+MEM_MODIFIER="$DEMO_DIR/test_programs/mem_modifier"
+READ_PROC_MEM="$DEMO_DIR/test_programs/read_proc_mem.py"
 
 # ──────────────────────────── Colors ───────────────────────────────────────────
 RED='\033[0;31m'
@@ -232,7 +234,8 @@ build() {
     gcc -o "$AGENT_WORKER" "$DEMO_DIR/test_programs/agent_worker.c" -Wall
     gcc -o "$FILE_RW" "$DEMO_DIR/test_programs/file_reader_writer.c" -Wall
     gcc -o "$CGROUP_EXEC" "$DEMO_DIR/test_programs/cgroup_exec.c" -Wall
-    info "Test programs built: $AGENT_WORKER, $FILE_RW, $CGROUP_EXEC"
+    gcc -o "$MEM_MODIFIER" "$DEMO_DIR/test_programs/mem_modifier.c" -Wall
+    info "Test programs built: agent_worker, file_reader_writer, cgroup_exec, mem_modifier"
 
     # ShadowFS
     step "Building ShadowFS..."
@@ -641,6 +644,152 @@ scenario_cascade() {
     show_json "$(python3 "$ORCH_CLIENT" "$ORCH_SOCK" list_frozen 2>&1)"
 }
 
+# Helper: send a JSON command directly to ShadowProc socket
+shadowproc_cmd() {
+    # Usage: shadowproc_cmd '{"action":"...", ...}'
+    echo "$1" | python3 -c "
+import socket, sys, json
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect('$SHADOWPROC_SOCK')
+f = sock.makefile('rw', buffering=1)
+f.write(sys.stdin.read().strip() + '\n')
+f.flush()
+resp = f.readline()
+sock.close()
+print(resp.strip())
+"
+}
+
+# ──────────────────────────── Scenario 4: COW Memory Rollback ─────────────────
+scenario_cow_rollback() {
+    banner
+    section "Scenario 4: COW MEMORY ROLLBACK"
+    echo -e "  ${YELLOW}Process modifies in-memory globals → COW mechanism captures original pages${NC}"
+    echo -e "  ${YELLOW}After rollback, memory is restored to pre-modification state${NC}"
+    echo ""
+
+    local MARKER_FILE="/tmp/shadow-demo-cow-marker"
+    rm -f "$MARKER_FILE"
+
+    # Step 1: Start mem_modifier in cgroup
+    step "Step 1: Starting mem_modifier in cgroup (will write marker + trigger stdout freeze)..."
+    run_in_cgroup "$MEM_MODIFIER" "$MARKER_FILE" &
+    local AGENT_PID=$!
+    info "mem_modifier launched (wrapper PID $AGENT_PID)"
+
+    # Step 2: Wait for it to be frozen (stdout write triggers BPF)
+    step "Step 2: Waiting for process to be frozen (stdout write intercepted)..."
+    if wait_for_frozen "$AGENT_PID" 10; then
+        info "Process is FROZEN (first freeze - before memory modification)"
+    else
+        warn "Process did not freeze within 10s"
+        return
+    fi
+
+    # Read marker file to get the actual PID and addresses
+    sleep 0.5
+    if [[ ! -f "$MARKER_FILE" ]]; then
+        warn "Marker file not created — mem_modifier may have failed"
+        return
+    fi
+    local REAL_PID COUNTER_ADDR MESSAGE_ADDR
+    REAL_PID=$(grep '^pid=' "$MARKER_FILE" | cut -d= -f2)
+    COUNTER_ADDR=$(grep '^counter_addr=' "$MARKER_FILE" | cut -d= -f2)
+    MESSAGE_ADDR=$(grep '^message_addr=' "$MARKER_FILE" | cut -d= -f2)
+    info "Marker info: pid=$REAL_PID counter_addr=$COUNTER_ADDR message_addr=$MESSAGE_ADDR"
+
+    # Verify initial state via /proc/pid/mem
+    step "Verifying initial memory state (should be: counter=42, message=ORIGINAL)..."
+    local counter_val msg_val
+    counter_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$COUNTER_ADDR" int 2>&1) || true
+    msg_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$MESSAGE_ADDR" str 2>&1) || true
+    info "  g_counter = $counter_val (expected: 42)"
+    info "  g_message = \"$msg_val\" (expected: \"ORIGINAL\")"
+
+    # Step 3: Call begin_speculative on ShadowProc (creates COW shadow)
+    echo ""
+    step "Step 3: Calling begin_speculative (creates COW shadow fork)..."
+    local spec_resp
+    spec_resp=$(shadowproc_cmd "{\"action\":\"begin_speculative\",\"pid\":$REAL_PID}")
+    show_json "$spec_resp"
+
+    # Step 4: Resume the process (resume_pid) — it will modify memory then freeze again
+    # NOTE: We use resume_pid (not continue_pid) so the process can be intercepted
+    # again on connect(). continue_pid permanently allows the process through.
+    step "Step 4: Resuming process (resume_pid) — process will modify memory..."
+    local cont_resp
+    cont_resp=$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$REAL_PID}")
+    show_json "$cont_resp"
+
+    # Step 5: Wait for second freeze (connect triggers BPF)
+    # NOTE: We must wait specifically for REAL_PID to enter T state.
+    # The shadow child (created by fork injection) is also in the cgroup in T state,
+    # so wait_for_frozen (which scans cgroup.procs) would return immediately.
+    step "Step 5: Waiting for process to be frozen again (connect intercepted)..."
+    local elapsed=0
+    local frozen_ok=false
+    while [[ $elapsed -lt 15 ]]; do
+        local pstate
+        pstate=$(awk '/^State:/{print $2}' /proc/"$REAL_PID"/status 2>/dev/null) || true
+        if [[ "$pstate" == "T" ]]; then
+            frozen_ok=true
+            break
+        fi
+        sleep 0.5
+        elapsed=$((elapsed + 1))
+    done
+    if $frozen_ok; then
+        info "Process $REAL_PID is FROZEN again (after memory modification)"
+    else
+        warn "Process $REAL_PID did not freeze within timeout"
+        return
+    fi
+    sleep 0.3
+
+    # Step 6: Verify MODIFIED memory state
+    echo ""
+    step "Step 6: Verifying MODIFIED memory state (should be: counter=9999, message=MODIFIED_BY_SPECULATIVE)..."
+    counter_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$COUNTER_ADDR" int 2>&1) || true
+    msg_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$MESSAGE_ADDR" str 2>&1) || true
+    info "  g_counter = $counter_val (expected: 9999)"
+    info "  g_message = \"$msg_val\" (expected: \"MODIFIED_BY_SPECULATIVE\")"
+
+    if [[ "$counter_val" == "9999" ]]; then
+        info "  ✓ Memory was MODIFIED as expected"
+    else
+        warn "  Counter value unexpected: $counter_val"
+    fi
+
+    # Step 7: ROLLBACK memory (restore_memory_pid — restores without killing)
+    echo ""
+    step "Step 7: >>> Calling restore_memory_pid (COW rollback)..."
+    local rb_resp
+    rb_resp=$(shadowproc_cmd "{\"action\":\"restore_memory_pid\",\"pid\":$REAL_PID}")
+    show_json "$rb_resp"
+
+    # Step 8: Verify RESTORED memory state
+    echo ""
+    step "Step 8: Verifying RESTORED memory state (should be back to: counter=42, message=ORIGINAL)..."
+    counter_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$COUNTER_ADDR" int 2>&1) || true
+    msg_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$MESSAGE_ADDR" str 2>&1) || true
+    info "  g_counter = $counter_val (expected: 42)"
+    info "  g_message = \"$msg_val\" (expected: \"ORIGINAL\")"
+
+    if [[ "$counter_val" == "42" && "$msg_val" == "ORIGINAL" ]]; then
+        echo ""
+        echo -e "  ${GREEN}${BOLD}✓ COW MEMORY ROLLBACK SUCCESSFUL!${NC}"
+        echo -e "  ${GREEN}  Memory was restored from 9999→42, MODIFIED_BY_SPECULATIVE→ORIGINAL${NC}"
+    else
+        echo ""
+        echo -e "  ${RED}✗ Memory rollback may have failed${NC}"
+        echo -e "  ${RED}  counter=$counter_val (expected 42), message=$msg_val (expected ORIGINAL)${NC}"
+    fi
+
+    # Cleanup: kill the process
+    kill -9 "$REAL_PID" 2>/dev/null || true
+    wait "$AGENT_PID" 2>/dev/null || true
+    rm -f "$MARKER_FILE"
+}
 # ──────────────────────────── Main ─────────────────────────────────────────────
 main() {
     banner
@@ -661,6 +810,7 @@ main() {
     scenario_commit
     scenario_rollback
     scenario_cascade
+    scenario_cow_rollback
 
     banner
     echo -e "${BOLD}${GREEN}"
@@ -668,9 +818,10 @@ main() {
     echo -e "${NC}"
     echo ""
     echo "Summary:"
-    echo "  - Scenario 1 (Commit):   File written → IPC frozen → orchestrator resumed process + committed files"
-    echo "  - Scenario 2 (Rollback): File written → IPC frozen → orchestrator rolled back files + killed process"
-    echo "  - Scenario 3 (Cascade):  Agent-A (cgroup-A) writes \u2192 frozen; Agent-B (cgroup-B) reads A's file \u2192 frozen; ROLLBACK A cascades to B \u2192 both files removed + both processes killed"
+    echo "  - Scenario 1 (Commit):       File written → IPC frozen → orchestrator resumed process + committed files"
+    echo "  - Scenario 2 (Rollback):     File written → IPC frozen → orchestrator rolled back files + killed process"
+    echo "  - Scenario 3 (Cascade):      Agent-A writes → Agent-B reads → ROLLBACK A cascades to B"
+    echo "  - Scenario 4 (COW Memory):   Process modifies globals → COW snapshot → rollback restores original memory"
     echo ""
     echo "The orchestrator coordinated both ShadowFS (file layer) and ShadowProc (process layer)"
     echo "through a single Unix socket API."

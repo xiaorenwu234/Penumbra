@@ -22,6 +22,7 @@
 #define EVENT_WRITE_OUT   3
 #define EVENT_SIGNAL      4
 #define EVENT_PTRACE      5
+#define EVENT_FORK        7
 
 // File types
 #define S_IFIFO  0010000
@@ -86,6 +87,15 @@ struct {
     __type(key, __u32);
     __type(value, __u32);
 } allowed_pids SEC(".maps");
+
+// Tracks which cgroups have COW auto-tracking enabled
+// Key: 0, Value: 1 = enabled (all monitored cgroups auto-track forks)
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} cow_enabled SEC(".maps");
 
 static __always_inline int check_cgroup(void)
 {
@@ -418,3 +428,43 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
 }
 
 char LICENSE[] SEC("license") = "GPL";
+
+// ═══════════════════════════════════════════════════════════════
+// Fork tracking - detect new child processes in monitored cgroups
+// for automatic COW tracking
+// ═══════════════════════════════════════════════════════════════
+
+SEC("tp_btf/sched_process_fork")
+int BPF_PROG(shadow_sched_fork, struct task_struct *parent, struct task_struct *child)
+{
+    if (!is_enabled())
+        return 0;
+
+    // Check if COW auto-tracking is enabled
+    __u32 cow_key = 0;
+    __u32 *cow_val = bpf_map_lookup_elem(&cow_enabled, &cow_key);
+    if (!cow_val || *cow_val == 0)
+        return 0;
+
+    // Only track forks from processes within monitored cgroups
+    if (!check_cgroup())
+        return 0;
+
+    // Emit a fork event so userspace can begin COW tracking on the child
+    __u32 child_pid = BPF_CORE_READ(child, pid);
+    __u32 child_tgid = BPF_CORE_READ(child, tgid);
+    __u32 parent_tgid = BPF_CORE_READ(parent, tgid);
+
+    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (e) {
+        e->pid = child_pid;
+        e->tgid = child_tgid;
+        e->syscall_nr = parent_tgid;  // Repurpose: store parent tgid
+        e->event_type = EVENT_FORK;
+        e->timestamp = bpf_ktime_get_ns();
+        bpf_get_current_comm(&e->comm, sizeof(e->comm));
+        bpf_ringbuf_submit(e, 0);
+    }
+
+    return 0;
+}

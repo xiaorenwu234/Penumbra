@@ -84,6 +84,8 @@ pub struct BpfManager {
     cgroup_map_fd: i32,
     /// Raw fd of cgroup_count map
     cgroup_count_fd: i32,
+    /// Raw fd of cow_enabled map
+    cow_enabled_fd: i32,
     /// Number of registered cgroups
     cgroup_next_idx: AtomicU32,
     /// Keep cgroup fds alive
@@ -103,6 +105,7 @@ impl BpfManager {
         let allowed_pids_fd = skel.maps().allowed_pids().as_fd().as_raw_fd();
         let cgroup_map_fd = skel.maps().cgroup_map().as_fd().as_raw_fd();
         let cgroup_count_fd = skel.maps().cgroup_count().as_fd().as_raw_fd();
+        let cow_enabled_fd = skel.maps().cow_enabled().as_fd().as_raw_fd();
 
         // Enable the interceptor
         let key: u32 = 0;
@@ -159,6 +162,7 @@ impl BpfManager {
             allowed_pids_fd,
             cgroup_map_fd,
             cgroup_count_fd,
+            cow_enabled_fd,
             cgroup_next_idx: AtomicU32::new(0),
             cgroup_fds: Mutex::new(Vec::new()),
         };
@@ -237,11 +241,66 @@ impl BpfManager {
         Ok(())
     }
 
+    /// Resume a process (clear stopped state) WITHOUT permanently allowing it.
+    /// The process can be intercepted again on future syscalls.
+    /// Used for speculative execution where we need multiple freeze/resume cycles.
+    ///
+    /// Strategy: temporarily add to allowed_pids (so the restarted -ERESTARTSYS syscall
+    /// passes through), then remove from allowed_pids after 100ms so future syscalls
+    /// (like connect()) are intercepted again.
+    pub fn clear_stopped_only(&self, tgid: u32) -> Result<()> {
+        let key_bytes = tgid.to_ne_bytes();
+
+        unsafe {
+            // Step 1: Add to allowed_pids temporarily (lets restarted syscall pass)
+            let val: u32 = 1;
+            let val_bytes = val.to_ne_bytes();
+            libc_bpf_map_update_elem(
+                self.allowed_pids_fd,
+                key_bytes.as_ptr() as *const _,
+                val_bytes.as_ptr() as *const _,
+            );
+
+            // Step 2: Remove from stopped_pids
+            libc_bpf_map_delete_elem(self.stopped_pids_fd, key_bytes.as_ptr() as *const _);
+        }
+
+        // Step 3: Schedule removal from allowed_pids after a brief delay
+        // (enough time for the restarted syscall to pass through)
+        let allowed_fd = self.allowed_pids_fd;
+        let key_copy = tgid;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let key_bytes = key_copy.to_ne_bytes();
+            unsafe {
+                libc_bpf_map_delete_elem(allowed_fd, key_bytes.as_ptr() as *const _);
+            }
+            eprintln!("[bpf] Removed pid {} from allowed_pids (re-enabling interception)", key_copy);
+        });
+
+        Ok(())
+    }
+
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         if let Some(handle) = self.poll_thread.take() {
             let _ = handle.join();
         }
+    }
+
+    /// Enable or disable COW auto-tracking for fork events in monitored cgroups.
+    pub fn set_cow_enabled(&self, enabled: bool) -> Result<()> {
+        let key: u32 = 0;
+        let val: u32 = if enabled { 1 } else { 0 };
+        unsafe {
+            libc_bpf_map_update_elem(
+                self.cow_enabled_fd,
+                key.to_ne_bytes().as_ptr() as *const _,
+                val.to_ne_bytes().as_ptr() as *const _,
+            );
+        }
+        eprintln!("[+] COW fork auto-tracking: {}", if enabled { "enabled" } else { "disabled" });
+        Ok(())
     }
 }
 

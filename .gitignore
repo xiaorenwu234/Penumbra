@@ -26,7 +26,12 @@ __pycache__/
 demo/test_programs/agent_worker
 demo/test_programs/cgroup_exec
 demo/test_programs/file_reader_writer
+demo/test_programs/mem_modifier
 ShadowFS/tests/__pycache__/
+
+# ===== ShadowObserve =====
+ShadowObserve/build/
+ShadowObserve/third_party/
 
 # ===== OS =====
 .DS_Store

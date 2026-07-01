@@ -9,6 +9,7 @@ use std::fs;
 
 use crate::bpf_loader::BpfManager;
 use crate::event_handler::InterceptEvent;
+use crate::memory_tracker::{MemoryTracker, RollbackStats};
 
 /// State of a frozen process
 #[derive(Debug, Clone)]
@@ -28,6 +29,7 @@ pub struct ProcessManager {
     checkpoint_dir: PathBuf,
     next_checkpoint_id: u32,
     bpf_manager: Arc<BpfManager>,
+    memory_tracker: MemoryTracker,
 }
 
 impl ProcessManager {
@@ -38,6 +40,7 @@ impl ProcessManager {
             checkpoint_dir,
             next_checkpoint_id: 0,
             bpf_manager,
+            memory_tracker: MemoryTracker::new(),
         }
     }
 
@@ -75,6 +78,24 @@ impl ProcessManager {
         // MUST clear the map entry BEFORE sending SIGCONT
         // Otherwise the restarted syscall will be intercepted again
         self.bpf_manager.clear_stopped(pid)?;
+
+        signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT)
+            .with_context(|| format!("Failed to send SIGCONT to pid {}", pid))?;
+
+        self.frozen.remove(&pid);
+        Ok(())
+    }
+
+    /// Resume a frozen process for speculative execution:
+    /// Temporarily allows the process to pass, then re-enables interception.
+    /// This allows the process to be intercepted AGAIN on future syscalls (e.g., connect).
+    pub fn resume_process(&mut self, pid: u32) -> Result<()> {
+        if !self.frozen.contains_key(&pid) {
+            anyhow::bail!("Process {} is not in frozen list", pid);
+        }
+
+        // Use clear_stopped_only which temporarily allows, then re-enables
+        self.bpf_manager.clear_stopped_only(pid)?;
 
         signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT)
             .with_context(|| format!("Failed to send SIGCONT to pid {}", pid))?;
@@ -205,6 +226,182 @@ impl ProcessManager {
             }
         }
         Ok(killed)
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // COW Memory Tracking API
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Begin speculative COW tracking for a frozen process.
+    /// The process must be in SIGSTOP state.
+    pub fn begin_speculative(&mut self, pid: u32) -> Result<()> {
+        self.memory_tracker.begin_tracking(pid)?;
+        // Enable auto-tracking of child processes
+        if !self.memory_tracker.is_auto_track_enabled() {
+            self.memory_tracker.set_auto_track(true);
+            // Enable eBPF fork event reporting
+            self.bpf_manager.set_cow_enabled(true)?;
+        }
+        Ok(())
+    }
+
+    /// Begin speculative COW tracking for all frozen processes in a cgroup.
+    pub fn begin_speculative_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
+        let pids: Vec<u32> = self.frozen.values()
+            .filter(|p| p.cgroup_path == cgroup_path)
+            .map(|p| p.tgid)
+            .collect();
+        let mut tracked = Vec::new();
+        for pid in pids {
+            if self.memory_tracker.begin_tracking(pid).is_ok() {
+                tracked.push(pid);
+            }
+        }
+        // Enable auto-tracking if we tracked at least one process
+        if !tracked.is_empty() && !self.memory_tracker.is_auto_track_enabled() {
+            self.memory_tracker.set_auto_track(true);
+            self.bpf_manager.set_cow_enabled(true)?;
+        }
+        Ok(tracked)
+    }
+
+    /// Rollback a single process's memory and kill it.
+    /// Restores memory pages from the shadow process, then kills the target.
+    pub fn rollback_process(&mut self, pid: u32) -> Result<RollbackStats> {
+        let stats = self.memory_tracker.rollback(pid)?;
+        // After restoring memory, kill the process
+        let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+        self.frozen.remove(&pid);
+        Ok(stats)
+    }
+
+    /// Restore a process's memory only (no kill). Used for verification in demos.
+    /// After calling this, the process is still frozen and can be inspected.
+    pub fn restore_memory_only(&mut self, pid: u32) -> Result<RollbackStats> {
+        self.memory_tracker.rollback(pid)
+    }
+
+    /// Rollback all tracked processes in a cgroup.
+    /// Restores memory and kills each process.
+    pub fn rollback_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<(u32, RollbackStats)>> {
+        let pids: Vec<u32> = self.frozen.values()
+            .filter(|p| p.cgroup_path == cgroup_path)
+            .map(|p| p.tgid)
+            .collect();
+        let mut results = Vec::new();
+        for pid in pids {
+            if self.memory_tracker.is_tracking(pid) {
+                match self.memory_tracker.rollback(pid) {
+                    Ok(stats) => {
+                        let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                        self.frozen.remove(&pid);
+                        results.push((pid, stats));
+                    }
+                    Err(e) => {
+                        eprintln!("[cow] Failed to rollback pid {}: {}", pid, e);
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Commit speculative execution for a process (discard COW shadow).
+    pub fn commit_process(&mut self, pid: u32) -> Result<()> {
+        self.memory_tracker.commit(pid)
+    }
+
+    /// Commit all tracked processes in a cgroup.
+    pub fn commit_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
+        let pids: Vec<u32> = self.frozen.values()
+            .filter(|p| p.cgroup_path == cgroup_path)
+            .map(|p| p.tgid)
+            .collect();
+        let mut committed = Vec::new();
+        for pid in pids {
+            if self.memory_tracker.is_tracking(pid) {
+                if self.memory_tracker.commit(pid).is_ok() {
+                    committed.push(pid);
+                }
+            }
+        }
+        Ok(committed)
+    }
+
+    /// Check if a process is being COW-tracked
+    pub fn is_cow_tracking(&self, pid: u32) -> bool {
+        self.memory_tracker.is_tracking(pid)
+    }
+
+    /// Handle a fork event from eBPF: auto-track the child if parent is tracked.
+    pub fn handle_fork_event(&mut self, parent_tgid: u32, child_tgid: u32) -> Result<bool> {
+        self.memory_tracker.handle_fork_event(parent_tgid, child_tgid)
+    }
+
+    /// Enable or disable COW auto-tracking of child processes.
+    pub fn set_cow_auto_track(&mut self, enabled: bool) {
+        self.memory_tracker.set_auto_track(enabled);
+    }
+
+    /// Check if COW auto-tracking is enabled.
+    pub fn is_cow_auto_track_enabled(&self) -> bool {
+        self.memory_tracker.is_auto_track_enabled()
+    }
+
+    /// Actively freeze (SIGSTOP) all processes in a given cgroup.
+    /// Reads pids from /sys/fs/cgroup/<cgroup_name>/cgroup.procs and sends SIGSTOP.
+    /// Records them in the frozen list for later resume/kill.
+    pub fn freeze_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
+        // Construct the cgroup.procs path from the cgroup_id
+        // cgroup_path is like "/shadow-demo", map to /sys/fs/cgroup/shadow-demo/cgroup.procs
+        let cgroup_dir = if cgroup_path.starts_with('/') {
+            format!("/sys/fs/cgroup{}/cgroup.procs", cgroup_path)
+        } else {
+            format!("/sys/fs/cgroup/{}/cgroup.procs", cgroup_path)
+        };
+
+        let data = fs::read_to_string(&cgroup_dir)
+            .with_context(|| format!("Failed to read cgroup.procs: {}", cgroup_dir))?;
+
+        let mut frozen_pids = Vec::new();
+        for line in data.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let pid: u32 = match line.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            // Skip if already frozen
+            if self.frozen.contains_key(&pid) {
+                continue;
+            }
+
+            // Send SIGSTOP
+            if signal::kill(Pid::from_raw(pid as i32), Signal::SIGSTOP).is_ok() {
+                let cgroup_id = read_process_cgroup(pid)
+                    .unwrap_or_else(|| cgroup_path.to_string());
+                let comm = fs::read_to_string(format!("/proc/{}/comm", pid))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+
+                let frozen = FrozenProcess {
+                    pid,
+                    tgid: pid,
+                    comm,
+                    event: InterceptEvent::dummy_freeze(pid),
+                    checkpoint_path: None,
+                    cgroup_path: cgroup_id,
+                };
+                self.frozen.insert(pid, frozen);
+                frozen_pids.push(pid);
+            }
+        }
+
+        Ok(frozen_pids)
     }
 }
 

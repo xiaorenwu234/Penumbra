@@ -3,6 +3,7 @@
 mod bpf_loader;
 mod cli;
 mod event_handler;
+mod memory_tracker;
 mod process_manager;
 mod socket_server;
 
@@ -18,7 +19,7 @@ use std::time::Duration;
 
 use bpf_loader::BpfManager;
 use cli::Cli;
-use event_handler::InterceptEvent;
+use event_handler::{EventType, InterceptEvent};
 use process_manager::ProcessManager;
 use socket_server::SocketServer;
 
@@ -141,8 +142,26 @@ fn main() -> Result<()> {
         // Check for new events (non-blocking)
         if let Ok(event) = event_rx.try_recv() {
             let mut pm = process_manager.lock().unwrap();
-            eprintln!("\n\x1b[1;31m[INTERCEPTED]\x1b[0m {}", event);
-            pm.record_frozen(event);
+
+            match event.event_type_enum() {
+                EventType::Fork => {
+                    // Fork event: auto-track child if parent is tracked
+                    if let Some(parent_tgid) = event.parent_tgid() {
+                        let child_tgid = event.tgid;
+                        eprintln!(
+                            "\n\x1b[1;36m[FORK]\x1b[0m parent={} child={} comm={}",
+                            parent_tgid, child_tgid, event.comm_str()
+                        );
+                        let _ = pm.handle_fork_event(parent_tgid, child_tgid);
+                    }
+                }
+                _ => {
+                    // Normal interception event
+                    eprintln!("\n\x1b[1;31m[INTERCEPTED]\x1b[0m {}", event);
+                    pm.record_frozen(event);
+                }
+            }
+
             eprint!("shadow-proc> ");
             io::stderr().flush().ok();
         }

@@ -21,6 +21,7 @@ pub enum EventType {
     Signal,
     Ptrace,
     PipeWrite,
+    Fork,
     Unknown,
 }
 
@@ -33,6 +34,7 @@ impl From<u32> for EventType {
             4 => EventType::Signal,
             5 => EventType::Ptrace,
             6 => EventType::PipeWrite,
+            7 => EventType::Fork,
             _ => EventType::Unknown,
         }
     }
@@ -47,6 +49,7 @@ impl fmt::Display for EventType {
             EventType::Signal => write!(f, "SIGNAL"),
             EventType::Ptrace => write!(f, "PTRACE"),
             EventType::PipeWrite => write!(f, "PIPE/FIFO"),
+            EventType::Fork => write!(f, "FORK"),
             EventType::Unknown => write!(f, "UNKNOWN"),
         }
     }
@@ -57,6 +60,18 @@ impl InterceptEvent {
     pub fn comm_str(&self) -> String {
         let end = self.comm.iter().position(|&c| c == 0).unwrap_or(16);
         String::from_utf8_lossy(&self.comm[..end]).to_string()
+    }
+
+    /// Create a dummy event for active freeze (not triggered by eBPF interception)
+    pub fn dummy_freeze(pid: u32) -> Self {
+        InterceptEvent {
+            pid,
+            tgid: pid,
+            syscall_nr: 0,
+            event_type: 0, // Unknown - active freeze
+            timestamp: 0,
+            comm: [0u8; 16],
+        }
     }
 
     /// Get the event type enum
@@ -86,7 +101,23 @@ impl InterceptEvent {
             200 => "tkill",
             234 => "tgkill",
             101 => "ptrace",
-            _ => "unknown",
+            _ => {
+                // For fork events, syscall_nr stores parent tgid
+                if self.event_type == 7 {
+                    "fork"
+                } else {
+                    "unknown"
+                }
+            }
+        }
+    }
+
+    /// For fork events: get the parent tgid (stored in syscall_nr field)
+    pub fn parent_tgid(&self) -> Option<u32> {
+        if self.event_type == 7 {
+            Some(self.syscall_nr)
+        } else {
+            None
         }
     }
 }
