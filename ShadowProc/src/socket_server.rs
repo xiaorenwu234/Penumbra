@@ -274,6 +274,29 @@ impl SocketServer {
                 }
             }
 
+            "list_completed" => {
+                let pm = process_manager.lock().unwrap();
+                let filter_cgroup = req.cgroup_id.as_deref();
+                let completed: Vec<FrozenInfo> = pm.list_frozen().iter()
+                    .filter(|p| p.event.event_type == 8) // EVENT_EXIT_HOLD
+                    .filter(|p| filter_cgroup.map_or(true, |cg| p.cgroup_path == cg))
+                    .map(|p| FrozenInfo {
+                        pid: p.pid,
+                        tgid: p.tgid,
+                        comm: p.comm.clone(),
+                        cgroup: p.cgroup_path.clone(),
+                        event_type: format!("{}", p.event.event_type_enum()),
+                        syscall: p.event.syscall_name().to_string(),
+                    }).collect();
+                Response {
+                    status: "ok".into(),
+                    message: None,
+                    frozen: Some(completed),
+                    pids: None,
+                    rollback_stats: None,
+                }
+            }
+
             "continue_by_cgroup" => {
                 let Some(cgroup_id) = &req.cgroup_id else {
                     return Response {

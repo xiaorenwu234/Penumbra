@@ -23,6 +23,7 @@
 #define EVENT_SIGNAL      4
 #define EVENT_PTRACE      5
 #define EVENT_FORK        7
+#define EVENT_EXIT_HOLD   8
 
 // File types
 #define S_IFIFO  0010000
@@ -181,12 +182,30 @@ static __always_inline void do_intercept(__u32 syscall_nr, __u32 event_type)
 // ═══════════════════════════════════════════════════════════════
 
 // --- Network: connect ---
+// Also detects exit-hold sentinel (192.0.2.255:65535) and tags as EVENT_EXIT_HOLD
 SEC("lsm/socket_connect")
 int BPF_PROG(shadow_socket_connect, struct socket *sock,
              struct sockaddr *address, int addrlen)
 {
     if (!should_intercept())
         return 0;
+
+    // Check for exit-hold sentinel address: 192.0.2.255:65535
+    // This is used by libexithold.so (LD_PRELOAD) to signal process completion
+    if (addrlen >= 16) { // sizeof(struct sockaddr_in)
+        __u16 family = 0;
+        __u16 port = 0;
+        __u32 ip = 0;
+        bpf_probe_read_kernel(&family, 2, (void *)address);
+        bpf_probe_read_kernel(&port, 2, (void *)address + 2);
+        bpf_probe_read_kernel(&ip, 4, (void *)address + 4);
+        // AF_INET=2, port=65535 (0xFFFF in network order), ip=192.0.2.255 (0xFF0200C0 on LE)
+        if (family == 2 && port == 0xFFFF && ip == 0xFF0200C0) {
+            do_intercept(231, EVENT_EXIT_HOLD);
+            return -ERESTARTSYS;
+        }
+    }
+
     do_intercept(42, EVENT_NETWORK);
     return -ERESTARTSYS;
 }

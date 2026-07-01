@@ -85,6 +85,8 @@ AGENT_WORKER="$DEMO_DIR/test_programs/agent_worker"
 FILE_RW="$DEMO_DIR/test_programs/file_reader_writer"
 CGROUP_EXEC="$DEMO_DIR/test_programs/cgroup_exec"
 MEM_MODIFIER="$DEMO_DIR/test_programs/mem_modifier"
+LIBEXITHOLD="$DEMO_DIR/test_programs/libexithold.so"
+CGROUP_EXEC_HOLD="$DEMO_DIR/test_programs/cgroup_exec_hold"
 READ_PROC_MEM="$DEMO_DIR/test_programs/read_proc_mem.py"
 
 # ──────────────────────────── Colors ───────────────────────────────────────────
@@ -235,7 +237,9 @@ build() {
     gcc -o "$FILE_RW" "$DEMO_DIR/test_programs/file_reader_writer.c" -Wall
     gcc -o "$CGROUP_EXEC" "$DEMO_DIR/test_programs/cgroup_exec.c" -Wall
     gcc -o "$MEM_MODIFIER" "$DEMO_DIR/test_programs/mem_modifier.c" -Wall
-    info "Test programs built: agent_worker, file_reader_writer, cgroup_exec, mem_modifier"
+    gcc -shared -fPIC -o "$LIBEXITHOLD" "$DEMO_DIR/test_programs/exit_hold_lib.c" -Wall
+    gcc -o "$CGROUP_EXEC_HOLD" "$DEMO_DIR/test_programs/cgroup_exec_hold.c" -Wall
+    info "Test programs built: agent_worker, file_reader_writer, cgroup_exec, cgroup_exec_hold, mem_modifier, libexithold.so"
 
     # ShadowFS
     step "Building ShadowFS..."
@@ -785,10 +789,130 @@ scenario_cow_rollback() {
         echo -e "  ${RED}  counter=$counter_val (expected 42), message=$msg_val (expected ORIGINAL)${NC}"
     fi
 
-    # Cleanup: kill the process
-    kill -9 "$REAL_PID" 2>/dev/null || true
+    # Cleanup: kill the process via ShadowProc API (removes from frozen list)
+    shadowproc_cmd "{\"action\":\"kill_pid\",\"pid\":$REAL_PID}" >/dev/null 2>&1 || true
     wait "$AGENT_PID" 2>/dev/null || true
     rm -f "$MARKER_FILE"
+}
+
+# ──────────────────────────── Scenario 5: Exit Hold ─────────────────
+
+scenario_exit_hold() {
+    banner
+    section "Scenario 5: EXIT HOLD (transparent to caller)"
+    echo -e "  ${YELLOW}cgroup_exec_hold launches agent → IPC freeze → resume → agent completes → HELD at exit${NC}"
+    echo -e "  ${YELLOW}But the CALLER (this script) sees normal exit! It doesn't know the process is held.${NC}"
+    echo -e "  ${YELLOW}Mechanism: fork + eventfd notification + LD_PRELOAD destructor + sentinel connect${NC}"
+    echo ""
+
+    local CGROUP_ID
+    CGROUP_ID=$(get_cgroup_id)
+    info "Expected cgroup ID: $CGROUP_ID"
+
+    # Step 1: Launch agent via cgroup_exec_hold in BACKGROUND
+    # cgroup_exec_hold will return to the caller when agent finishes work,
+    # but the actual agent process remains held.
+    step "Step 1: Starting agent via cgroup_exec_hold (transparent hold)..."
+    "$CGROUP_EXEC_HOLD" "$CGROUP_PATH/cgroup.procs" "$LIBEXITHOLD" \
+        "$AGENT_WORKER" "$MNT_DIR" "exit_hold_test.txt" "exit-hold-data" &
+    local WRAPPER_PID=$!
+    info "cgroup_exec_hold started (wrapper PID $WRAPPER_PID)"
+
+    # Step 2: Wait for first freeze (agent's own connect triggers IPC intercept)
+    step "Step 2: Waiting for agent to be frozen (IPC - agent's connect())..."
+    sleep 1
+    # Find the real agent PID (child of wrapper, in cgroup, state T)
+    local REAL_PID=""
+    if [[ -r "$CGROUP_PATH/cgroup.procs" ]]; then
+        while IFS= read -r cg_pid; do
+            [[ -z "$cg_pid" ]] && continue
+            [[ "$cg_pid" == "$WRAPPER_PID" ]] && continue
+            local pstate
+            pstate=$(awk '/^State:/{print $2}' /proc/"$cg_pid"/status 2>/dev/null) || true
+            if [[ "$pstate" == "T" ]]; then
+                REAL_PID="$cg_pid"
+                break
+            fi
+        done < "$CGROUP_PATH/cgroup.procs"
+    fi
+    if [[ -z "$REAL_PID" ]]; then
+        warn "Could not find frozen agent PID"
+        wait "$WRAPPER_PID" 2>/dev/null || true
+        return
+    fi
+    info "Agent is FROZEN (PID $REAL_PID, first freeze - IPC intercept)"
+
+    # Step 3: Resume with resume_pid (NOT continue - so exit-hold will fire)
+    echo ""
+    step "Step 3: Resuming with resume_pid (temporary allow - exit-hold will fire later)..."
+    local resume_resp
+    resume_resp=$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$REAL_PID}")
+    show_json "$resume_resp"
+
+    # Step 4: Wait for wrapper to EXIT (proves caller sees normal completion)
+    step "Step 4: Waiting for cgroup_exec_hold to return (caller's perspective)..."
+    local wait_exit_code=0
+    wait "$WRAPPER_PID" || wait_exit_code=$?
+    info "cgroup_exec_hold returned with exit code $wait_exit_code"
+    echo -e "  ${GREEN}${BOLD}  → CALLER SEES NORMAL EXIT! (no blocking, no awareness of hold)${NC}"
+
+    # Step 5: But the real process is STILL ALIVE and HELD!
+    echo ""
+    step "Step 5: Checking if agent process is still alive and held..."
+    sleep 0.3
+    local pstate
+    pstate=$(awk '/^State:/{print $2}' /proc/"$REAL_PID"/status 2>/dev/null) || true
+    if [[ "$pstate" == "T" ]]; then
+        info "Process $REAL_PID is STILL ALIVE, state=T (stopped/held)!"
+        info "Caller exited normally but the real process is transparently held."
+    else
+        warn "Process state is '$pstate' (expected T)"
+    fi
+
+    # Step 6: Query list_completed to confirm EXIT_HOLD
+    step "Step 6: Querying list_completed (should show EXIT_HOLD event)..."
+    local completed_resp
+    completed_resp=$(shadowproc_cmd "{\"action\":\"list_completed\",\"cgroup_id\":\"$CGROUP_ID\"}")
+    show_json "$completed_resp"
+
+    # Step 7: Verify file was written
+    step "Step 7: Verifying agent completed its work (file should exist in mount)..."
+    if [[ -f "$MNT_DIR/exit_hold_test.txt" ]]; then
+        info "exit_hold_test.txt exists: $(cat "$MNT_DIR/exit_hold_test.txt")"
+    else
+        warn "exit_hold_test.txt not found"
+    fi
+
+    # Step 8: COMMIT - let process exit + persist files
+    echo ""
+    step "Step 8: >>> COMMIT (continue_process to allow exit + commit files)..."
+    local commit_resp
+    commit_resp=$(python3 "$ORCH_CLIENT" "$ORCH_SOCK" commit "cgroup_id=$CGROUP_ID" 2>&1)
+    show_json "$commit_resp"
+
+    # Step 9: Wait for process to actually exit
+    step "Step 9: Waiting for held process to exit (now permanently allowed)..."
+    sleep 1
+    if [[ -d "/proc/$REAL_PID" ]]; then
+        warn "Process $REAL_PID still alive after commit"
+    else
+        info "Process $REAL_PID exited normally after commit"
+    fi
+
+    # Step 10: Verify commit
+    echo ""
+    step "Step 10: Post-commit verification:"
+    if [[ -f "$ORIG_DIR/exit_hold_test.txt" ]]; then
+        info "exit_hold_test.txt COMMITTED to orig: $(cat "$ORIG_DIR/exit_hold_test.txt")"
+        echo ""
+        echo -e "  ${GREEN}${BOLD}✓ EXIT HOLD + TRANSPARENT CALLER RETURN SUCCESSFUL!${NC}"
+        echo -e "  ${GREEN}  Caller returned immediately → process still held → commit → exited normally${NC}"
+    else
+        warn "exit_hold_test.txt NOT in orig (commit may have failed)"
+    fi
+
+    # Cleanup
+    rm -f "$ORIG_DIR/exit_hold_test.txt" 2>/dev/null || true
 }
 # ──────────────────────────── Main ─────────────────────────────────────────────
 main() {
@@ -811,6 +935,7 @@ main() {
     scenario_rollback
     scenario_cascade
     scenario_cow_rollback
+    scenario_exit_hold
 
     banner
     echo -e "${BOLD}${GREEN}"
@@ -822,6 +947,7 @@ main() {
     echo "  - Scenario 2 (Rollback):     File written → IPC frozen → orchestrator rolled back files + killed process"
     echo "  - Scenario 3 (Cascade):      Agent-A writes → Agent-B reads → ROLLBACK A cascades to B"
     echo "  - Scenario 4 (COW Memory):   Process modifies globals → COW snapshot → rollback restores original memory"
+    echo "  - Scenario 5 (Exit Hold):    Agent completes execution → held at exit → commit lets process exit normally"
     echo ""
     echo "The orchestrator coordinated both ShadowFS (file layer) and ShadowProc (process layer)"
     echo "through a single Unix socket API."

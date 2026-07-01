@@ -248,6 +248,20 @@ class ShadowOrchestrator:
         })
         return resp.get("affected", [])
 
+    def list_completed(self, cgroup_id: Optional[str] = None) -> List[dict]:
+        """
+        List processes that have completed execution and are being held
+        (frozen at exit_group syscall, awaiting commit/rollback decision).
+
+        Args:
+            cgroup_id: Optional cgroup filter
+        """
+        req = {"action": "list_completed"}
+        if cgroup_id:
+            req["cgroup_id"] = cgroup_id
+        resp = self.proc_client.request(req)
+        return resp.get("frozen", [])
+
     # ──────────────────────────────────────────────────────────────────────
     # ShadowObserve integration
     # ──────────────────────────────────────────────────────────────────────
@@ -638,6 +652,10 @@ class OrchestratorServer:
             elif action == "list_frozen":
                 frozen = self.orch.list_frozen(cgroup_id or None)
                 return {"status": "ok", "frozen": frozen}
+
+            elif action == "list_completed":
+                completed = self.orch.list_completed(cgroup_id or None)
+                return {"status": "ok", "completed": completed}
 
             elif action == "get_affected":
                 if not cgroup_id:

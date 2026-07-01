@@ -22,6 +22,7 @@ pub enum EventType {
     Ptrace,
     PipeWrite,
     Fork,
+    ExitHold,
     Unknown,
 }
 
@@ -35,6 +36,7 @@ impl From<u32> for EventType {
             5 => EventType::Ptrace,
             6 => EventType::PipeWrite,
             7 => EventType::Fork,
+            8 => EventType::ExitHold,
             _ => EventType::Unknown,
         }
     }
@@ -50,6 +52,7 @@ impl fmt::Display for EventType {
             EventType::Ptrace => write!(f, "PTRACE"),
             EventType::PipeWrite => write!(f, "PIPE/FIFO"),
             EventType::Fork => write!(f, "FORK"),
+            EventType::ExitHold => write!(f, "EXIT_HOLD"),
             EventType::Unknown => write!(f, "UNKNOWN"),
         }
     }
@@ -101,6 +104,7 @@ impl InterceptEvent {
             200 => "tkill",
             234 => "tgkill",
             101 => "ptrace",
+            231 => "exit_group",
             _ => {
                 // For fork events, syscall_nr stores parent tgid
                 if self.event_type == 7 {
