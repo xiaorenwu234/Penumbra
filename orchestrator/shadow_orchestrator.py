@@ -510,6 +510,7 @@ class ShadowOrchestrator:
             "CHMOD": 5, "CHOWN": 6, "MKDIR": 7, "RMDIR": 8,
             "LINK": 9, "SYMLINK": 10, "TRUNCATE": 11,
             "EXEC": 100, "FORK": 101, "EXIT": 102, "KILL": 103,
+            "SETUID": 106, "CAPSET": 107, "EXEC_PRIV": 108,
             "*": -1, "ANY": -1,
         }
         rules = []
@@ -537,6 +538,7 @@ class ShadowOrchestrator:
             "CHMOD": 5, "CHOWN": 6, "MKDIR": 7, "RMDIR": 8,
             "LINK": 9, "SYMLINK": 10, "TRUNCATE": 11,
             "EXEC": 100, "FORK": 101, "EXIT": 102, "KILL": 103,
+            "SETUID": 106, "CAPSET": 107, "EXEC_PRIV": 108,
             "*": 0xFFFF, "ANY": 0xFFFF,
         }
         whitelist = []

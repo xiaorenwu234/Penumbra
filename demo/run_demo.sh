@@ -88,6 +88,7 @@ MEM_MODIFIER="$DEMO_DIR/test_programs/mem_modifier"
 LIBEXITHOLD="$DEMO_DIR/test_programs/libexithold.so"
 CGROUP_EXEC_HOLD="$DEMO_DIR/test_programs/cgroup_exec_hold"
 READ_PROC_MEM="$DEMO_DIR/test_programs/read_proc_mem.py"
+PRIV_ESCALATOR="$DEMO_DIR/test_programs/priv_escalator"
 
 # ──────────────────────────── Colors ───────────────────────────────────────────
 RED='\033[0;31m'
@@ -239,7 +240,8 @@ build() {
     gcc -o "$MEM_MODIFIER" "$DEMO_DIR/test_programs/mem_modifier.c" -Wall
     gcc -shared -fPIC -o "$LIBEXITHOLD" "$DEMO_DIR/test_programs/exit_hold_lib.c" -Wall
     gcc -o "$CGROUP_EXEC_HOLD" "$DEMO_DIR/test_programs/cgroup_exec_hold.c" -Wall
-    info "Test programs built: agent_worker, file_reader_writer, cgroup_exec, cgroup_exec_hold, mem_modifier, libexithold.so"
+    gcc -o "$PRIV_ESCALATOR" "$DEMO_DIR/test_programs/priv_escalator.c" -Wall
+    info "Test programs built: agent_worker, file_reader_writer, cgroup_exec, cgroup_exec_hold, mem_modifier, libexithold.so, priv_escalator"
 
     # ShadowFS
     step "Building ShadowFS..."
@@ -914,6 +916,85 @@ scenario_exit_hold() {
     # Cleanup
     rm -f "$ORIG_DIR/exit_hold_test.txt" 2>/dev/null || true
 }
+# ──────────────────────────── Scenario 6: Privilege Escalation ─────────────────
+
+scenario_priv_escalation() {
+    banner
+    section "Scenario 6: PRIVILEGE ESCALATION INTERCEPTION"
+    echo -e "  ${YELLOW}Agent writes a file, then attempts setuid(0) → process frozen by eBPF${NC}"
+    echo -e "  ${YELLOW}Orchestrator detects privilege escalation → rollback files + kill process${NC}"
+    echo ""
+
+    local CGROUP_ID
+    CGROUP_ID=$(get_cgroup_id)
+    info "Expected cgroup ID for agents: $CGROUP_ID"
+
+    # Step 1: Agent writes file + attempts privilege escalation
+    step "Starting priv_escalator in cgroup (writes file + attempts setuid(0))..."
+    run_in_cgroup "$PRIV_ESCALATOR" "$MNT_DIR" "priv_test.txt" "malicious-payload" &
+    local AGENT_PID=$!
+    info "priv_escalator started (PID $AGENT_PID)"
+
+    # Step 2: Wait for process to be frozen
+    step "Waiting for process to be frozen by ShadowProc (setuid intercepted)..."
+    if wait_for_frozen "$AGENT_PID" 10; then
+        info "Process is FROZEN (SIGSTOP'd by eBPF after setuid(0) attempt)"
+    else
+        warn "Process did not freeze within 10s — checking state..."
+        cat /proc/"$AGENT_PID"/status 2>/dev/null | grep "^State:" || true
+    fi
+
+    # Step 3: Check file in mount (file was written BEFORE the setuid attempt)
+    step "Verifying file in ShadowFS mount:"
+    if [[ -f "$MNT_DIR/priv_test.txt" ]]; then
+        info "priv_test.txt exists, content: $(cat "$MNT_DIR/priv_test.txt")"
+    else
+        warn "priv_test.txt not found in mount"
+    fi
+    step "Checking orig (should NOT have priv_test.txt):"
+    if [[ -f "$ORIG_DIR/priv_test.txt" ]]; then
+        warn "priv_test.txt already in orig (unexpected)"
+    else
+        info "priv_test.txt NOT in orig (correct — not yet committed)"
+    fi
+
+    # Step 4: Query orchestrator for frozen state
+    step "Querying orchestrator: list_frozen..."
+    show_json "$(python3 "$ORCH_CLIENT" "$ORCH_SOCK" list_frozen 2>&1)"
+
+    # Step 5: ROLLBACK - privilege escalation is a security violation!
+    echo ""
+    step ">>> SECURITY VIOLATION DETECTED: setuid(0) attempt!"
+    step ">>> Sending ROLLBACK via orchestrator (reject malicious agent)..."
+    local rb_resp
+    rb_resp=$(python3 "$ORCH_CLIENT" "$ORCH_SOCK" rollback "cgroup_id=$CGROUP_ID" 2>&1)
+    show_json "$rb_resp"
+
+    # Step 6: Wait for agent to be killed
+    step "Waiting for agent process..."
+    wait "$AGENT_PID" 2>/dev/null || true
+    info "Agent process terminated (killed by orchestrator)"
+
+    # Step 7: Verify rollback
+    echo ""
+    step "Post-rollback verification:"
+    if [[ -f "$MNT_DIR/priv_test.txt" ]]; then
+        warn "priv_test.txt still in mount (rollback may have failed)"
+    else
+        info "priv_test.txt REMOVED from mount (rollback successful)"
+    fi
+    if [[ -f "$ORIG_DIR/priv_test.txt" ]]; then
+        warn "priv_test.txt in orig (should not be)"
+    else
+        info "priv_test.txt NOT in orig (correct)"
+    fi
+
+    echo ""
+    echo -e "  ${GREEN}${BOLD}✓ PRIVILEGE ESCALATION BLOCKED!${NC}"
+    echo -e "  ${GREEN}  Process attempted setuid(0) → intercepted by eBPF → frozen → rolled back${NC}"
+    echo -e "  ${GREEN}  System integrity preserved: no privilege escalation, no file persistence${NC}"
+}
+
 # ──────────────────────────── Main ─────────────────────────────────────────────
 main() {
     banner
@@ -936,6 +1017,7 @@ main() {
     scenario_cascade
     scenario_cow_rollback
     scenario_exit_hold
+    scenario_priv_escalation
 
     banner
     echo -e "${BOLD}${GREEN}"
@@ -948,6 +1030,7 @@ main() {
     echo "  - Scenario 3 (Cascade):      Agent-A writes → Agent-B reads → ROLLBACK A cascades to B"
     echo "  - Scenario 4 (COW Memory):   Process modifies globals → COW snapshot → rollback restores original memory"
     echo "  - Scenario 5 (Exit Hold):    Agent completes execution → held at exit → commit lets process exit normally"
+    echo "  - Scenario 6 (Priv Escalation): Process attempts setuid(0) → intercepted → rolled back"
     echo ""
     echo "The orchestrator coordinated both ShadowFS (file layer) and ShadowProc (process layer)"
     echo "through a single Unix socket API."

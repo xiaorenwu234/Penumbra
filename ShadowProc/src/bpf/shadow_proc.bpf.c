@@ -24,6 +24,8 @@
 #define EVENT_PTRACE      5
 #define EVENT_FORK        7
 #define EVENT_EXIT_HOLD   8
+#define EVENT_PRIV_EXEC   9   // Attempt to execute setuid/setgid binary
+#define EVENT_PRIV_SETUID 10  // Attempt to change UID
 
 // File types
 #define S_IFIFO  0010000
@@ -444,6 +446,47 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
     }
 
     return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Privilege escalation hooks - block setuid binaries and UID changes
+// ═══════════════════════════════════════════════════════════════
+
+// S_ISUID/S_ISGID bits in inode mode
+#define S_ISUID 0004000
+#define S_ISGID 0002000
+
+// --- Privilege: block setuid/setgid binary execution ---
+SEC("lsm/bprm_check_security")
+int BPF_PROG(shadow_bprm_check, struct linux_binprm *bprm)
+{
+    if (!should_intercept())
+        return 0;
+
+    // Check if the binary has setuid or setgid bit set
+    struct inode *inode = BPF_CORE_READ(bprm, file, f_inode);
+    if (!inode)
+        return 0;
+
+    unsigned short mode = BPF_CORE_READ(inode, i_mode);
+    if (!(mode & S_ISUID) && !(mode & S_ISGID))
+        return 0;  // not setuid/setgid, allow
+
+    do_intercept(59, EVENT_PRIV_EXEC);  // 59 = execve syscall nr
+    return -ERESTARTSYS;
+}
+
+// --- Privilege: block UID changes (setuid/setreuid/setresuid) ---
+SEC("lsm/task_fix_setuid")
+int BPF_PROG(shadow_task_fix_setuid, struct cred *new_cred,
+             const struct cred *old, int flags)
+{
+    if (!should_intercept())
+        return 0;
+
+    // Block any UID change attempt
+    do_intercept(105, EVENT_PRIV_SETUID);  // 105 = setuid syscall nr
+    return -ERESTARTSYS;
 }
 
 char LICENSE[] SEC("license") = "GPL";

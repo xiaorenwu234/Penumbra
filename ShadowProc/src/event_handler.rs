@@ -23,6 +23,8 @@ pub enum EventType {
     PipeWrite,
     Fork,
     ExitHold,
+    PrivExec,
+    PrivSetuid,
     Unknown,
 }
 
@@ -37,6 +39,8 @@ impl From<u32> for EventType {
             6 => EventType::PipeWrite,
             7 => EventType::Fork,
             8 => EventType::ExitHold,
+            9 => EventType::PrivExec,
+            10 => EventType::PrivSetuid,
             _ => EventType::Unknown,
         }
     }
@@ -53,6 +57,8 @@ impl fmt::Display for EventType {
             EventType::PipeWrite => write!(f, "PIPE/FIFO"),
             EventType::Fork => write!(f, "FORK"),
             EventType::ExitHold => write!(f, "EXIT_HOLD"),
+            EventType::PrivExec => write!(f, "PRIV_EXEC"),
+            EventType::PrivSetuid => write!(f, "PRIV_SETUID"),
             EventType::Unknown => write!(f, "UNKNOWN"),
         }
     }
@@ -103,7 +109,9 @@ impl InterceptEvent {
             62 => "kill",
             200 => "tkill",
             234 => "tgkill",
+            59 => "execve",
             101 => "ptrace",
+            105 => "setuid",
             231 => "exit_group",
             _ => {
                 // For fork events, syscall_nr stores parent tgid
