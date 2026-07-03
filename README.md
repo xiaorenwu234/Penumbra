@@ -1,7 +1,5 @@
 # Penumbra
 
-> 原名 Speculative Shadow，项目已正式更名为 **Penumbra**。
-
 统一的推测执行（Speculative Execution）框架，将 **ShadowFS**（文件系统层）、**ShadowProc**（进程层）和 **ShadowObserve**（观测与执行层）整合为一个协调系统，对 cgroup 中进程的文件操作、进程间通信和系统调用进行拦截、审计、提交与回滚。
 
 ## 架构概览
