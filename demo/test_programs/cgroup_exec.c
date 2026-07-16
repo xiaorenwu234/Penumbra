@@ -40,10 +40,20 @@ int main(int argc, char *argv[]) {
     }
     close(fd);
 
-    /* Now we're in the cgroup. exec the command.
-     * This program wrote NOTHING to stdout/stderr while in the cgroup,
-     * so ShadowProc's BPF hook never intercepted us.
-     * After exec, the new program inherits fds 0/1/2 from the parent. */
+    /* Now we're in the cgroup.
+     * If SHADOW_OUTPUT_FILE is set, redirect stdout/stderr to that file
+     * so the output is buffered (not visible until orchestrator commits).
+     * If not set, behavior is unchanged (backward compatible). */
+    const char *output_file = getenv("SHADOW_OUTPUT_FILE");
+    if (output_file) {
+        int out_fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (out_fd >= 0) {
+            dup2(out_fd, 1);  /* stdout */
+            dup2(out_fd, 2);  /* stderr */
+            close(out_fd);
+        }
+    }
+
     execvp(argv[2], &argv[2]);
 
     /* If exec fails, we're still in the cgroup — avoid fprintf to stdout.

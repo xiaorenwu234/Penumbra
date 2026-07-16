@@ -219,8 +219,15 @@ setup_env() {
 }
 
 # ──────────────────────────── Helpers ──────────────────────────────────────────
+SHADOW_OUTPUT_DIR="${SHADOW_OUTPUT_DIR:-/tmp/shadow-demo-full-outputs}"
 run_in_cgroup() {
-    "$CGROUP_EXEC" "$CGROUP_PATH/cgroup.procs" "$@"
+    mkdir -p "$SHADOW_OUTPUT_DIR"
+    local output_file="$SHADOW_OUTPUT_DIR/stdout-$$-$RANDOM"
+    : > "$output_file"
+    local cg_id="${SHADOW_CGROUP_ID_OVERRIDE:-/$CGROUP_NAME}"
+    python3 "$ORCH_CLIENT" "$ORCH_SOCK" register_output \
+        "cgroup_id=$cg_id" "output_file=$output_file" >/dev/null 2>&1 || true
+    SHADOW_OUTPUT_FILE="$output_file" "$CGROUP_EXEC" "$CGROUP_PATH/cgroup.procs" "$@"
 }
 
 get_cgroup_id() {

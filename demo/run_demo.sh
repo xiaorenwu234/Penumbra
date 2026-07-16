@@ -65,6 +65,7 @@ ORCH_CLIENT="$DEMO_DIR/orch_client.py"
 ORIG_DIR="/tmp/shadow-demo-orig"
 MNT_DIR="/tmp/shadow-demo-mnt"
 STAGING_DIR="/tmp/shadow-demo-staging"
+SHADOW_OUTPUT_DIR="/tmp/shadow-demo-outputs"
 CGROUP_NAME="shadow-demo"
 CGROUP_PATH="/sys/fs/cgroup/$CGROUP_NAME"
 CGROUP_NAME_B="shadow-demo-b"
@@ -166,7 +167,7 @@ cleanup() {
     fi
 
     # Remove temp files
-    rm -rf "$ORIG_DIR" "$MNT_DIR" "$STAGING_DIR"
+    rm -rf "$ORIG_DIR" "$MNT_DIR" "$STAGING_DIR" "$SHADOW_OUTPUT_DIR"
     rm -f "$SHADOWFS_SOCK" "$SHADOWPROC_SOCK" "$ORCH_SOCK"
 
     info "Cleanup complete."
@@ -330,21 +331,37 @@ setup_env() {
 run_in_cgroup() {
     # Usage: run_in_cgroup <command> [args...]
     #
-    # ShadowProc intercepts write() to stdout/stderr (fd 1/2) for all processes
-    # in the monitored cgroup. Bash wrappers get frozen because bash internally
-    # writes to stdout (job control, etc.) even after redirection.
+    # ShadowProc no longer intercepts write() to stdout/stderr (fd 1/2);
+    # instead we redirect stdout/stderr to a per-agent buffer file via
+    # SHADOW_OUTPUT_FILE. The orchestrator releases the buffered output on
+    # commit and discards it on rollback.
     #
-    # Fix: use a minimal C program (cgroup_exec) that:
-    #   1. Writes NOTHING to stdout/stderr
+    # cgroup_exec:
+    #   1. Writes NOTHING to stdout/stderr itself
     #   2. Moves itself into the cgroup via cgroup.procs
-    #   3. exec()s the target command
-    # This ensures no BPF interception before exec.
-    "$CGROUP_EXEC" "$CGROUP_PATH/cgroup.procs" "$@"
+    #   3. Redirects fd 1/2 to $SHADOW_OUTPUT_FILE (if set)
+    #   4. exec()s the target command
+    mkdir -p "$SHADOW_OUTPUT_DIR"
+    local output_file="$SHADOW_OUTPUT_DIR/stdout-$$-$RANDOM"
+    : > "$output_file"
+    # Register the buffer with the orchestrator (best-effort).
+    local cg_id
+    cg_id="${SHADOW_CGROUP_ID_OVERRIDE:-/$CGROUP_NAME}"
+    python3 "$ORCH_CLIENT" "$ORCH_SOCK" register_output \
+        "cgroup_id=$cg_id" "output_file=$output_file" >/dev/null 2>&1 || true
+    SHADOW_OUTPUT_FILE="$output_file" "$CGROUP_EXEC" "$CGROUP_PATH/cgroup.procs" "$@"
 }
 
 run_in_cgroup_b() {
     # Same as run_in_cgroup but for Agent-B's separate cgroup (cross-agent cascade demo).
-    "$CGROUP_EXEC" "$CGROUP_PATH_B/cgroup.procs" "$@"
+    mkdir -p "$SHADOW_OUTPUT_DIR"
+    local output_file="$SHADOW_OUTPUT_DIR/stdout-b-$$-$RANDOM"
+    : > "$output_file"
+    local cg_id
+    cg_id="${SHADOW_CGROUP_ID_B_OVERRIDE:-/$CGROUP_NAME_B}"
+    python3 "$ORCH_CLIENT" "$ORCH_SOCK" register_output \
+        "cgroup_id=$cg_id" "output_file=$output_file" >/dev/null 2>&1 || true
+    SHADOW_OUTPUT_FILE="$output_file" "$CGROUP_EXEC" "$CGROUP_PATH_B/cgroup.procs" "$@"
 }
 
 # Helper: get the cgroup ID that ShadowFS/ShadowProc will see for processes in a given cgroup dir
@@ -678,13 +695,13 @@ scenario_cow_rollback() {
     rm -f "$MARKER_FILE"
 
     # Step 1: Start mem_modifier in cgroup
-    step "Step 1: Starting mem_modifier in cgroup (will write marker + trigger stdout freeze)..."
+    step "Step 1: Starting mem_modifier in cgroup (will write marker + trigger IPC freeze)..."
     run_in_cgroup "$MEM_MODIFIER" "$MARKER_FILE" &
     local AGENT_PID=$!
     info "mem_modifier launched (wrapper PID $AGENT_PID)"
 
-    # Step 2: Wait for it to be frozen (stdout write triggers BPF)
-    step "Step 2: Waiting for process to be frozen (stdout write intercepted)..."
+    # Step 2: Wait for it to be frozen (initial connect triggers BPF)
+    step "Step 2: Waiting for process to be frozen (IPC connect intercepted)..."
     if wait_for_frozen "$AGENT_PID" 10; then
         info "Process is FROZEN (first freeze - before memory modification)"
     else

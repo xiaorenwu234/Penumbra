@@ -93,8 +93,17 @@ int main(int argc, char *argv[]) {
         /* Close stdout/stderr to avoid BPF interception on this process
          * before exec. Reopen them as /dev/null so the exec'd program
          * still has valid fds 1 and 2. */
-        /* Actually, DON'T close stdout/stderr - the agent needs them.
-         * Just don't WRITE to them from this code path. */
+        /* If SHADOW_OUTPUT_FILE is set, redirect stdout/stderr to that file
+         * so the output is buffered (not visible until orchestrator commits). */
+        const char *output_file = getenv("SHADOW_OUTPUT_FILE");
+        if (output_file) {
+            int out_fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (out_fd >= 0) {
+                dup2(out_fd, 1);  /* stdout */
+                dup2(out_fd, 2);  /* stderr */
+                close(out_fd);
+            }
+        }
 
         /* Exec the target command */
         execvp(argv[3], &argv[3]);

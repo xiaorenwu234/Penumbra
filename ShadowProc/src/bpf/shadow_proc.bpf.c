@@ -357,11 +357,11 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
     // Get fd from first argument (rdi on x86_64)
     unsigned long fd = PT_REGS_PARM1_CORE_SYSCALL(regs);
 
-    // Check stdout/stderr
-    if (fd == 1 || fd == 2) {
-        do_intercept(1, EVENT_WRITE_OUT);
-        return -ERESTARTSYS;
-    }
+    // NOTE: stdout/stderr (fd 1/2) are NO LONGER intercepted.
+    // They are redirected to a buffer file at launch time by cgroup_exec.
+    // Only intercept writes to pipes/FIFOs/sockets (IPC detection).
+    if (fd <= 2)
+        return 0;
 
     // Check if fd is a pipe/FIFO/socket
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
@@ -408,10 +408,9 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
 
     unsigned long fd = PT_REGS_PARM1_CORE_SYSCALL(regs);
 
-    if (fd == 1 || fd == 2) {
-        do_intercept(20, EVENT_WRITE_OUT);
-        return -ERESTARTSYS;
-    }
+    // NOTE: stdout/stderr (fd 1/2) are NO LONGER intercepted.
+    if (fd <= 2)
+        return 0;
 
     // Check pipe/socket (same logic as write)
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();

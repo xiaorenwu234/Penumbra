@@ -63,13 +63,22 @@ int main(int argc, char *argv[]) {
     write(mfd, info, len);
     close(mfd);
 
-    /* ---- Trigger first freeze: write to stdout ---- */
-    /* ShadowProc's BPF hook intercepts write(1, ...) in the cgroup.
-     * The process will be frozen (SIGSTOP) here.
-     * The orchestrator should call begin_speculative at this point,
-     * then resume us with continue_pid. */
-    const char *ready_msg = "READY\n";
-    write(STDOUT_FILENO, ready_msg, strlen(ready_msg));
+    /* ---- Trigger first freeze: connect() to a non-local address ---- */
+    /* ShadowProc no longer intercepts write() to stdout/stderr; the
+     * process is frozen at network IPC instead. The orchestrator should
+     * call begin_speculative at this point, then resume us with resume_pid. */
+    {
+        int sock0 = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        if (sock0 >= 0) {
+            struct sockaddr_in addr0;
+            memset(&addr0, 0, sizeof(addr0));
+            addr0.sin_family = AF_INET;
+            addr0.sin_port = htons(12345);
+            inet_pton(AF_INET, "192.0.2.2", &addr0.sin_addr);
+            connect(sock0, (struct sockaddr *)&addr0, sizeof(addr0));
+            close(sock0);
+        }
+    }
 
     /* If we reach here, the orchestrator has resumed us */
 

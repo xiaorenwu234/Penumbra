@@ -111,6 +111,10 @@ class ShadowOrchestrator:
         # Track observation state: cgroup_id → {log_path, cgroup_inode}
         self._observe_state: Dict[str, Dict[str, Any]] = {}
 
+        # Track stdout buffer files: cgroup_id → output_file_path
+        # Populated via register_output(); flushed on commit; discarded on rollback.
+        self._output_buffers: Dict[str, str] = {}
+
     def close(self):
         """Close connections to all services."""
         self.fs_client.close()
@@ -135,6 +139,62 @@ class ShadowOrchestrator:
         else:
             log.info("Registered cgroup: %s", cgroup_path)
         return resp
+
+    def register_output(self, cgroup_id: str, output_file: str) -> dict:
+        """
+        Register a stdout/stderr buffer file for a cgroup.
+
+        Launchers (e.g. cgroup_exec via SHADOW_OUTPUT_FILE env) redirect the
+        agent's stdout/stderr into this file. The buffered output is only
+        released to the caller on commit; on rollback it is discarded.
+        """
+        self._output_buffers[cgroup_id] = output_file
+        log.info("Registered stdout buffer for cgroup=%s → %s",
+                 cgroup_id, output_file)
+        return {"status": "ok", "output_file": output_file}
+
+    def _flush_output(self, cgroup_id: str) -> str:
+        """Read and remove the buffered stdout for a cgroup. Returns the content."""
+        output_file = self._output_buffers.pop(cgroup_id, None)
+        if not output_file:
+            return ""
+        try:
+            with open(output_file, "r", errors="replace") as f:
+                content = f.read()
+        except FileNotFoundError:
+            return ""
+        except OSError as e:
+            log.warning("Failed to read buffered stdout %s: %s", output_file, e)
+            return ""
+        try:
+            os.unlink(output_file)
+        except OSError:
+            pass
+        return content
+
+    def _discard_output(self, cgroup_id: str) -> None:
+        """Discard the buffered stdout for a cgroup (used on rollback)."""
+        output_file = self._output_buffers.pop(cgroup_id, None)
+        if output_file:
+            try:
+                os.unlink(output_file)
+            except OSError:
+                pass
+
+    def get_buffered_output(self, cgroup_id: str) -> dict:
+        """Return the current buffered stdout for a cgroup without flushing it."""
+        output_file = self._output_buffers.get(cgroup_id)
+        if not output_file:
+            return {"status": "ok", "output": "", "buffered": False}
+        try:
+            with open(output_file, "r", errors="replace") as f:
+                content = f.read()
+            return {"status": "ok", "output": content, "buffered": True,
+                    "output_file": output_file}
+        except FileNotFoundError:
+            return {"status": "ok", "output": "", "buffered": False}
+        except OSError as e:
+            return {"status": "error", "message": str(e)}
 
     def commit(self, cgroup_id: str) -> dict:
         """
@@ -175,6 +235,11 @@ class ShadowOrchestrator:
         })
         if fs_resp["status"] == "ok":
             log.info("  ShadowFS commit successful")
+            # Flush buffered stdout to the caller (was hidden until now).
+            buffered = self._flush_output(cgroup_id)
+            if buffered:
+                log.info("  Releasing %d bytes of buffered stdout", len(buffered))
+            fs_resp["stdout"] = buffered
         else:
             log.error("  ShadowFS commit failed: %s", fs_resp.get("message"))
 
@@ -221,6 +286,11 @@ class ShadowOrchestrator:
 
         if total_killed:
             log.info("  Total killed processes: %d", len(total_killed))
+
+        # Discard buffered stdout for all affected cgroups.
+        for affected_cgroup in affected:
+            self._discard_output(affected_cgroup)
+        self._discard_output(cgroup_id)
 
         return {"status": "ok", "affected": affected, "killed_pids": total_killed}
 
@@ -280,7 +350,7 @@ class ShadowOrchestrator:
             return {"status": "error", "message": "ShadowObserve not configured"}
 
         if log_path is None:
-            log_path = tempfile.mktemp(
+            log_path = tempfile.mkstemp(
                 prefix=f"observ_{cgroup_id.strip('/').replace('/', '_')}_",
                 suffix=".jsonl"
             )
@@ -420,12 +490,18 @@ class ShadowOrchestrator:
                            wl_resp.get("message"))
 
             # Commit filesystem changes
+            buffered = ""
             fs_resp = self.fs_client.request({
                 "action": "commit",
                 "cgroup_id": cgroup_id,
             })
             if fs_resp.get("status") == "ok":
                 log.info("  ShadowFS commit successful")
+                # Flush buffered stdout on committed audit
+                buffered = self._flush_output(cgroup_id)
+                if buffered:
+                    log.info("  Releasing %d bytes of buffered stdout",
+                             len(buffered))
             else:
                 log.error("  ShadowFS commit failed: %s", fs_resp.get("message"))
 
@@ -445,6 +521,7 @@ class ShadowOrchestrator:
                 "decision": "committed",
                 "total_events": total_events,
                 "total_violations": 0,
+                "stdout": buffered,
             }
         else:
             # AUDIT FAILED: rollback → kill
@@ -481,6 +558,10 @@ class ShadowOrchestrator:
 
             if total_killed:
                 log.info("  Killed PIDs: %s", total_killed)
+
+            # Discard buffered stdout for all affected cgroups
+            for cg in kill_cgroups:
+                self._discard_output(cg)
 
             # Cleanup observation state
             del self._observe_state[cgroup_id]
@@ -646,6 +727,19 @@ class OrchestratorServer:
                 if not cgroup_path:
                     return {"status": "error", "message": "cgroup_path required"}
                 return self.orch.add_cgroup(cgroup_path)
+
+            elif action == "register_output":
+                if not cgroup_id:
+                    return {"status": "error", "message": "cgroup_id required"}
+                output_file = req.get("output_file", "")
+                if not output_file:
+                    return {"status": "error", "message": "output_file required"}
+                return self.orch.register_output(cgroup_id, output_file)
+
+            elif action == "get_output":
+                if not cgroup_id:
+                    return {"status": "error", "message": "cgroup_id required"}
+                return self.orch.get_buffered_output(cgroup_id)
 
             elif action == "list_agents":
                 agents = self.orch.list_agents()
