@@ -179,6 +179,95 @@ static __always_inline void do_intercept(__u32 syscall_nr, __u32 event_type)
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Network address-family filtering + AF_UNIX system-socket whitelist
+//
+// Intercept (external / irreversible):
+//   - AF_INET / AF_INET6  (real remote IP AND loopback 127.0.0.1 / ::1)
+//   - AF_UNIX / AF_LOCAL that is NOT a runtime system socket
+//   - any other non-local family (AF_PACKET, ...)
+// Exempt (not external):
+//   - AF_UNSPEC (connect(AF_UNSPEC) just dissolves association)
+//   - AF_NETLINK (peer is the kernel)
+//   - AF_UNIX hitting the runtime system-socket prefix whitelist
+// ═══════════════════════════════════════════════════════════════
+
+#define AF_UNSPEC   0
+#define AF_UNIX     1
+#define AF_INET     2
+#define AF_INET6    10
+#define AF_NETLINK  16
+
+#define SUN_PATH_OFF 2  // offsetof(struct sockaddr_un, sun_path)
+
+// Compare buf against a compile-time literal prefix (longest whitelist prefix
+// is "/var/run/avahi-daemon/" = 22 chars, so 24 iterations suffice).
+#define HAS_PREFIX(buf, lit) __has_prefix((buf), (lit), sizeof(lit) - 1)
+static __always_inline int __has_prefix(const char *buf, const char *pfx, int n)
+{
+    #pragma unroll
+    for (int i = 0; i < 24; i++) {
+        if (i >= n)
+            return 1;  // all prefix chars matched
+        if (buf[i] != pfx[i])
+            return 0;
+    }
+    return 1;
+}
+
+// Returns 1 if the AF_UNIX sun_path is a runtime system socket (exempt).
+// `path` points to the sun_path bytes (128-byte buffer).
+static __always_inline int unix_path_whitelisted(const char *path)
+{
+    // Abstract namespace socket: sun_path[0] == '\0', name follows.
+    // D-Bus abstract sockets look like @/tmp/dbus-XXXX .
+    if (path[0] == '\0')
+        return HAS_PREFIX(path + 1, "/tmp/dbus-");
+
+    // Pathname sockets
+    if (HAS_PREFIX(path, "/var/run/nscd/"))          return 1;  // NSS cache
+    if (HAS_PREFIX(path, "/run/nscd/"))              return 1;
+    if (HAS_PREFIX(path, "/var/run/dbus/"))          return 1;  // D-Bus
+    if (HAS_PREFIX(path, "/run/dbus/"))              return 1;
+    if (HAS_PREFIX(path, "@/tmp/dbus-"))             return 1;
+    if (HAS_PREFIX(path, "/run/systemd/"))           return 1;  // systemd
+    if (HAS_PREFIX(path, "/var/run/systemd/"))       return 1;
+    if (HAS_PREFIX(path, "/var/lib/sss/"))           return 1;  // SSSD/winbind/samba
+    if (HAS_PREFIX(path, "/run/sssd/"))              return 1;
+    if (HAS_PREFIX(path, "/var/run/sssd/"))          return 1;
+    if (HAS_PREFIX(path, "/var/run/samba/"))         return 1;
+    if (HAS_PREFIX(path, "/run/samba/"))             return 1;
+    if (HAS_PREFIX(path, "/var/lib/samba/"))         return 1;
+    if (HAS_PREFIX(path, "/dev/log"))                return 1;  // syslog
+    if (HAS_PREFIX(path, "/var/run/avahi-daemon/"))  return 1;  // avahi/mDNS
+    if (HAS_PREFIX(path, "/run/avahi-daemon/"))      return 1;
+    return 0;
+}
+
+// Classify a connect()/bind() target. Returns 1 if it should be intercepted.
+// `address` is a kernel copy (sockaddr_storage, 128 bytes), safe to over-read.
+static __always_inline int net_addr_should_block(struct sockaddr *address, int addrlen)
+{
+    __u16 family = 0;
+    if (addrlen >= 2)
+        bpf_probe_read_kernel(&family, sizeof(family), address);
+
+    if (family == AF_UNSPEC || family == AF_NETLINK)
+        return 0;  // exempt
+
+    if (family == AF_UNIX) {
+        char path[128] = {};
+        // sun_path lives at offset 2 within the 128-byte storage.
+        bpf_probe_read_kernel(path, 108, (char *)address + SUN_PATH_OFF);
+        if (unix_path_whitelisted(path))
+            return 0;  // system socket -> exempt
+        return 1;
+    }
+
+    // AF_INET / AF_INET6 (incl. loopback) / any other external family
+    return 1;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // LSM Hooks - Block syscall BEFORE execution, return -ERESTARTSYS
 // so kernel auto-restarts after SIGCONT
 // ═══════════════════════════════════════════════════════════════
@@ -208,8 +297,12 @@ int BPF_PROG(shadow_socket_connect, struct socket *sock,
         }
     }
 
-    do_intercept(42, EVENT_NETWORK);
-    return -ERESTARTSYS;
+    // General case: classify by address family + AF_UNIX whitelist.
+    if (net_addr_should_block(address, addrlen)) {
+        do_intercept(42, EVENT_NETWORK);
+        return -ERESTARTSYS;
+    }
+    return 0;
 }
 
 // --- Network: sendmsg (covers sendto, sendmsg) ---
@@ -219,6 +312,48 @@ int BPF_PROG(shadow_socket_sendmsg, struct socket *sock,
 {
     if (!should_intercept())
         return 0;
+
+    struct sock *sk = BPF_CORE_READ(sock, sk);
+    __u16 family = sk ? BPF_CORE_READ(sk, __sk_common.skc_family) : 0;
+
+    if (family == AF_UNSPEC || family == AF_NETLINK)
+        return 0;  // exempt
+
+    if (family == AF_UNIX) {
+        char path[128] = {};
+        void *msg_name = BPF_CORE_READ(msg, msg_name);
+        int namelen = BPF_CORE_READ(msg, msg_namelen);
+
+        if (msg_name && namelen > SUN_PATH_OFF) {
+            // Unconnected datagram sendto(): explicit destination in msg_name.
+            bpf_probe_read_kernel(path, 108, (char *)msg_name + SUN_PATH_OFF);
+            if (unix_path_whitelisted(path))
+                return 0;
+        } else {
+            // Connected AF_UNIX stream: recover the peer's bound path so the
+            // whitelist still applies (e.g. writes to the D-Bus socket).
+            struct sock *peer = BPF_CORE_READ((struct unix_sock *)sk, peer);
+            struct unix_address *uaddr = NULL;
+            if (peer)
+                uaddr = BPF_CORE_READ((struct unix_sock *)peer, addr);
+            if (!uaddr)
+                uaddr = BPF_CORE_READ((struct unix_sock *)sk, addr);
+            if (uaddr) {
+                int alen = BPF_CORE_READ(uaddr, len);
+                __u32 n = (alen > SUN_PATH_OFF) ? (__u32)(alen - SUN_PATH_OFF) : 0;
+                n &= 127;  // bound for the verifier (path[128])
+                bpf_probe_read_kernel(path, n,
+                    (char *)uaddr + offsetof(struct unix_address, name) + SUN_PATH_OFF);
+            }
+            if (unix_path_whitelisted(path))
+                return 0;
+        }
+
+        do_intercept(46, EVENT_NETWORK);
+        return -ERESTARTSYS;
+    }
+
+    // AF_INET / AF_INET6 / other external family
     do_intercept(46, EVENT_NETWORK);
     return -ERESTARTSYS;
 }
@@ -230,28 +365,32 @@ int BPF_PROG(shadow_socket_bind, struct socket *sock,
 {
     if (!should_intercept())
         return 0;
-    do_intercept(49, EVENT_NETWORK);
-    return -ERESTARTSYS;
+    if (net_addr_should_block(address, addrlen)) {
+        do_intercept(49, EVENT_NETWORK);
+        return -ERESTARTSYS;
+    }
+    return 0;
 }
 
-// --- Network: listen ---
-SEC("lsm/socket_listen")
-int BPF_PROG(shadow_socket_listen, struct socket *sock, int backlog)
+// ── SysV shared memory (shm) ──────────────────────────────────
+// shmget: alloc_security fires when creating a new segment,
+//         associate fires when attaching to an existing key.
+// Together they cover every shmget() call.
+SEC("lsm/shm_alloc_security")
+int BPF_PROG(shadow_shm_alloc, struct kern_ipc_perm *perm)
 {
     if (!should_intercept())
         return 0;
-    do_intercept(50, EVENT_NETWORK);
+    do_intercept(29, EVENT_IPC); // 29 = shmget
     return -ERESTARTSYS;
 }
 
-// --- Network: accept ---
-SEC("lsm/socket_accept")
-int BPF_PROG(shadow_socket_accept, struct socket *sock,
-             struct socket *newsock)
+SEC("lsm/shm_associate")
+int BPF_PROG(shadow_shm_associate, struct kern_ipc_perm *perm, int shmflg)
 {
     if (!should_intercept())
         return 0;
-    do_intercept(288, EVENT_NETWORK);
+    do_intercept(29, EVENT_IPC); // 29 = shmget
     return -ERESTARTSYS;
 }
 
@@ -262,12 +401,24 @@ int BPF_PROG(shadow_shm_shmat, struct kern_ipc_perm *shp,
 {
     if (!should_intercept())
         return 0;
-    do_intercept(30, EVENT_IPC);
+    do_intercept(30, EVENT_IPC); // 30 = shmat
     return -ERESTARTSYS;
 }
 
-// --- IPC: mmap shared memory ---
-// Intercepts mmap with MAP_SHARED flag (POSIX shm, file-backed shared mappings)
+// --- IPC: shmctl ---
+SEC("lsm/shm_shmctl")
+int BPF_PROG(shadow_shm_shmctl, struct kern_ipc_perm *perm, int cmd)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(31, EVENT_IPC); // 31 = shmctl
+    return -ERESTARTSYS;
+}
+
+// --- IPC: mmap file-backed shared memory (POSIX shm via shm_open + mmap) ---
+// Only file-backed MAP_SHARED is treated as a cross-process channel.
+// Anonymous MAP_SHARED (MAP_SHARED|MAP_ANONYMOUS) is parent-child sharing,
+// which the spec explicitly EXEMPTS (like pipe/socketpair), so we skip it.
 // mmap_file(struct file *file, unsigned long reqprot, unsigned long prot, unsigned long flags)
 #define MAP_SHARED 0x01
 SEC("lsm/mmap_file")
@@ -277,16 +428,35 @@ int BPF_PROG(shadow_mmap_file, struct file *file,
     if (!should_intercept())
         return 0;
 
-    // Only intercept MAP_SHARED mappings (used for IPC)
-    // MAP_PRIVATE mappings (copy-on-write) are not communication channels
+    // Only intercept MAP_SHARED mappings
     if (!(flags & MAP_SHARED))
         return 0;
 
-    // If file is NULL, it's an anonymous shared mapping (MAP_SHARED|MAP_ANONYMOUS)
-    // which is used for parent-child IPC - intercept it
-    // If file is non-NULL, it could be a shared file mapping or POSIX shm
-    // Both are IPC channels - intercept
+    // Anonymous shared mapping (file == NULL) = parent-child IPC -> EXEMPT
+    if (!file)
+        return 0;
+
     do_intercept(9, EVENT_IPC); // 9 = mmap syscall number
+    return -ERESTARTSYS;
+}
+
+// ── SysV message queues (msg) ─────────────────────────────────
+// msgget: alloc_security (create) + associate (open existing)
+SEC("lsm/msg_queue_alloc_security")
+int BPF_PROG(shadow_msg_alloc, struct kern_ipc_perm *perm)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(68, EVENT_IPC); // 68 = msgget
+    return -ERESTARTSYS;
+}
+
+SEC("lsm/msg_queue_associate")
+int BPF_PROG(shadow_msg_associate, struct kern_ipc_perm *perm, int msqflg)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(68, EVENT_IPC); // 68 = msgget
     return -ERESTARTSYS;
 }
 
@@ -297,7 +467,7 @@ int BPF_PROG(shadow_msg_msgsnd, struct kern_ipc_perm *msq,
 {
     if (!should_intercept())
         return 0;
-    do_intercept(69, EVENT_IPC);
+    do_intercept(69, EVENT_IPC); // 69 = msgsnd
     return -ERESTARTSYS;
 }
 
@@ -309,11 +479,68 @@ int BPF_PROG(shadow_msg_msgrcv, struct kern_ipc_perm *msq,
 {
     if (!should_intercept())
         return 0;
-    do_intercept(70, EVENT_IPC);
+    do_intercept(70, EVENT_IPC); // 70 = msgrcv
+    return -ERESTARTSYS;
+}
+
+// --- IPC: msgctl ---
+SEC("lsm/msg_queue_msgctl")
+int BPF_PROG(shadow_msg_msgctl, struct kern_ipc_perm *perm, int cmd)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(71, EVENT_IPC); // 71 = msgctl
+    return -ERESTARTSYS;
+}
+
+// ── SysV semaphores (sem) ─────────────────────────────────────
+// semget: alloc_security (create) + associate (open existing)
+SEC("lsm/sem_alloc_security")
+int BPF_PROG(shadow_sem_alloc, struct kern_ipc_perm *perm)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(64, EVENT_IPC); // 64 = semget
+    return -ERESTARTSYS;
+}
+
+SEC("lsm/sem_associate")
+int BPF_PROG(shadow_sem_associate, struct kern_ipc_perm *perm, int semflg)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(64, EVENT_IPC); // 64 = semget
+    return -ERESTARTSYS;
+}
+
+// --- IPC: semop / semtimedop ---
+SEC("lsm/sem_semop")
+int BPF_PROG(shadow_sem_semop, struct kern_ipc_perm *perm,
+             struct sembuf *sops, unsigned int nsops, int alter)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(65, EVENT_IPC); // 65 = semop
+    return -ERESTARTSYS;
+}
+
+// --- IPC: semctl ---
+SEC("lsm/sem_semctl")
+int BPF_PROG(shadow_sem_semctl, struct kern_ipc_perm *perm, int cmd)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(66, EVENT_IPC); // 66 = semctl
     return -ERESTARTSYS;
 }
 
 // --- Signal: kill/tkill/tgkill to other processes ---
+// Exempt signals that stay within the sender's own session:
+//   - same thread group (self / sibling threads)  [fast path]
+//   - any process in the same session (same PIDTYPE_SID struct pid).
+//     A session subsumes the process group and covers siblings / cousins
+//     that share the same session leader.
+// Everything else (processes in other sessions) is intercepted.
 SEC("lsm/task_kill")
 int BPF_PROG(shadow_task_kill, struct task_struct *p,
              struct kernel_siginfo *info, int sig,
@@ -322,10 +549,21 @@ int BPF_PROG(shadow_task_kill, struct task_struct *p,
     if (!should_intercept())
         return 0;
 
-    // Allow signals to self
-    __u32 my_tgid = bpf_get_current_pid_tgid() >> 32;
+    struct task_struct *cur = (struct task_struct *)bpf_get_current_task();
+    __u32 my_tgid = BPF_CORE_READ(cur, tgid);
     __u32 target_tgid = BPF_CORE_READ(p, tgid);
+
+    // 1. Same thread group (self or sibling thread) -> exempt (fast path)
     if (target_tgid == my_tgid)
+        return 0;
+
+    // 2. Same session -> exempt.
+    // Compare the PIDTYPE_SID struct pid pointers directly; identical pointers
+    // mean the same session (no need to resolve the numeric sid). This covers
+    // the whole session: ancestors/descendants and sibling processes alike.
+    struct pid *my_sid = BPF_CORE_READ(cur, signal, pids[PIDTYPE_SID]);
+    struct pid *target_sid = BPF_CORE_READ(p, signal, pids[PIDTYPE_SID]);
+    if (my_sid && my_sid == target_sid)
         return 0;
 
     do_intercept(62, EVENT_SIGNAL);
@@ -448,7 +686,65 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Privilege escalation hooks - block setuid binaries and UID changes
+// fmod_ret IPC hooks for syscalls with NO dedicated LSM hook:
+//   - shmdt (detach SysV shm)
+//   - POSIX message queues: mq_open / mq_timedsend / mq_timedreceive / mq_notify
+//     (glibc mq_send -> mq_timedsend, mq_receive -> mq_timedreceive)
+// Same mechanism as the write hook: block before execution, restart on SIGCONT.
+// ═══════════════════════════════════════════════════════════════
+
+SEC("fmod_ret/__x64_sys_shmdt")
+int BPF_PROG(shadow_sys_shmdt, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(67, EVENT_IPC); // 67 = shmdt
+    return -ERESTARTSYS;
+}
+
+SEC("fmod_ret/__x64_sys_mq_open")
+int BPF_PROG(shadow_sys_mq_open, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(240, EVENT_IPC); // 240 = mq_open
+    return -ERESTARTSYS;
+}
+
+SEC("fmod_ret/__x64_sys_mq_timedsend")
+int BPF_PROG(shadow_sys_mq_timedsend, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(242, EVENT_IPC); // 242 = mq_timedsend (mq_send)
+    return -ERESTARTSYS;
+}
+
+SEC("fmod_ret/__x64_sys_mq_timedreceive")
+int BPF_PROG(shadow_sys_mq_timedreceive, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(243, EVENT_IPC); // 243 = mq_timedreceive (mq_receive)
+    return -ERESTARTSYS;
+}
+
+SEC("fmod_ret/__x64_sys_mq_notify")
+int BPF_PROG(shadow_sys_mq_notify, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(244, EVENT_IPC); // 244 = mq_notify
+    return -ERESTARTSYS;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Privilege escalation hooks - block credential-changing syscalls
+//   setuid family -> task_fix_setuid   (setuid/setreuid/setresuid/setfsuid)
+//   setgid family -> task_fix_setgid   (setgid/setregid/setresgid/setfsgid)
+//   setgroups     -> task_fix_setgroups
+//   capset        -> capset
+//   setuid/setgid binary execve -> bprm_check_security (extra guard)
 // ═══════════════════════════════════════════════════════════════
 
 // S_ISUID/S_ISGID bits in inode mode
@@ -475,16 +771,48 @@ int BPF_PROG(shadow_bprm_check, struct linux_binprm *bprm)
     return -ERESTARTSYS;
 }
 
-// --- Privilege: block UID changes (setuid/setreuid/setresuid) ---
+// --- Privilege: UID changes (setuid/setreuid/setresuid/setfsuid) ---
 SEC("lsm/task_fix_setuid")
 int BPF_PROG(shadow_task_fix_setuid, struct cred *new_cred,
              const struct cred *old, int flags)
 {
     if (!should_intercept())
         return 0;
+    do_intercept(105, EVENT_PRIV_SETUID);  // 105 = setuid
+    return -ERESTARTSYS;
+}
 
-    // Block any UID change attempt
-    do_intercept(105, EVENT_PRIV_SETUID);  // 105 = setuid syscall nr
+// --- Privilege: GID changes (setgid/setregid/setresgid/setfsgid) ---
+SEC("lsm/task_fix_setgid")
+int BPF_PROG(shadow_task_fix_setgid, struct cred *new_cred,
+             const struct cred *old, int flags)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(106, EVENT_PRIV_SETUID);  // 106 = setgid
+    return -ERESTARTSYS;
+}
+
+// --- Privilege: setgroups ---
+SEC("lsm/task_fix_setgroups")
+int BPF_PROG(shadow_task_fix_setgroups, struct cred *new_cred,
+             const struct cred *old)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(116, EVENT_PRIV_SETUID);  // 116 = setgroups
+    return -ERESTARTSYS;
+}
+
+// --- Privilege: capset (capability changes) ---
+SEC("lsm/capset")
+int BPF_PROG(shadow_capset, struct cred *new_cred, const struct cred *old,
+             const kernel_cap_t *effective, const kernel_cap_t *inheritable,
+             const kernel_cap_t *permitted)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(126, EVENT_PRIV_SETUID);  // 126 = capset
     return -ERESTARTSYS;
 }
 

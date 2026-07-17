@@ -107,6 +107,22 @@ type Backend struct {
 	// instead of silently reading stale overlay data.
 	openFDs   map[string][]*TrackedFD
 	openFDsMu sync.Mutex
+
+	// invalidateFn, when set, is invoked after a rollback with the list of
+	// tracked (orig) file paths whose overlay state was removed. Rollback
+	// mutates overlay files out-of-band (via the control socket, not through
+	// the FUSE data path), so the kernel's dentry cache keeps serving stale
+	// positive entries for paths whose overlay copy was just deleted (e.g. the
+	// destination of a rolled-back rename). The FUSE layer registers this to
+	// drop those cache entries. Set once at startup; read without locking.
+	invalidateFn func(paths []string)
+}
+
+// SetInvalidateCallback registers a function invoked after a rollback with the
+// tracked file paths whose overlay state was removed, so the FUSE layer can
+// invalidate stale kernel dentry cache entries. Must be set before serving.
+func (b *Backend) SetInvalidateCallback(fn func(paths []string)) {
+	b.invalidateFn = fn
 }
 
 // NewBackend creates a Backend. stagingDir is the overlay root (write side)
@@ -1619,6 +1635,26 @@ func (b *Backend) rollbackInternal(cgroupID string) error {
 	}
 	sort.Slice(allEntries, func(i, j int) bool { return allEntries[i].Seq() > allEntries[j].Seq() })
 
+	// Collect the tracked paths touched by this rollback so the FUSE layer
+	// can invalidate the kernel dentry cache for them once the overlay files
+	// have been removed below (see Backend.invalidateFn).
+	var invalidatePaths []string
+	if b.invalidateFn != nil {
+		seen := make(map[string]struct{})
+		add := func(p string) {
+			if _, ok := seen[p]; !ok {
+				seen[p] = struct{}{}
+				invalidatePaths = append(invalidatePaths, p)
+			}
+		}
+		for _, entry := range allEntries {
+			add(entry.Path())
+		}
+		for p := range dirtyPaths {
+			add(p)
+		}
+	}
+
 	pathFullyAffected := func(path string) bool {
 		writers, ok := b.fileDirty[path]
 		if !ok {
@@ -1668,6 +1704,9 @@ func (b *Backend) rollbackInternal(cgroupID string) error {
 	}
 
 	b.cleanupAgents(affected)
+	if b.invalidateFn != nil && len(invalidatePaths) > 0 {
+		b.invalidateFn(invalidatePaths)
+	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
@@ -1953,6 +1992,52 @@ func (b *Backend) tryFinalize(cgroupID string) bool {
 	}
 	delete(b.dependents, cgroupID)
 	delete(b.agents, cgroupID)
+	return true
+}
+
+// --- Release gating ---
+
+// CanRelease reports whether the external side effects of the given cgroup
+// (its processes are held frozen by ShadowProc) are safe to externalize.
+//
+// It answers with the SAME predicate ShadowFS uses to promote an agent's
+// file changes to the real filesystem: the agent must be committed and
+// every upstream dependency it relies on must also be committed. This
+// keeps the process layer consistent with the filesystem layer — an
+// agent's IPC / network operations are only let out once no upstream
+// rollback can still cascade into this cgroup and undo them.
+//
+// A cgroup that is not tracked is treated as releasable: it was either
+// already finalized (fully committed and promoted, so its dependency
+// edges are gone) or never touched the shadowed filesystem at all. In
+// both cases no cascade rollback can reach it.
+func (b *Backend) CanRelease(cgroupID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.canReleaseLocked(cgroupID)
+}
+
+// canReleaseLocked implements CanRelease. Must be called with b.mu held.
+// The upstream check mirrors tryFinalize / tryPromotePath: a pure-read
+// upstream (no undo entries, no dirty files) cannot cascade a rollback,
+// so it does not block release.
+func (b *Backend) canReleaseLocked(cgroupID string) bool {
+	agent, ok := b.agents[cgroupID]
+	if !ok {
+		return true
+	}
+	if !agent.Committed {
+		return false
+	}
+	for up := range b.dependsOn[cgroupID] {
+		upAgent, ok := b.agents[up]
+		if ok && !upAgent.Committed {
+			if len(upAgent.UndoLog) == 0 && len(upAgent.DirtyFiles) == 0 {
+				continue
+			}
+			return false
+		}
+	}
 	return true
 }
 

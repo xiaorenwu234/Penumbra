@@ -13,9 +13,12 @@
 package backend
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // LogEntry is the interface implemented by every overlay log entry.
@@ -82,10 +85,62 @@ func (e *OverlayWriteEntry) Promote() error {
 	if err := os.MkdirAll(filepath.Dir(e.OrigPath), 0o755); err != nil {
 		return fmt.Errorf("promote overlay write mkdir parent: %w", err)
 	}
-	if err := os.Rename(e.OverlayPath, e.OrigPath); err != nil {
+	if err := moveFile(e.OverlayPath, e.OrigPath); err != nil {
 		return fmt.Errorf("promote overlay write %q -> %q: %w", e.OverlayPath, e.OrigPath, err)
 	}
 	return nil
+}
+
+// moveFile moves src to dst. It first attempts an atomic rename(2); if that
+// fails with EXDEV (src and dst live on different mount points / filesystems),
+// it falls back to copying the contents and then removing the source.
+//
+// This is required because ShadowFS's staging area and the backing store can
+// live on separate mounts — e.g. the backing store is exposed via a bind mount
+// — in which case rename(2) returns EXDEV even when the underlying filesystem
+// is the same. Without this fallback, promote would fail and the caller would
+// still drop the overlay copy, silently losing the committed data.
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	if err := copyFileContents(src, dst); err != nil {
+		return err
+	}
+	if err := os.Remove(src); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove source after cross-device copy %q: %w", src, err)
+	}
+	return nil
+}
+
+// copyFileContents copies src to dst (truncating dst), preserving the source
+// file's permission bits, and fsyncs before returning so the promoted data is
+// durable.
+func copyFileContents(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	fi, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fi.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // OverlayMkdirEntry describes a directory created in the overlay view.
@@ -218,7 +273,7 @@ type SerializableEntry struct {
 	// OrigSize records the size of the orig file at copy-up time so that
 	// redoEntry can detect a partially-written overlay file after a crash
 	// between copyUpFile and its fsync.
-	OrigSize     int64  `json:"orig_size,omitempty"`
+	OrigSize int64 `json:"orig_size,omitempty"`
 }
 
 // MarshalEntry converts a LogEntry to its serializable form.

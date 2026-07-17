@@ -929,6 +929,35 @@ func main() {
 	}
 	fmt.Printf("Mounted! orig=%q overlay=%q\n", origDir, shadowBackend.OverlayDir())
 
+	// Rollback removes overlay files out-of-band (via the control socket, not
+	// through the FUSE data path), so the kernel's dentry cache (EntryTimeout)
+	// keeps serving stale positive entries for paths whose overlay copy was
+	// just deleted — most visibly the destination of a rolled-back rename.
+	// Invalidate those entries so the next lookup re-resolves the merged view.
+	rootInode := root.EmbeddedInode()
+	shadowBackend.SetInvalidateCallback(func(paths []string) {
+		for _, p := range paths {
+			rel, err := filepath.Rel(origDir, p)
+			if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+				continue
+			}
+			parts := strings.Split(rel, string(os.PathSeparator))
+			parent := rootInode
+			ok := true
+			for _, comp := range parts[:len(parts)-1] {
+				child := parent.GetChild(comp)
+				if child == nil {
+					ok = false // ancestor not cached → nothing stale below it
+					break
+				}
+				parent = child
+			}
+			if ok {
+				parent.NotifyEntry(parts[len(parts)-1])
+			}
+		}
+	})
+
 	// Start Unix socket control server if requested
 	var sockServer *SocketServer
 	if *sockPath != "" {

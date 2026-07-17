@@ -357,20 +357,39 @@ fn clear_soft_dirty(pid: u32) -> Result<()> {
 fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
     let target = Pid::from_raw(pid as i32);
 
-    // 1. Attach to the stopped process
-    ptrace::attach(target)
-        .with_context(|| format!("ptrace attach to {} failed", pid))?;
+    // 1. SEIZE the target WITHOUT injecting a SIGSTOP.
+    //
+    //    The target is already group-stopped (SIGSTOP from freeze_by_cgroup).
+    //    The old code used ptrace::attach here, which sends a SECOND SIGSTOP on
+    //    top of the freeze one — the two stop signals then race during injection
+    //    ("Unexpected signal SIGSTOP during fork injection"), and a signal-aware
+    //    process such as a shell would intermittently exit when resumed.
+    //    PTRACE_SEIZE attaches with no injected stop signal, killing that race at
+    //    the root. We arm fork/clone/vfork tracing at seize time.
+    ptrace::seize(
+        target,
+        ptrace::Options::PTRACE_O_TRACEFORK
+            | ptrace::Options::PTRACE_O_TRACECLONE
+            | ptrace::Options::PTRACE_O_TRACEVFORK,
+    )
+    .with_context(|| format!("ptrace seize {} failed", pid))?;
 
-    // Wait for the process to actually stop under ptrace
+    // 1b. SEIZE does not create a ptrace-stop, so explicitly interrupt the
+    //     (group-stopped) target to obtain a ptrace-stop we can operate on.
+    //     PTRACE_INTERRUPT injects no signal either.
+    ptrace::interrupt(target)
+        .with_context(|| format!("ptrace interrupt {} failed", pid))?;
+
     match waitpid(target, None) {
-        Ok(WaitStatus::Stopped(_, _)) => {}
+        // Under SEIZE, the interrupt/group-stop is reported as an event stop.
+        Ok(WaitStatus::PtraceEvent(_, _, _)) | Ok(WaitStatus::Stopped(_, _)) => {}
         Ok(status) => {
             ptrace::detach(target, None).ok();
-            anyhow::bail!("Unexpected wait status after attach: {:?}", status);
+            anyhow::bail!("Unexpected wait status after seize/interrupt: {:?}", status);
         }
         Err(e) => {
             ptrace::detach(target, None).ok();
-            anyhow::bail!("waitpid after attach failed: {}", e);
+            anyhow::bail!("waitpid after seize/interrupt failed: {}", e);
         }
     }
 
@@ -382,27 +401,32 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
     let syscall_addr = find_syscall_instruction(pid, &orig_regs)?;
     eprintln!("[cow] Found syscall instruction at 0x{:x} for pid {}", syscall_addr, pid);
 
-    // 4. Set up registers for clone(SIGCHLD, 0, 0, 0, 0) → equivalent to fork()
+    // 4. Set up registers for clone(0, 0, 0, 0, 0) → a fork-like COW child with
+    //    NO exit signal.
+    //
+    //    We deliberately pass exit_signal = 0 (NOT SIGCHLD). Without CLONE_VM the
+    //    child still receives a full copy-on-write snapshot of the parent's
+    //    address space (exactly what we need), and child_stack = NULL makes it
+    //    resume on the parent's (COW) stack — i.e. identical memory semantics to
+    //    fork(). The only difference from fork() is that the child sends NO
+    //    signal to the parent when it stops or exits.
+    //
+    //    This is critical for tracking real, signal-aware processes such as a
+    //    shell: with SIGCHLD as the exit signal, the shadow child appears as a
+    //    mysterious child of the target, and the target's SIGCHLD handler / job
+    //    control would waitpid() it and race with our inject/resume sequence,
+    //    intermittently crashing the target. exit_signal = 0 makes the shadow
+    //    completely invisible to the target's signal handling.
     let mut new_regs = orig_regs;
     new_regs.rip = syscall_addr;
     new_regs.rax = libc::SYS_clone as u64;  // __NR_clone = 56
-    new_regs.rdi = libc::SIGCHLD as u64;    // flags = SIGCHLD (mimics fork)
+    new_regs.rdi = 0;                        // flags = 0 (no CLONE_VM → COW; no exit_signal)
     new_regs.rsi = 0;                        // child_stack = NULL (use parent's stack)
     new_regs.rdx = 0;                        // parent_tidptr = NULL
     new_regs.r10 = 0;                        // child_tidptr = NULL
     new_regs.r8 = 0;                         // tls = NULL
 
-    // 5. Set ptrace options to trace fork/clone events.
-    //    This makes the kernel report PTRACE_EVENT_FORK/CLONE when clone() succeeds,
-    //    giving us the reliable child PID via PTRACE_GETEVENTMSG.
-    ptrace::setoptions(
-        target,
-        ptrace::Options::PTRACE_O_TRACEFORK
-            | ptrace::Options::PTRACE_O_TRACECLONE
-            | ptrace::Options::PTRACE_O_TRACEVFORK,
-    )
-    .context("Failed to set ptrace options for fork tracing")?;
-
+    // 5. (Fork/clone/vfork trace options were already armed at PTRACE_SEIZE time.)
     ptrace::setregs(target, new_regs)
         .context("Failed to set registers for fork injection")?;
 
@@ -416,14 +440,24 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
     let child_pid: u32 = loop {
         match waitpid(target, None) {
             Ok(WaitStatus::PtraceEvent(_, _, event)) => {
-                // event: PTRACE_EVENT_FORK=1, PTRACE_EVENT_VFORK=2, PTRACE_EVENT_CLONE=3
-                let child = ptrace::getevent(target)
-                    .context("Failed to get event data (child pid)")?;
-                eprintln!(
-                    "[cow] Got ptrace event {} (fork/clone/vfork), child pid = {}",
-                    event, child
-                );
-                break child as u32;
+                // Under PTRACE_SEIZE a group-stop is reported as PTRACE_EVENT_STOP;
+                // only FORK/VFORK/CLONE carry the new child pid via GETEVENTMSG.
+                if event == libc::PTRACE_EVENT_FORK
+                    || event == libc::PTRACE_EVENT_VFORK
+                    || event == libc::PTRACE_EVENT_CLONE
+                {
+                    let child = ptrace::getevent(target)
+                        .context("Failed to get event data (child pid)")?;
+                    eprintln!(
+                        "[cow] Got ptrace event {} (fork/clone/vfork), child pid = {}",
+                        event, child
+                    );
+                    break child as u32;
+                }
+                // Any other event stop (e.g. group-stop): resume and keep waiting.
+                eprintln!("[cow] Ignoring ptrace event {} during injection, continuing", event);
+                ptrace::cont(target, None)
+                    .context("Failed to continue after non-fork ptrace event")?;
             }
             Ok(WaitStatus::Stopped(_, Signal::SIGTRAP)) => {
                 // Could be syscall-stop without TRACESYSGOOD; just continue
@@ -459,7 +493,7 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
     // 8. The child is auto-traced (PTRACE_O_TRACECLONE/FORK auto-attaches the child).
     //    Wait for the child's initial ptrace-stop, then detach it with SIGSTOP.
     match waitpid(Pid::from_raw(child_pid as i32), Some(WaitPidFlag::__WALL)) {
-        Ok(WaitStatus::Stopped(_, _)) => {}
+        Ok(WaitStatus::Stopped(_, _)) | Ok(WaitStatus::PtraceEvent(_, _, _)) => {}
         _ => {
             // Try a blocking wait if WNOHANG didn't catch it
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -477,7 +511,15 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
             eprintln!("[cow] Warning: detach from shadow child {} failed: {}", child_pid, e);
         });
 
-    // 9. Restore original registers in parent
+    // 9. Restore original registers. The target was group-stopped inside its
+    //    original (restartable) syscall, so orig_regs already carries the
+    //    kernel's restart state (rax = -ERESTARTSYS with rip just past the
+    //    `syscall` instruction). On resume the kernel's own signal-return path
+    //    rewinds rip and reloads the syscall number, transparently restarting
+    //    the interrupted syscall — so a plain restore is correct here. (A manual
+    //    re-arm was tried and is exactly equivalent to this kernel behaviour; it
+    //    did not affect the residual injection race, so it was removed to keep
+    //    the resume path minimal.)
     ptrace::setregs(target, orig_regs)
         .context("Failed to restore original registers")?;
 

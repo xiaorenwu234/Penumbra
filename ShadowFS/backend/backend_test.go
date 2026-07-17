@@ -369,6 +369,56 @@ func TestRecordRenameAndRollback(t *testing.T) {
 	}
 }
 
+// TestRenameRollbackRemovesDstOverlayAndInvalidates verifies that rolling back
+// a rename removes the destination's overlay copy (so the merged view no longer
+// shows the renamed file) and that the registered invalidate callback is
+// notified of both endpoints so the FUSE layer can drop stale kernel dentries.
+func TestRenameRollbackRemovesDstOverlayAndInvalidates(t *testing.T) {
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	var invalidated []string
+	b.SetInvalidateCallback(func(paths []string) {
+		invalidated = append(invalidated, paths...)
+	})
+
+	src := filepath.Join(trackedDir, "src.txt")
+	dst := filepath.Join(trackedDir, "dst.txt")
+	os.WriteFile(src, []byte("hello"), 0o644)
+
+	if err := b.RecordRename(agentA, src, dst); err != nil {
+		t.Fatalf("RecordRename: %v", err)
+	}
+	dstOverlay, _ := overlayPathFor(b.StagingDir(), b.TrackedDir(), dst)
+	if _, err := os.Stat(dstOverlay); err != nil {
+		t.Fatalf("dst overlay should exist after rename: %v", err)
+	}
+
+	if err := b.Rollback(agentA); err != nil {
+		t.Fatal(err)
+	}
+
+	// The destination overlay copy must be gone; otherwise the merged view
+	// would keep showing the renamed file after a rollback.
+	if _, err := os.Stat(dstOverlay); !os.IsNotExist(err) {
+		t.Errorf("dst overlay should be removed after rollback, got err=%v", err)
+	}
+
+	// The invalidate callback must have been told about both endpoints.
+	sawSrc, sawDst := false, false
+	for _, p := range invalidated {
+		if p == src {
+			sawSrc = true
+		}
+		if p == dst {
+			sawDst = true
+		}
+	}
+	if !sawSrc || !sawDst {
+		t.Errorf("invalidate callback missing endpoints: sawSrc=%v sawDst=%v (got %v)", sawSrc, sawDst, invalidated)
+	}
+}
+
 // --- Idempotency / dedup ---
 
 func TestPrepareWriteDedup(t *testing.T) {
@@ -606,6 +656,55 @@ func TestRecordReadOpenNoWriterNoDependency(t *testing.T) {
 	}
 	if b.AgentLen(agentB) != 0 {
 		t.Errorf("agentB len = %d, want 0", b.AgentLen(agentB))
+	}
+}
+
+// --- Release gating (CanRelease) ---
+
+// TestCanReleaseGatedByUpstreamCommit verifies that a committed downstream
+// agent is only releasable once its upstream dependency is also committed —
+// the same gate ShadowFS uses to promote file changes. This mirrors the
+// property ShadowProc relies on to hold external (IPC/network) operations
+// until no upstream rollback can still cascade into the cgroup.
+func TestCanReleaseGatedByUpstreamCommit(t *testing.T) {
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	// A writes f; B reads f (so B depends on A) and writes its own file g
+	// to give B active state that must survive until A commits.
+	f := filepath.Join(trackedDir, "f.txt")
+	writeOverlay(t, b, agentA, f, []byte("a"))
+	b.RecordReadOpen(agentB, f)
+	writeOverlay(t, b, agentB, filepath.Join(trackedDir, "g.txt"), []byte("b"))
+
+	if !b.DependsOn(agentB, agentA) {
+		t.Fatal("precondition: B should depend on A")
+	}
+
+	// Untracked cgroup: nothing can cascade into it → releasable.
+	if !b.CanRelease("cgroup-unknown") {
+		t.Error("untracked cgroup should be releasable")
+	}
+
+	// Nothing committed yet: neither is releasable.
+	if b.CanRelease(agentA) {
+		t.Error("A should not be releasable before commit")
+	}
+	if b.CanRelease(agentB) {
+		t.Error("B should not be releasable before commit")
+	}
+
+	// Commit B only: its upstream A is still uncommitted → B must NOT be
+	// releasable (an A rollback would still cascade into B).
+	b.Commit(agentB)
+	if b.CanRelease(agentB) {
+		t.Error("B must not be releasable while upstream A is uncommitted")
+	}
+
+	// Commit A: now B's only upstream is committed → B becomes releasable.
+	b.Commit(agentA)
+	if !b.CanRelease(agentB) {
+		t.Error("B should be releasable once upstream A is committed")
 	}
 }
 

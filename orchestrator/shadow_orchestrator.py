@@ -115,6 +115,19 @@ class ShadowOrchestrator:
         # Populated via register_output(); flushed on commit; discarded on rollback.
         self._output_buffers: Dict[str, str] = {}
 
+        # Deferred external-operation release.
+        #
+        # A cgroup may be committed (user intent) while its upstream
+        # dependencies in ShadowFS are not yet fully committed. In that
+        # window ShadowFS holds the agent's file changes un-promoted so a
+        # cascade rollback can still undo them. ShadowProc MUST likewise
+        # keep the agent's processes frozen so their IPC / network side
+        # effects don't escape prematurely. Such cgroups are parked here
+        # and released once ShadowFS reports their upstreams are committed
+        # (see _try_release_pending).
+        self._pending_release: set = set()
+        self._pending_lock = threading.Lock()
+
     def close(self):
         """Close connections to all services."""
         self.fs_client.close()
@@ -196,52 +209,116 @@ class ShadowOrchestrator:
         except OSError as e:
             return {"status": "error", "message": str(e)}
 
+    def _fs_can_release(self, cgroup_id: str) -> bool:
+        """
+        Ask ShadowFS whether a cgroup's external side effects are safe to
+        release, i.e. all of its upstream dependencies are committed.
+
+        This is the SAME gate ShadowFS uses to promote the agent's file
+        changes, so ShadowProc's process layer stays consistent with the
+        filesystem layer.
+        """
+        resp = self.fs_client.request({
+            "action": "can_release",
+            "cgroup_id": cgroup_id,
+        })
+        if resp.get("status") != "ok":
+            # Unknown / not tracked by ShadowFS: no filesystem dependency
+            # can cascade a rollback into it, so it is safe to release.
+            return True
+        return bool(resp.get("releasable", True))
+
+    def _release_proc(self, cgroup_id: str) -> str:
+        """
+        Resume ShadowProc's frozen processes for a cgroup (letting their
+        held IPC / network / exit operations proceed) and flush the
+        cgroup's buffered stdout to the caller.
+
+        Returns the flushed stdout content.
+        """
+        frozen_resp = self.proc_client.request({
+            "action": "list_frozen",
+            "cgroup_id": cgroup_id,
+        })
+        if frozen_resp.get("status") == "ok" and frozen_resp.get("frozen"):
+            frozen_count = len(frozen_resp["frozen"])
+            log.info("  Releasing %d frozen process(es) for cgroup=%s",
+                     frozen_count, cgroup_id)
+            resume_resp = self.proc_client.request({
+                "action": "continue_by_cgroup",
+                "cgroup_id": cgroup_id,
+            })
+            if resume_resp.get("status") == "ok":
+                log.info("  Resumed PIDs: %s", resume_resp.get("pids", []))
+            else:
+                log.warning("  Resume failed: %s", resume_resp.get("message"))
+
+        buffered = self._flush_output(cgroup_id)
+        if buffered:
+            log.info("  Releasing %d bytes of buffered stdout for cgroup=%s",
+                     len(buffered), cgroup_id)
+        return buffered
+
+    def _try_release_pending(self) -> None:
+        """
+        Re-evaluate every deferred cgroup and release those whose upstream
+        dependencies have since been committed. Committing one cgroup can
+        unblock previously-deferred downstream cgroups, so this is called
+        after every commit.
+        """
+        with self._pending_lock:
+            pending = list(self._pending_release)
+        for cg in pending:
+            if self._fs_can_release(cg):
+                log.info("  Upstream now committed — releasing deferred "
+                         "cgroup=%s", cg)
+                self._release_proc(cg)
+                with self._pending_lock:
+                    self._pending_release.discard(cg)
+
     def commit(self, cgroup_id: str) -> dict:
         """
         Commit changes for a cgroup.
 
         Flow:
-        1. Check if ShadowProc has frozen processes for this cgroup.
-        2. If yes, resume them (continue_by_cgroup).
-        3. Tell ShadowFS to commit the agent.
+        1. Commit filesystem changes in ShadowFS FIRST, so the dependency
+           graph reflects this commit before any release decision.
+        2. Release the cgroup's frozen processes ONLY if all of its
+           upstream dependencies are committed. Otherwise defer the
+           release (keep the processes frozen and stdout buffered) until a
+           later upstream commit unblocks it.
+        3. Re-evaluate previously-deferred cgroups this commit may unblock.
 
         Args:
             cgroup_id: The cgroup identifier (path from /proc/<pid>/cgroup)
         """
         log.info("COMMIT cgroup=%s", cgroup_id)
 
-        # Step 1: Check and resume frozen processes
-        frozen_resp = self.proc_client.request({
-            "action": "list_frozen",
-            "cgroup_id": cgroup_id,
-        })
-        if frozen_resp["status"] == "ok" and frozen_resp.get("frozen"):
-            frozen_count = len(frozen_resp["frozen"])
-            log.info("  Found %d frozen process(es), resuming...", frozen_count)
-            resume_resp = self.proc_client.request({
-                "action": "continue_by_cgroup",
-                "cgroup_id": cgroup_id,
-            })
-            if resume_resp["status"] == "ok":
-                pids = resume_resp.get("pids", [])
-                log.info("  Resumed PIDs: %s", pids)
-            else:
-                log.warning("  Resume failed: %s", resume_resp.get("message"))
-
-        # Step 2: Commit in ShadowFS
+        # Step 1: Commit in ShadowFS first.
         fs_resp = self.fs_client.request({
             "action": "commit",
             "cgroup_id": cgroup_id,
         })
-        if fs_resp["status"] == "ok":
-            log.info("  ShadowFS commit successful")
-            # Flush buffered stdout to the caller (was hidden until now).
-            buffered = self._flush_output(cgroup_id)
-            if buffered:
-                log.info("  Releasing %d bytes of buffered stdout", len(buffered))
-            fs_resp["stdout"] = buffered
-        else:
+        if fs_resp["status"] != "ok":
             log.error("  ShadowFS commit failed: %s", fs_resp.get("message"))
+            return fs_resp
+        log.info("  ShadowFS commit successful")
+
+        # Step 2: Gate the process-layer release on upstream commit status.
+        if self._fs_can_release(cgroup_id):
+            fs_resp["stdout"] = self._release_proc(cgroup_id)
+            fs_resp["released"] = True
+        else:
+            with self._pending_lock:
+                self._pending_release.add(cgroup_id)
+            log.info("  Deferring release of cgroup=%s: upstream "
+                     "dependencies not fully committed yet", cgroup_id)
+            fs_resp["stdout"] = ""
+            fs_resp["released"] = False
+            fs_resp["deferred"] = True
+
+        # Step 3: This commit may have unblocked deferred downstream cgroups.
+        self._try_release_pending()
 
         return fs_resp
 
@@ -291,6 +368,13 @@ class ShadowOrchestrator:
         for affected_cgroup in affected:
             self._discard_output(affected_cgroup)
         self._discard_output(cgroup_id)
+
+        # Drop any deferred releases for cgroups undone by this cascade:
+        # their processes were just killed, so there is nothing to release.
+        with self._pending_lock:
+            for affected_cgroup in affected:
+                self._pending_release.discard(affected_cgroup)
+            self._pending_release.discard(cgroup_id)
 
         return {"status": "ok", "affected": affected, "killed_pids": total_killed}
 
@@ -497,24 +581,27 @@ class ShadowOrchestrator:
             })
             if fs_resp.get("status") == "ok":
                 log.info("  ShadowFS commit successful")
-                # Flush buffered stdout on committed audit
-                buffered = self._flush_output(cgroup_id)
-                if buffered:
-                    log.info("  Releasing %d bytes of buffered stdout",
-                             len(buffered))
             else:
                 log.error("  ShadowFS commit failed: %s", fs_resp.get("message"))
 
-            # Resume frozen processes
-            resume_resp = self.proc_client.request({
-                "action": "continue_by_cgroup",
-                "cgroup_id": cgroup_id,
-            })
-            if resume_resp.get("status") == "ok":
-                log.info("  Processes resumed: %s", resume_resp.get("pids", []))
+            # Release frozen processes only when all upstream dependencies
+            # are committed; otherwise defer until a later upstream commit
+            # unblocks this cgroup (keeps IPC / stdout held).
+            released = False
+            if self._fs_can_release(cgroup_id):
+                buffered = self._release_proc(cgroup_id)
+                released = True
+            else:
+                with self._pending_lock:
+                    self._pending_release.add(cgroup_id)
+                log.info("  Deferring release of cgroup=%s: upstream "
+                         "dependencies not fully committed yet", cgroup_id)
 
             # Cleanup observation state
             del self._observe_state[cgroup_id]
+
+            # This commit may unblock previously-deferred downstream cgroups.
+            self._try_release_pending()
 
             return {
                 "status": "ok",
@@ -522,6 +609,7 @@ class ShadowOrchestrator:
                 "total_events": total_events,
                 "total_violations": 0,
                 "stdout": buffered,
+                "released": released,
             }
         else:
             # AUDIT FAILED: rollback → kill
@@ -562,6 +650,11 @@ class ShadowOrchestrator:
             # Discard buffered stdout for all affected cgroups
             for cg in kill_cgroups:
                 self._discard_output(cg)
+
+            # Drop any deferred releases for the undone cgroups.
+            with self._pending_lock:
+                for cg in kill_cgroups:
+                    self._pending_release.discard(cg)
 
             # Cleanup observation state
             del self._observe_state[cgroup_id]

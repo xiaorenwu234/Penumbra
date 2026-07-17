@@ -27,6 +27,11 @@ type Response struct {
 	Message  string   `json:"message,omitempty"`
 	Affected []string `json:"affected,omitempty"`
 	Agents   []string `json:"agents,omitempty"`
+	// Releasable is set by the can_release action. It reports whether the
+	// cgroup's external side effects are safe to externalize (i.e. all of
+	// its upstream dependencies are committed). Pointer so a false value is
+	// still serialized.
+	Releasable *bool `json:"releasable,omitempty"`
 }
 
 // NewSocketServer creates and starts a Unix socket server at the given path.
@@ -117,6 +122,13 @@ func (s *SocketServer) handleRequest(req Request) Response {
 		}
 		affected := shadowBackend.GetAffected(req.CgroupID)
 		return Response{Status: "ok", Affected: affected}
+
+	case "can_release":
+		if req.CgroupID == "" {
+			return Response{Status: "error", Message: "cgroup_id required"}
+		}
+		r := shadowBackend.CanRelease(req.CgroupID)
+		return Response{Status: "ok", Releasable: &r}
 
 	case "list_agents":
 		agents := shadowBackend.ListAgents()
