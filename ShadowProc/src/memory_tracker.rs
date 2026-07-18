@@ -254,9 +254,62 @@ impl MemoryTracker {
         Ok(())
     }
 
+    /// Reject the speculative version and roll back via PROCESS VERSIONING.
+    ///
+    /// Instead of splicing the checkpoint's memory pages onto the live process
+    /// (restore_memory), which fails whenever the snapshot boundary and the
+    /// rollback boundary differ (the live registers/stack reference heap/arena
+    /// state that the page-restore reverts → dangling pointers → libc segfault),
+    /// this discards the speculative process `pid` entirely and RESUMES its
+    /// pristine checkpoint (the shadow) as the new canonical process.
+    ///
+    /// The shadow is a full fork-checkpoint whose registers, stack, heap, TLS
+    /// and userspace runtime state all belong to a single coherent instant, so
+    /// resuming it can never produce a T0/T1 mismatch. Returns the promoted
+    /// (shadow) pid, which becomes the live canonical pid.
+    pub fn reject_to_checkpoint(&mut self, pid: u32) -> Result<u32> {
+        let state = self
+            .shadows
+            .remove(&pid)
+            .ok_or_else(|| anyhow::anyhow!("Process {} is not being COW-tracked", pid))?;
+        let shadow_pid = state.shadow_pid;
+        let memfd = state.memfd;
+        // We are PROMOTING the shadow, so its ShadowState::Drop (which SIGKILLs
+        // the shadow and closes the memfd) must NOT run. Skip Drop via forget
+        // and release the memfd ourselves.
+        std::mem::forget(state);
+        unsafe {
+            libc::close(memfd);
+        }
+
+        // Discard the speculative (live) process and reap it.
+        let _ = nix::sys::signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+        let _ = waitpid(Pid::from_raw(pid as i32), Some(WaitPidFlag::WNOHANG));
+
+        // Promote the checkpoint: resume the shadow as the canonical process.
+        // It was left SIGSTOP'd at begin_tracking with coherent registers, so a
+        // plain SIGCONT continues it exactly from the snapshot instant.
+        nix::sys::signal::kill(Pid::from_raw(shadow_pid as i32), Signal::SIGCONT)
+            .with_context(|| format!("Failed to resume checkpoint (shadow) pid {}", shadow_pid))?;
+
+        eprintln!(
+            "[cow] Reject pid {}: killed speculative version, resumed checkpoint (shadow) pid {} as canonical",
+            pid, shadow_pid
+        );
+        Ok(shadow_pid)
+    }
+
     /// Check if a process is currently being COW-tracked
     pub fn is_tracking(&self, pid: u32) -> bool {
         self.shadows.contains_key(&pid)
+    }
+
+    /// Check if a pid is a COW shadow process (an internal artifact created by
+    /// fork injection). Shadow processes happen to live inside the monitored
+    /// cgroup, but must NEVER be frozen/killed by cgroup-level operations:
+    /// they are ptrace-managed snapshots holding pristine memory for rollback.
+    pub fn is_shadow_pid(&self, pid: u32) -> bool {
+        self.shadows.values().any(|s| s.shadow_pid == pid)
     }
 
     /// Get all tracked PIDs
@@ -505,6 +558,18 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
     }
 
     // Send SIGSTOP and detach the child so it stays permanently frozen
+    //
+    // Before freezing it, promote it from a passive "memory donor" into a
+    // fully COHERENT, RESUMABLE checkpoint by giving it the target's register
+    // state at the snapshot instant (orig_regs). Left untouched, the shadow's
+    // registers point at the injected clone site (rip = syscall_addr+2, rax = 0)
+    // — fine for reading its memory, but garbage to actually run. With orig_regs
+    // the shadow's MEMORY (a COW copy taken at the clone) and its REGISTERS
+    // describe the SAME coherent moment, so it can later be SIGCONT'd to run as
+    // the canonical process (process-versioning rollback: kill the speculative
+    // version, resume this checkpoint) with no T0/T1 memory/register splicing.
+    let _ = ptrace::setregs(Pid::from_raw(child_pid as i32), orig_regs);
+
     let _ = nix::sys::signal::kill(Pid::from_raw(child_pid as i32), Signal::SIGSTOP);
     ptrace::detach(Pid::from_raw(child_pid as i32), Some(Signal::SIGSTOP))
         .unwrap_or_else(|e| {

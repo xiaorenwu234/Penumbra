@@ -81,10 +81,13 @@ CGROUP_NAME="shadow-demo"
 CGROUP_PATH="/sys/fs/cgroup/$CGROUP_NAME"
 CGROUP_NAME_B="shadow-demo-b"
 CGROUP_PATH_B="/sys/fs/cgroup/$CGROUP_NAME_B"
-# Dedicated cgroup for the bash env-rollback scenario. It is DELIBERATELY NOT
-# registered with ShadowProc's eBPF, so bash's own startup syscalls (e.g. a
-# MAP_SHARED mmap of the locale archive) are never intercepted/frozen. This
-# keeps the freeze/resume flow fully under our manual control.
+# Dedicated cgroup for the bash env-rollback scenario. It IS registered with
+# ShadowProc's eBPF (monitored), so bash freezes are triggered by genuine eBPF
+# interception of bash's own connect() (via a /dev/tcp redirection), exactly
+# like every other agent in this demo. This is only possible because the
+# lsm/mmap_file hook now exempts read-only MAP_SHARED mappings (ld.so.cache /
+# locale-archive), which bash performs at startup — otherwise bash would freeze
+# before it could run a single command.
 CGROUP_NAME_C="shadow-demo-c"
 CGROUP_PATH_C="/sys/fs/cgroup/$CGROUP_NAME_C"
 
@@ -1003,6 +1006,11 @@ scenario_exit_hold() {
     resume_resp=$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$REAL_PID}")
     show_json "$resume_resp"
 
+    # NOTE: the cgroup_exec_hold WRAPPER runs OUTSIDE the monitored cgroup, so
+    # the agent's connect() interception (whole-cgroup freeze) never touches it.
+    # The wrapper is fully transparent — no manual resume is needed here; it
+    # will return to the caller on its own once the agent signals completion.
+
     # Step 4: Wait for wrapper to EXIT (proves caller sees normal completion)
     step "Step 4: Waiting for cgroup_exec_hold to return (caller's perspective)..."
     local wait_exit_code=0
@@ -1289,165 +1297,224 @@ scenario_deferred_release() {
     rm -f "$LOWER_DIR/data7.txt" "$LOWER_DIR/derived7.txt" 2>/dev/null || true
 }
 
-# ─────── Scenario 8: Bash Env Var Memory Rollback (real shell) ───────
-# Demonstrates COW memory rollback on a REAL bash process. bash keeps its
-# variables in a heap-resident hash table (a writable-private region), so the
-# COW snapshot/soft-dirty machinery covers it. We drive bash through a FIFO:
-#   export SHADOW_VAR=ORIGINAL   -> snapshot (begin_speculative)
-#   export SHADOW_VAR=MODIFIED   -> speculative modification
-#   restore_memory_pid           -> heap pages reverted to snapshot
-#   echo $SHADOW_VAR             -> back to ORIGINAL (proves rollback)
+# ─────── Scenario 8: Forked Child Env Var Rollback via Process Versioning ───────
+# Demonstrates speculative rollback of a REAL forked bash child inside a
+# MONITORED cgroup, using PROCESS VERSIONING instead of in-place memory patching.
+#
+# eBPF interception is proven directly: the child issues connect() from inside
+# the monitored cgroup (via a `< /dev/tcp/127.0.0.1/PORT` redirection) and
+# lsm/socket_connect traps + freezes it. This is only possible because the
+# mmap-hook fix exempts bash's read-only MAP_SHARED startup mappings.
+#
+# Why process versioning (not restore_memory): patching a live process's pages
+# from the snapshot only works when the snapshot boundary and the rollback
+# boundary share the same live call chain. An auto-tracked forked child is
+# snapshotted at fork() but would be rolled back at a different point, so its
+# registers/stack reference heap/arena state the page-restore reverts → dangling
+# pointers → libc segfault. Instead we keep the fork-time checkpoint (the shadow)
+# as a complete, resumable process and, on reject, DISCARD the speculative child
+# and RESUME the checkpoint as canonical — no T0/T1 boundary mismatch possible.
+#
+# We drive the child through its own FIFO (fd 8) as a command REPL:
+#   begin_speculative(bash)      -> auto-track ON; child auto-forked at birth = P0
+#   read ORIGINAL                -> child (P1) observes inherited value
+#   export SHADOW_VAR=MODIFIED    -> speculative modification in P1
+#   connect()                    -> eBPF freezes the cgroup (interception proof)
+#   reject_pid(P1)               -> kill P1, SIGCONT its fork-checkpoint P0
+#   read SHADOW_VAR              -> P0 reports ORIGINAL (proves rollback)
 # NOTE: verification uses `echo` (not /proc/PID/environ): bash's `export` only
 # mutates its heap variable table, never the execve-time stack env region that
 # /proc/PID/environ exposes.
 scenario_bash_env_rollback() {
     banner
-    section "Scenario 8: BASH ENV VAR MEMORY ROLLBACK (real shell)"
-    echo -e "  ${YELLOW}A real bash sets SHADOW_VAR=ORIGINAL → COW snapshot${NC}"
-    echo -e "  ${YELLOW}Speculatively changes it to MODIFIED_BY_AGENT → restore_memory_pid${NC}"
-    echo -e "  ${YELLOW}After rollback, echo \$SHADOW_VAR is back to ORIGINAL (heap reverted)${NC}"
+    section "Scenario 8: FORKED CHILD ENV VAR COW ROLLBACK (real shell)"
+    echo -e "  ${YELLOW}A real bash exports SHADOW_VAR=ORIGINAL — bash itself is NOT intercepted${NC}"
+    echo -e "  ${YELLOW}bash is COW-tracked (begin_speculative) → auto-track ON for its children${NC}"
+    echo -e "  ${YELLOW}bash forks a child; the child is auto-snapshotted at fork() = ORIGINAL${NC}"
+    echo -e "  ${YELLOW}Child changes SHADOW_VAR=MODIFIED_BY_AGENT, then connect() → eBPF auto-freezes${NC}"
+    echo -e "  ${YELLOW}the cgroup. REJECT = discard the speculative child, resume its pristine${NC}"
+    echo -e "  ${YELLOW}fork-checkpoint (process versioning) → SHADOW_VAR is ORIGINAL again${NC}"
     echo ""
 
     local CGROUP_ID="/$CGROUP_NAME_C"
+    local CHILD_FIFO="/tmp/shadow-demo-child.fifo"
+    local CHILD_LOG="/tmp/shadow-demo-child.log"
     mkdir -p "$CGROUP_PATH_C"
-    info "Using dedicated UNMONITORED cgroup for bash: $CGROUP_ID"
-    warn "bash must stay OUT of eBPF-monitored cgroups: its startup MAP_SHARED"
-    warn "mmap would otherwise be intercepted and freeze it before it runs."
+    # Register cgroup-C with ShadowProc's eBPF so bash + its forked children are
+    # genuinely MONITORED. bash can live here without freezing at startup because
+    # the mmap hook exempts its read-only MAP_SHARED loader mappings.
+    step "Registering cgroup-C with ShadowProc (eBPF-monitored)..."
+    show_json "$(shadowproc_cmd "{\"action\":\"add_cgroup\",\"cgroup_path\":\"$CGROUP_PATH_C\"}")"
+    info "bash + its forked children live in eBPF-MONITORED cgroup: $CGROUP_ID"
 
-    # Read the value part of the last "checkpointN:VALUE" line for a given tag.
-    read_checkpoint() { grep "^$1:" "$BASH_LOG" 2>/dev/null | tail -1 | cut -d: -f2- || true; }
+    # Read the value part of the last "tag:VALUE" line from bash's / the child's log.
+    read_bash()  { grep "^$1:" "$BASH_LOG"  2>/dev/null | tail -1 | cut -d: -f2- || true; }
+    read_child() { grep "^$1:" "$CHILD_LOG" 2>/dev/null | tail -1 | cut -d: -f2- || true; }
     # Feed a command to bash (fd 9 is the FIFO write end) and let it run.
     feed_bash() { printf '%s\n' "$1" >&9; sleep 0.5; }
+    # Feed a command to the FIFO-driven CHILD (fd 8 is its FIFO write end).
+    feed_child() { printf '%s\n' "$1" >&8; sleep 0.5; }
     # Poll /proc/PID/status until the process reaches stopped state 'T' (or timeout).
     wait_state_T() {
         local pid=$1 t=0
-        while [[ $t -lt 20 ]]; do
+        while [[ $t -lt 25 ]]; do
             [[ "$(awk '/^State:/{print $2}' /proc/"$pid"/status 2>/dev/null)" == "T" ]] && return 0
             sleep 0.1; t=$((t + 1))
         done
         return 1
     }
-    # Purge leftover processes in cgroup-C (e.g. a shadow child) at teardown.
+    # Purge leftover processes in cgroup-C (bash, its subshell, COW shadows) at teardown.
     purge_cgroup_c() {
         if [[ -f "$CGROUP_PATH_C/cgroup.procs" ]]; then
             while read -r p; do kill -9 "$p" 2>/dev/null || true; done < "$CGROUP_PATH_C/cgroup.procs"
         fi
     }
 
-    local cp0="" cp1="" cp2="" success=false
-    warn "ptrace fork-injection into a live, signal-driven shell has a small"
-    warn "residual timing race (the SIGSTOP crash-class is already fixed via"
-    warn "PTRACE_SEIZE); if bash loses that race this scenario retries (max 3)."
+    local orig="" before="" after="" success=false
+    warn "ptrace fork-injection (begin_speculative) into a live, signal-driven shell"
+    warn "has a small residual timing race (the SIGSTOP crash-class is already fixed"
+    warn "via PTRACE_SEIZE); if bash / its child loses it, this scenario retries (max 3)."
 
     local attempt
     for attempt in 1 2 3; do
         echo ""
         step "────────── Attempt $attempt/3 ──────────"
         purge_cgroup_c
-        cp0=""; cp1=""; cp2=""
+        orig=""; before=""; after=""
 
-        # Fresh FIFO + log each attempt. Hold the FIFO open read-write on fd 9 so
-        # bash never sees EOF and the write side never blocks.
-        rm -f "$BASH_FIFO" "$BASH_LOG"; mkfifo "$BASH_FIFO"; : > "$BASH_LOG"
+        # Fresh FIFOs + logs each attempt. Hold the bash FIFO open read-write on
+        # fd 9 so bash never sees EOF and the write side never blocks. The child
+        # gets its OWN FIFO used purely as a clean idle-in-read boundary.
+        rm -f "$BASH_FIFO" "$BASH_LOG" "$CHILD_FIFO" "$CHILD_LOG"
+        mkfifo "$BASH_FIFO"; mkfifo "$CHILD_FIFO"; : > "$BASH_LOG"; : > "$CHILD_LOG"
         exec 9<>"$BASH_FIFO"
+        # Hold the child's FIFO open rw on fd 8 too, so the child (and its
+        # resumed checkpoint) never see EOF and our command writes never block.
+        exec 8<>"$CHILD_FIFO"
 
-        # Launch a real bash inside the UNMONITORED cgroup-C. cgroup_exec exec()s
-        # in place, so BASH_PID is the actual bash. Do NOT set SHADOW_OUTPUT_FILE
-        # so our own stdout redirection to $BASH_LOG stays in effect.
-        step "Step 1: Launching real bash inside cgroup-C (unmonitored, driven via FIFO)..."
+        # Launch a real bash inside the MONITORED cgroup-C. cgroup_exec exec()s in
+        # place, so BASH_PID is the actual bash.
+        step "Step 1: Launching real bash inside cgroup-C (eBPF-monitored, driven via FIFO)..."
         "$CGROUP_EXEC" "$CGROUP_PATH_C/cgroup.procs" bash --norc < "$BASH_FIFO" > "$BASH_LOG" 2>&1 &
         local BASH_PID=$!
         sleep 0.5
         if ! kill -0 "$BASH_PID" 2>/dev/null; then
-            warn "bash failed to start — retrying"; exec 9>&-; continue
+            warn "bash failed to start — retrying"; exec 8>&- 9>&-; continue
         fi
         info "bash running (PID $BASH_PID)"
 
-        # Seed the environment variable inside the live shell.
+        # Seed the environment variable inside the live shell (NO interception here).
         feed_bash 'export SHADOW_VAR=ORIGINAL'
-        feed_bash 'echo checkpoint0:$SHADOW_VAR'
+        feed_bash 'echo parent_val:$SHADOW_VAR'
         sleep 0.3
-        cp0=$(read_checkpoint checkpoint0)
-        info "Initial value in bash: SHADOW_VAR=$cp0 (expected: ORIGINAL)"
+        info "parent bash: SHADOW_VAR=$(read_bash parent_val) (bash itself is never intercepted)"
 
-        # Step 2: Freeze bash (manual, via ShadowProc) then snapshot its memory.
+        # Step 2: Freeze bash at its idle-in-read boundary + begin_speculative.
+        # begin_speculative snapshots bash AND turns ON auto-track + eBPF fork
+        # reporting, so any child bash forks will be COW-snapshotted at fork time.
         echo ""
-        step "Step 2: Freezing bash (freeze_by_cgroup) + COW snapshot (begin_speculative)..."
+        step "Step 2: Freeze bash (freeze_by_cgroup) + begin_speculative (COW snapshot + auto-track children ON)..."
         show_json "$(shadowproc_cmd "{\"action\":\"freeze_by_cgroup\",\"cgroup_id\":\"$CGROUP_ID\"}")"
-        if wait_state_T "$BASH_PID"; then
-            info "bash is FROZEN (state=T)"
-        else
-            warn "bash never reached state=T"
-        fi
-        sleep 0.3
+        wait_state_T "$BASH_PID" || warn "bash never reached state=T"
+        sleep 0.2
         show_json "$(shadowproc_cmd "{\"action\":\"begin_speculative\",\"pid\":$BASH_PID}")"
-
-        # Step 3: Resume + speculatively modify the variable.
-        echo ""
-        step "Step 3: Resuming bash (resume_pid) + speculatively modifying SHADOW_VAR..."
         show_json "$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$BASH_PID}")"
-        sleep 0.5
-        feed_bash 'export SHADOW_VAR=MODIFIED_BY_AGENT'
-        feed_bash 'echo checkpoint1:$SHADOW_VAR'
-        sleep 0.3
-        cp1=$(read_checkpoint checkpoint1)
-        info "Modified value in bash: SHADOW_VAR=$cp1 (expected: MODIFIED_BY_AGENT)"
+        sleep 0.4
 
-        # Crash detection: if bash lost the fork-injection race it either died or
-        # never applied the modification. Clean up and retry rather than reporting
-        # a spurious failure.
-        if ! kill -0 "$BASH_PID" 2>/dev/null || [[ "$cp1" != "MODIFIED_BY_AGENT" ]]; then
-            warn "bash lost the ptrace fork-injection race (crashed / no modify) — retrying"
+        # Step 3: bash forks a FIFO-driven REPL child. eBPF reports the fork and
+        # ShadowProc injects a fork into it, producing a FROZEN process-checkpoint
+        # P0 (a complete, resumable clone of the child at birth = ORIGINAL). The
+        # live child is the speculative version P1, driven command-by-command
+        # through CHILD_FIFO (fd 8). P0 and P1 share the same env at fork.
+        echo ""
+        step "Step 3: bash forks a FIFO-REPL child → auto fork-checkpoint P0 (ORIGINAL) + speculative P1..."
+        feed_bash "( while IFS= read -r _cmd; do eval \"\$_cmd\"; done ) < $CHILD_FIFO & echo \"childpid:\$!\""
+        sleep 0.5
+        local CHILD_PID
+        CHILD_PID=$(read_bash childpid | tr -d ' ')
+        if [[ -z "$CHILD_PID" ]]; then
+            warn "could not capture child pid — retrying"
             kill -9 "$BASH_PID" 2>/dev/null || true
-            exec 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
+            exec 8>&- 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
+            continue
+        fi
+        info "speculative child P1 PID: $CHILD_PID (its fork-checkpoint P0 is frozen alongside)"
+
+        # Step 4: feed the speculative sequence to P1: observe ORIGINAL, mutate to
+        # MODIFIED_BY_AGENT, observe it, then connect(). The connect() is
+        # intercepted by eBPF, which SIGSTOPs P1 (mid-syscall — we don't care,
+        # we're going to DISCARD P1 wholesale) and auto-freezes the whole cgroup.
+        echo ""
+        step "Step 4: drive P1: read ORIGINAL → export MODIFIED_BY_AGENT → connect() → eBPF freezes the cgroup..."
+        feed_child "echo \"child_orig:\$SHADOW_VAR\" >> $CHILD_LOG"
+        feed_child "export SHADOW_VAR=MODIFIED_BY_AGENT"
+        feed_child "echo \"child_before:\$SHADOW_VAR\" >> $CHILD_LOG"
+        feed_child "read -t 1 _ < /dev/tcp/127.0.0.1/9 2>/dev/null || true"
+        if wait_state_T "$CHILD_PID"; then
+            info "speculative P1 is FROZEN (state=T) by lsm/socket_connect; cgroup auto-frozen too"
+        else
+            warn "P1 did not freeze on connect() — retrying"
+            kill -9 "$CHILD_PID" "$BASH_PID" 2>/dev/null || true
+            exec 8>&- 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
+            continue
+        fi
+        orig=$(read_child child_orig)
+        before=$(read_child child_before)
+        info "P1 inherited SHADOW_VAR=$orig at fork, mutated it to $before before connecting"
+        if [[ "$before" != "MODIFIED_BY_AGENT" ]]; then
+            warn "P1 never applied the modification (lost race / crashed) — retrying"
+            kill -9 "$CHILD_PID" "$BASH_PID" 2>/dev/null || true
+            exec 8>&- 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
             continue
         fi
 
-        # Step 4: Freeze again + roll memory back to the snapshot (no kill).
+        # Step 5: REJECT. Instead of patching P1's memory (which mixes fork-time
+        # snapshot with idle-time registers and crashes glibc), we DISCARD the
+        # speculative version P1 entirely and RESUME its pristine fork-checkpoint
+        # P0 as the canonical process. P0's registers/stack/heap/TLS all belong to
+        # the same instant, so it resumes cleanly with SHADOW_VAR=ORIGINAL.
         echo ""
-        step "Step 4: >>> Freezing bash again + restore_memory_pid (COW rollback)..."
-        show_json "$(shadowproc_cmd "{\"action\":\"freeze_by_cgroup\",\"cgroup_id\":\"$CGROUP_ID\"}")"
-        wait_state_T "$BASH_PID" || true
-        sleep 0.2
-        show_json "$(shadowproc_cmd "{\"action\":\"restore_memory_pid\",\"pid\":$BASH_PID}")"
+        step "Step 5: >>> REJECT: kill speculative P1, resume its fork-checkpoint P0 as canonical (process versioning)..."
+        show_json "$(shadowproc_cmd "{\"action\":\"reject_pid\",\"pid\":$CHILD_PID}")"
+        sleep 0.6
 
-        # Step 5: Resume and read the variable again — should be ORIGINAL.
+        # Step 6: P0 is now the live child, back at its FIFO read loop. Feed it one
+        # observation command; it reports SHADOW_VAR from its own (ORIGINAL) state.
+        # The speculative export/connect were consumed by the now-dead P1 and never
+        # touched P0, so P0 reads ORIGINAL.
         echo ""
-        step "Step 5: Resuming bash + re-reading SHADOW_VAR (should be ORIGINAL again)..."
-        show_json "$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$BASH_PID}")"
-        sleep 0.5
-        feed_bash 'echo checkpoint2:$SHADOW_VAR'
-        sleep 0.3
-        cp2=$(read_checkpoint checkpoint2)
-        info "Value after rollback: SHADOW_VAR=$cp2 (expected: ORIGINAL)"
+        step "Step 6: drive the resumed checkpoint P0 → it reports SHADOW_VAR (expect ORIGINAL)..."
+        feed_child "echo \"child_after:\$SHADOW_VAR\" >> $CHILD_LOG"
+        sleep 0.6
+        after=$(read_child child_after)
+        info "child value after reject: SHADOW_VAR=$after (expected: ORIGINAL)"
 
-        # Per-attempt teardown: bash was resumed in Step 5, so it is no longer in
-        # ShadowProc's frozen list — a direct SIGKILL is the right tool here.
-        kill -9 "$BASH_PID" 2>/dev/null || true
-        exec 9>&-
+        # Per-attempt teardown.
+        kill -9 "$CHILD_PID" "$BASH_PID" 2>/dev/null || true
+        exec 8>&- 9>&-
         wait "$BASH_PID" 2>/dev/null || true
         purge_cgroup_c
 
-        if [[ "$cp0" == "ORIGINAL" && "$cp1" == "MODIFIED_BY_AGENT" && "$cp2" == "ORIGINAL" ]]; then
+        if [[ "$orig" == "ORIGINAL" && "$before" == "MODIFIED_BY_AGENT" && "$after" == "ORIGINAL" ]]; then
             success=true
             break
         fi
-        warn "attempt $attempt did not fully verify (cp2=$cp2) — retrying"
+        warn "attempt $attempt did not fully verify (after=$after) — retrying"
     done
 
     # Verdict
     echo ""
     if $success; then
-        echo -e "  ${GREEN}${BOLD}✓ BASH ENV VAR MEMORY ROLLBACK SUCCESSFUL!${NC}"
-        echo -e "  ${GREEN}  ORIGINAL → MODIFIED_BY_AGENT → (rollback) → ORIGINAL${NC}"
-        echo -e "  ${GREEN}  The real shell's exported variable was restored, not just a toy global.${NC}"
+        echo -e "  ${GREEN}${BOLD}✓ FORKED CHILD ENV VAR COW ROLLBACK SUCCESSFUL!${NC}"
+        echo -e "  ${GREEN}  child: ORIGINAL → MODIFIED_BY_AGENT → connect() → frozen → REJECT → checkpoint resumed → ORIGINAL${NC}"
+        echo -e "  ${GREEN}  The speculative version was discarded and its pristine fork-checkpoint resumed as canonical.${NC}"
     else
-        echo -e "  ${RED}${BOLD}✗ Bash env var rollback check failed after 3 attempts${NC}"
-        echo -e "  ${RED}  cp0=$cp0 (exp ORIGINAL), cp1=$cp1 (exp MODIFIED_BY_AGENT), cp2=$cp2 (exp ORIGINAL)${NC}"
-        echo -e "  ${RED}  (ptrace fork-injection into bash lost the race on every attempt)${NC}"
+        echo -e "  ${RED}${BOLD}✗ Forked child env var rollback check failed after 3 attempts${NC}"
+        echo -e "  ${RED}  orig=$orig (exp ORIGINAL), before=$before (exp MODIFIED_BY_AGENT), after=$after (exp ORIGINAL)${NC}"
+        echo -e "  ${RED}  (ptrace fork-injection / connect-freeze lost the race on every attempt)${NC}"
     fi
 
-    rm -f "$BASH_FIFO" "$BASH_LOG"
+    rm -f "$BASH_FIFO" "$BASH_LOG" "$CHILD_FIFO" "$CHILD_LOG"
 }
 
 # ─────── Scenario 9: Modify an EXISTING file (rollback + commit) ───────
@@ -1762,7 +1829,7 @@ main() {
     echo "  - Scenario 5 (Exit Hold):    Agent completes execution → held at exit → commit lets process exit normally"
     echo "  - Scenario 6 (Priv Escalation): Process attempts setuid(0) → intercepted → rolled back"
     echo "  - Scenario 7 (Deferred Release): Commit downstream B → held frozen until upstream A commits → then released"
-    echo "  - Scenario 8 (Bash Env Rollback): Real bash export SHADOW_VAR → COW snapshot → speculative change → rollback restores ORIGINAL"
+    echo "  - Scenario 8 (Forked Child Env Rollback): bash forks child → child changes SHADOW_VAR + connect() → whole cgroup auto-frozen → child memory rolled back to ORIGINAL"
     echo "  - Scenario 9 (Modify Existing):  Agent overwrites pre-existing file → rollback restores original content / commit persists new content"
     echo "  - Scenario 10 (Delete/Rename):   Agent deletes + renames pre-existing files → rollback resurrects them intact"
     echo "  - Scenario 11 (SysV IPC):        Agent attempts shmat() covert channel → intercepted (EVENT_IPC) → frozen before usable → killed"

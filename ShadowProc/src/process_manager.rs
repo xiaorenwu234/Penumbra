@@ -306,6 +306,24 @@ impl ProcessManager {
         Ok(results)
     }
 
+    /// Reject a speculative process via PROCESS VERSIONING: discard the live
+    /// (speculative) process `pid` and resume its pristine checkpoint (the COW
+    /// shadow) as the new canonical process. Returns the promoted (shadow) pid.
+    ///
+    /// This is the sound alternative to restore_memory_only for processes that
+    /// were snapshotted at a different boundary than where they are rolled back:
+    /// it never splices a stale memory image onto live registers, so it cannot
+    /// crash the target. The promoted process keeps running from the exact
+    /// coherent instant the checkpoint was taken.
+    pub fn reject_to_checkpoint(&mut self, pid: u32) -> Result<u32> {
+        let shadow_pid = self.memory_tracker.reject_to_checkpoint(pid)?;
+        // The discarded speculative process is gone; drop its frozen record and
+        // clear any stale eBPF stopped-state keyed on its (now dead) tgid.
+        let _ = self.bpf_manager.clear_stopped(pid);
+        self.frozen.remove(&pid);
+        Ok(shadow_pid)
+    }
+
     /// Commit speculative execution for a process (discard COW shadow).
     pub fn commit_process(&mut self, pid: u32) -> Result<()> {
         self.memory_tracker.commit(pid)
@@ -331,6 +349,12 @@ impl ProcessManager {
     /// Check if a process is being COW-tracked
     pub fn is_cow_tracking(&self, pid: u32) -> bool {
         self.memory_tracker.is_tracking(pid)
+    }
+
+    /// Check if a pid is a COW shadow process (internal artifact). Such pids
+    /// must be excluded from cgroup-level freeze/kill operations.
+    pub fn is_shadow_pid(&self, pid: u32) -> bool {
+        self.memory_tracker.is_shadow_pid(pid)
     }
 
     /// Handle a fork event from eBPF: auto-track the child if parent is tracked.
@@ -376,6 +400,14 @@ impl ProcessManager {
 
             // Skip if already frozen
             if self.frozen.contains_key(&pid) {
+                continue;
+            }
+
+            // Skip COW shadow processes: they live in the cgroup only because
+            // they were fork-injected from a tracked process, but they are
+            // ptrace-managed snapshots. SIGSTOP'ing them corrupts the COW
+            // rollback machinery, so they must never be frozen as siblings.
+            if self.memory_tracker.is_shadow_pid(pid) {
                 continue;
             }
 

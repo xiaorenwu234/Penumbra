@@ -6,15 +6,21 @@
  * ShadowProc's exit-hold mechanism) for potential rollback or commit.
  *
  * Architecture:
- *   1. Move into cgroup
- *   2. Create eventfd for completion notification
- *   3. Fork:
- *      - Child: set LD_PRELOAD + __SHADOW_HOLD_FD env, exec the target
- *      - Parent: wait for either eventfd signal (agent done) or child death
- *   4. When eventfd fires: parent exits 0 → caller's wait() returns "success"
+ *   1. Create eventfd for completion notification
+ *   2. Fork:
+ *      - Child: join the cgroup itself, set LD_PRELOAD + __SHADOW_HOLD_FD env,
+ *               exec the target
+ *      - Parent: stay OUTSIDE the cgroup and wait for either the eventfd signal
+ *               (agent done) or child death
+ *   3. When eventfd fires: parent exits 0 → caller's wait() returns "success"
  *      The child is still alive, held by ShadowProc, awaiting commit/rollback.
- *   5. If child dies (killed by orchestrator rollback): parent exits with
+ *   4. If child dies (killed by orchestrator rollback): parent exits with
  *      the child's exit status.
+ *
+ *   NOTE: only the child joins the cgroup, so the parent wrapper is invisible
+ *   to ShadowProc — it is never frozen/killed by whole-cgroup operations and
+ *   requires no external management. The wrapper is fully transparent: neither
+ *   the caller nor the orchestrator needs to know it exists.
  *
  * Usage: cgroup_exec_hold <cgroup_procs_path> <libexithold_path> <command> [args...]
  *
@@ -46,29 +52,17 @@ int main(int argc, char *argv[]) {
     const char *libexithold_path = argv[2];
     /* argv[3..] is the command + args */
 
-    /* Step 1: Move into cgroup (before fork, so child inherits) */
-    int cg_fd = open(cgroup_procs_path, O_WRONLY);
-    if (cg_fd < 0) {
-        fprintf(stderr, "open(%s): %s\n", cgroup_procs_path, strerror(errno));
-        return 1;
-    }
-    char pid_buf[32];
-    int len = snprintf(pid_buf, sizeof(pid_buf), "%d\n", getpid());
-    if (write(cg_fd, pid_buf, len) < 0) {
-        fprintf(stderr, "write cgroup.procs: %s\n", strerror(errno));
-        close(cg_fd);
-        return 1;
-    }
-    close(cg_fd);
-
-    /* Step 2: Create eventfd for child → parent notification */
+    /* Step 1: Create eventfd for child → parent notification */
     int efd = eventfd(0, 0);
     if (efd < 0) {
         fprintf(stderr, "eventfd: %s\n", strerror(errno));
         return 1;
     }
 
-    /* Step 3: Fork */
+    /* Step 2: Fork.
+     * Only the CHILD joins the cgroup (see below); the parent wrapper stays
+     * outside, so it is never caught by ShadowProc's whole-cgroup freeze/kill
+     * and needs no external management. */
     pid_t child = fork();
     if (child < 0) {
         fprintf(stderr, "fork: %s\n", strerror(errno));
@@ -77,6 +71,25 @@ int main(int argc, char *argv[]) {
 
     if (child == 0) {
         /* ─── Child process ─── */
+
+        /* Join the cgroup ourselves (the parent stays outside). This must
+         * happen before exec so the agent is monitored by ShadowProc, and it
+         * keeps the parent wrapper out of the monitored cgroup entirely. */
+        int cg_fd = open(cgroup_procs_path, O_WRONLY);
+        if (cg_fd < 0) {
+            const char *msg = "cgroup_exec_hold: open cgroup.procs failed\n";
+            write(2, msg, strlen(msg));
+            _exit(126);
+        }
+        char pid_buf[32];
+        int len = snprintf(pid_buf, sizeof(pid_buf), "%d\n", getpid());
+        if (write(cg_fd, pid_buf, len) < 0) {
+            const char *msg = "cgroup_exec_hold: write cgroup.procs failed\n";
+            write(2, msg, strlen(msg));
+            close(cg_fd);
+            _exit(126);
+        }
+        close(cg_fd);
 
         /* Put eventfd on HOLD_FD so the LD_PRELOAD library can find it */
         if (efd != HOLD_FD) {

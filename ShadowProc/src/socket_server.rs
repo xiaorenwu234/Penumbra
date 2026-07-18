@@ -667,6 +667,38 @@ impl SocketServer {
                 }
             }
 
+            "reject_pid" => {
+                let Some(pid) = req.pid else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("pid required".into()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    };
+                };
+                let mut pm = process_manager.lock().unwrap();
+                match pm.reject_to_checkpoint(pid) {
+                    Ok(shadow) => Response {
+                        status: "ok".into(),
+                        message: Some(format!(
+                            "Rejected speculative pid {}, resumed checkpoint pid {} as canonical",
+                            pid, shadow
+                        )),
+                        frozen: None,
+                        pids: Some(vec![shadow]),
+                        rollback_stats: None,
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                        rollback_stats: None,
+                    },
+                }
+            }
+
             "freeze_by_cgroup" => {
                 let Some(cgroup_id) = &req.cgroup_id else {
                     return Response {

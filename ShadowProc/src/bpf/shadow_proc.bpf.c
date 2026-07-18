@@ -416,11 +416,12 @@ int BPF_PROG(shadow_shm_shmctl, struct kern_ipc_perm *perm, int cmd)
 }
 
 // --- IPC: mmap file-backed shared memory (POSIX shm via shm_open + mmap) ---
-// Only file-backed MAP_SHARED is treated as a cross-process channel.
+// Only file-backed, WRITABLE MAP_SHARED is treated as a cross-process channel.
 // Anonymous MAP_SHARED (MAP_SHARED|MAP_ANONYMOUS) is parent-child sharing,
 // which the spec explicitly EXEMPTS (like pipe/socketpair), so we skip it.
 // mmap_file(struct file *file, unsigned long reqprot, unsigned long prot, unsigned long flags)
 #define MAP_SHARED 0x01
+#define PROT_WRITE 0x2
 SEC("lsm/mmap_file")
 int BPF_PROG(shadow_mmap_file, struct file *file,
              unsigned long reqprot, unsigned long prot, unsigned long flags)
@@ -434,6 +435,15 @@ int BPF_PROG(shadow_mmap_file, struct file *file,
 
     // Anonymous shared mapping (file == NULL) = parent-child IPC -> EXEMPT
     if (!file)
+        return 0;
+
+    // Read-only shared file mappings are NOT a write/exfil channel and must be
+    // exempt: the dynamic loader maps ld.so.cache / locale-archive / gconv cache
+    // as PROT_READ|MAP_SHARED during process startup (e.g. every bash launch).
+    // A POSIX shm IPC data channel has to be writable to carry data out, so we
+    // only intercept writable shared mappings. (reqprot is what the caller asked
+    // for; prot is the effective protection — OR them so neither can slip past.)
+    if (!((reqprot | prot) & PROT_WRITE))
         return 0;
 
     do_intercept(9, EVENT_IPC); // 9 = mmap syscall number

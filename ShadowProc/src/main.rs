@@ -158,7 +158,34 @@ fn main() -> Result<()> {
                 _ => {
                     // Normal interception event
                     eprintln!("\n\x1b[1;31m[INTERCEPTED]\x1b[0m {}", event);
+                    let trigger_tgid = event.tgid;
                     pm.record_frozen(event);
+
+                    // Auto-freeze the rest of the cgroup so the whole group is
+                    // stopped as an atomic unit before audit/commit/rollback.
+                    // The triggering process is already SIGSTOP'd by eBPF and
+                    // recorded above; freeze_by_cgroup skips it and SIGSTOPs the
+                    // remaining siblings, recording them for later resume/kill.
+                    let cgroup_path = pm
+                        .get_frozen(trigger_tgid)
+                        .map(|f| f.cgroup_path.clone());
+                    if let Some(cgroup_path) = cgroup_path {
+                        match pm.freeze_by_cgroup(&cgroup_path) {
+                            Ok(pids) if !pids.is_empty() => {
+                                eprintln!(
+                                    "\x1b[1;33m[CGROUP-FREEZE]\x1b[0m froze {} sibling process(es) in {}: {:?}",
+                                    pids.len(), cgroup_path, pids
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                eprintln!(
+                                    "\x1b[1;33m[CGROUP-FREEZE]\x1b[0m failed to freeze cgroup {}: {}",
+                                    cgroup_path, e
+                                );
+                            }
+                        }
+                    }
                 }
             }
 

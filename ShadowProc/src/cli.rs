@@ -52,9 +52,22 @@ impl Cli {
                 }
                 let pid: u32 = parts[1].parse().unwrap_or(0);
                 let mut pm = self.process_manager.lock().unwrap();
-                match pm.continue_process(pid) {
-                    Ok(()) => println!("\x1b[32m[OK]\x1b[0m Process {} resumed (SIGCONT sent)", pid),
-                    Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
+                // Unfreeze at cgroup granularity: resolve the cgroup this pid
+                // belongs to, then resume the whole group (matching the
+                // whole-cgroup freeze behavior on interception).
+                let cgroup = pm.get_frozen(pid).map(|f| f.cgroup_path.clone());
+                match cgroup {
+                    Some(cg) => match pm.continue_by_cgroup(&cg) {
+                        Ok(pids) => println!(
+                            "\x1b[32m[OK]\x1b[0m Resumed cgroup {} ({} process(es): {:?})",
+                            cg, pids.len(), pids
+                        ),
+                        Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
+                    },
+                    None => println!(
+                        "\x1b[31m[ERROR]\x1b[0m Process {} is not in frozen list",
+                        pid
+                    ),
                 }
             }
 
@@ -142,7 +155,7 @@ impl Cli {
             "help" | "h" | "?" => {
                 println!("Commands:");
                 println!("  list (ls)              - List all frozen processes");
-                println!("  continue (c) <pid>     - Resume a frozen process");
+                println!("  continue (c) <pid>     - Resume the whole cgroup the pid belongs to");
                 println!("  discard (d) <pid>      - Kill a frozen process");
                 println!("  checkpoint (cp) <pid>  - CRIU checkpoint a frozen process");
                 println!("  restore <path>         - Restore from a CRIU checkpoint");
