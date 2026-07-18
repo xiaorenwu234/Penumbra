@@ -13,7 +13,12 @@
  *
  *   Phase 3: Trigger IPC (connect) to get frozen again by ShadowProc.
  *            At this point, external tools can verify the modified state,
- *            then rollback memory to the Phase 1 state.
+ *            then commit_pid (accept) or reject_pid (discard) the change.
+ *
+ *   Phase 4: After being resumed (continue_pid), run to completion and
+ *            append a completion record (completed=1, final_counter,
+ *            final_message) to the marker file, proving the process
+ *            continued past the freeze and finished the rest of its run.
  *
  * The global variables serve as verifiable targets:
  *   - g_counter: integer, initial=42, modified=9999
@@ -114,11 +119,28 @@ int main(int argc, char *argv[]) {
     /* This connect() triggers ShadowProc's LSM socket_connect hook.
      * Process is frozen again. External tools can now:
      *   1. Read /proc/pid/mem to verify g_counter==9999
-     *   2. Call restore_memory_pid to rollback
-     *   3. Read /proc/pid/mem to verify g_counter==42 (restored!)
+     *   2. Decide: commit_pid (accept) or reject_pid (discard speculative)
+     *   3. Resume us (continue_pid) to run the rest to completion
      */
     connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     close(sock);
+
+    /* ---- Phase 4: Post-resume completion ---- */
+    /* Reaching here means ShadowProc released the second freeze (after a
+     * commit/continue) and we CONTINUED running past it. Append a completion
+     * record so external tools can confirm the process finished the rest of
+     * its run AND that the committed memory values are visible to this
+     * continued execution (final_counter should be the committed 9999). */
+    mfd = open(argv[1], O_WRONLY | O_APPEND);
+    if (mfd >= 0) {
+        len = snprintf(info, sizeof(info),
+            "completed=1\n"
+            "final_counter=%d\n"
+            "final_message=%s\n",
+            g_counter, (char *)g_message);
+        write(mfd, info, len);
+        close(mfd);
+    }
 
     return 0;
 }

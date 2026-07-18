@@ -9,7 +9,7 @@ use std::fs;
 
 use crate::bpf_loader::BpfManager;
 use crate::event_handler::InterceptEvent;
-use crate::memory_tracker::{MemoryTracker, RollbackStats};
+use crate::memory_tracker::MemoryTracker;
 
 /// State of a frozen process
 #[derive(Debug, Clone)]
@@ -30,6 +30,10 @@ pub struct ProcessManager {
     next_checkpoint_id: u32,
     bpf_manager: Arc<BpfManager>,
     memory_tracker: MemoryTracker,
+    /// Maps an old (rejected, now-dead) pid to the canonical pid its checkpoint
+    /// was promoted to by reject_to_checkpoint(). Lets callers still holding a
+    /// stale pid transparently address the live process.
+    promoted: HashMap<u32, u32>,
 }
 
 impl ProcessManager {
@@ -41,6 +45,7 @@ impl ProcessManager {
             next_checkpoint_id: 0,
             bpf_manager,
             memory_tracker: MemoryTracker::new(),
+            promoted: HashMap::new(),
         }
     }
 
@@ -71,6 +76,7 @@ impl ProcessManager {
     /// 1. Clear stopped_pids map entry (so hook will allow the restarted syscall)
     /// 2. Send SIGCONT (kernel auto-restarts the syscall via -ERESTARTSYS)
     pub fn continue_process(&mut self, pid: u32) -> Result<()> {
+        let pid = self.resolve_pid(pid);
         if !self.frozen.contains_key(&pid) {
             anyhow::bail!("Process {} is not in frozen list", pid);
         }
@@ -90,6 +96,7 @@ impl ProcessManager {
     /// Temporarily allows the process to pass, then re-enables interception.
     /// This allows the process to be intercepted AGAIN on future syscalls (e.g., connect).
     pub fn resume_process(&mut self, pid: u32) -> Result<()> {
+        let pid = self.resolve_pid(pid);
         if !self.frozen.contains_key(&pid) {
             anyhow::bail!("Process {} is not in frozen list", pid);
         }
@@ -106,7 +113,12 @@ impl ProcessManager {
 
     /// Discard (kill) a frozen process
     pub fn discard_process(&mut self, pid: u32) -> Result<()> {
-        if !self.frozen.contains_key(&pid) {
+        // A stale pid (a process that was rejected/promoted) is transparently
+        // redirected to its current canonical pid.
+        let pid = self.resolve_pid(pid);
+        // The pid may be a frozen (held) process, or a promoted canonical
+        // process still running after a reject. Either way, SIGKILL it.
+        if !self.frozen.contains_key(&pid) && !self.is_promoted_pid(pid) {
             anyhow::bail!("Process {} is not in frozen list", pid);
         }
 
@@ -114,6 +126,8 @@ impl ProcessManager {
             .with_context(|| format!("Failed to send SIGKILL to pid {}", pid))?;
 
         self.frozen.remove(&pid);
+        // Drop any promotion records that pointed at this now-dead pid.
+        self.promoted.retain(|_, v| *v != pid);
         Ok(())
     }
 
@@ -235,6 +249,7 @@ impl ProcessManager {
     /// Begin speculative COW tracking for a frozen process.
     /// The process must be in SIGSTOP state.
     pub fn begin_speculative(&mut self, pid: u32) -> Result<()> {
+        let pid = self.resolve_pid(pid);
         self.memory_tracker.begin_tracking(pid)?;
         // Enable auto-tracking of child processes
         if !self.memory_tracker.is_auto_track_enabled() {
@@ -265,47 +280,6 @@ impl ProcessManager {
         Ok(tracked)
     }
 
-    /// Rollback a single process's memory and kill it.
-    /// Restores memory pages from the shadow process, then kills the target.
-    pub fn rollback_process(&mut self, pid: u32) -> Result<RollbackStats> {
-        let stats = self.memory_tracker.rollback(pid)?;
-        // After restoring memory, kill the process
-        let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-        self.frozen.remove(&pid);
-        Ok(stats)
-    }
-
-    /// Restore a process's memory only (no kill). Used for verification in demos.
-    /// After calling this, the process is still frozen and can be inspected.
-    pub fn restore_memory_only(&mut self, pid: u32) -> Result<RollbackStats> {
-        self.memory_tracker.rollback(pid)
-    }
-
-    /// Rollback all tracked processes in a cgroup.
-    /// Restores memory and kills each process.
-    pub fn rollback_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<(u32, RollbackStats)>> {
-        let pids: Vec<u32> = self.frozen.values()
-            .filter(|p| p.cgroup_path == cgroup_path)
-            .map(|p| p.tgid)
-            .collect();
-        let mut results = Vec::new();
-        for pid in pids {
-            if self.memory_tracker.is_tracking(pid) {
-                match self.memory_tracker.rollback(pid) {
-                    Ok(stats) => {
-                        let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-                        self.frozen.remove(&pid);
-                        results.push((pid, stats));
-                    }
-                    Err(e) => {
-                        eprintln!("[cow] Failed to rollback pid {}: {}", pid, e);
-                    }
-                }
-            }
-        }
-        Ok(results)
-    }
-
     /// Reject a speculative process via PROCESS VERSIONING: discard the live
     /// (speculative) process `pid` and resume its pristine checkpoint (the COW
     /// shadow) as the new canonical process. Returns the promoted (shadow) pid.
@@ -316,16 +290,44 @@ impl ProcessManager {
     /// crash the target. The promoted process keeps running from the exact
     /// coherent instant the checkpoint was taken.
     pub fn reject_to_checkpoint(&mut self, pid: u32) -> Result<u32> {
+        let pid = self.resolve_pid(pid);
         let shadow_pid = self.memory_tracker.reject_to_checkpoint(pid)?;
         // The discarded speculative process is gone; drop its frozen record and
         // clear any stale eBPF stopped-state keyed on its (now dead) tgid.
         let _ = self.bpf_manager.clear_stopped(pid);
         self.frozen.remove(&pid);
+        // Record the pid transition so callers still holding the old (now dead)
+        // pid are transparently redirected to the promoted canonical pid, and so
+        // the promoted process stays addressable for later kill/commit.
+        self.promoted.insert(pid, shadow_pid);
         Ok(shadow_pid)
+    }
+
+    /// Resolve a possibly-stale pid to its current canonical pid by following
+    /// the promotion chain produced by reject_to_checkpoint(). Returns the input
+    /// pid unchanged when it was never promoted.
+    pub fn resolve_pid(&self, pid: u32) -> u32 {
+        let mut cur = pid;
+        let mut hops = 0;
+        while let Some(&next) = self.promoted.get(&cur) {
+            cur = next;
+            hops += 1;
+            if hops > 64 {
+                break; // guard against accidental cycles
+            }
+        }
+        cur
+    }
+
+    /// Check if a pid is a canonical process promoted from a rejected
+    /// speculative process (i.e. it is the target of a promotion mapping).
+    fn is_promoted_pid(&self, pid: u32) -> bool {
+        self.promoted.values().any(|&v| v == pid)
     }
 
     /// Commit speculative execution for a process (discard COW shadow).
     pub fn commit_process(&mut self, pid: u32) -> Result<()> {
+        let pid = self.resolve_pid(pid);
         self.memory_tracker.commit(pid)
     }
 

@@ -123,17 +123,17 @@ impl Cli {
                 }
             }
 
-            "rollback" | "rb" => {
+            "reject" | "rj" => {
                 if parts.len() < 2 {
-                    println!("Usage: rollback <pid>");
+                    println!("Usage: reject <pid>");
                     return Ok(false);
                 }
                 let pid: u32 = parts[1].parse().unwrap_or(0);
                 let mut pm = self.process_manager.lock().unwrap();
-                match pm.rollback_process(pid) {
-                    Ok(stats) => println!(
-                        "\x1b[32m[OK]\x1b[0m Rolled back pid {}: {} dirty pages, {} restored ({} bytes)",
-                        pid, stats.pages_dirty, stats.pages_restored, stats.bytes_restored
+                match pm.reject_to_checkpoint(pid) {
+                    Ok(shadow) => println!(
+                        "\x1b[32m[OK]\x1b[0m Rejected speculative pid {}; resumed checkpoint pid {} as canonical (canonical pid: {} -> {})",
+                        pid, shadow, pid, shadow
                     ),
                     Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
                 }
@@ -160,7 +160,7 @@ impl Cli {
                 println!("  checkpoint (cp) <pid>  - CRIU checkpoint a frozen process");
                 println!("  restore <path>         - Restore from a CRIU checkpoint");
                 println!("  speculative (spec) <pid> - Start COW memory tracking");
-                println!("  rollback (rb) <pid>    - Rollback memory and kill process");
+                println!("  reject (rj) <pid>      - Discard speculative version, resume its checkpoint as canonical");
                 println!("  commit <pid>           - Commit (discard COW shadow)");
                 println!("  quit (q)               - Exit ShadowProc");
                 println!("  help (h)               - Show this help");

@@ -821,136 +821,7 @@ print(resp.strip())
 "
 }
 
-# ──────────────────────────── Scenario 4: COW Memory Rollback ─────────────────
-scenario_cow_rollback() {
-    banner
-    section "Scenario 4: COW MEMORY ROLLBACK"
-    echo -e "  ${YELLOW}Process modifies in-memory globals → COW mechanism captures original pages${NC}"
-    echo -e "  ${YELLOW}After rollback, memory is restored to pre-modification state${NC}"
-    echo ""
-
-    local MARKER_FILE="/tmp/shadow-demo-cow-marker"
-    rm -f "$MARKER_FILE"
-
-    # Step 1: Start mem_modifier in cgroup
-    step "Step 1: Starting mem_modifier in cgroup (will write marker + trigger IPC freeze)..."
-    run_in_cgroup "$MEM_MODIFIER" "$MARKER_FILE" &
-    local AGENT_PID=$!
-    info "mem_modifier launched (wrapper PID $AGENT_PID)"
-
-    # Step 2: Wait for it to be frozen (initial connect triggers BPF)
-    step "Step 2: Waiting for process to be frozen (IPC connect intercepted)..."
-    if wait_for_frozen "$AGENT_PID" 10; then
-        info "Process is FROZEN (first freeze - before memory modification)"
-    else
-        warn "Process did not freeze within 10s"
-        return
-    fi
-
-    # Read marker file to get the actual PID and addresses
-    sleep 0.5
-    if [[ ! -f "$MARKER_FILE" ]]; then
-        warn "Marker file not created — mem_modifier may have failed"
-        return
-    fi
-    local REAL_PID COUNTER_ADDR MESSAGE_ADDR
-    REAL_PID=$(grep '^pid=' "$MARKER_FILE" | cut -d= -f2)
-    COUNTER_ADDR=$(grep '^counter_addr=' "$MARKER_FILE" | cut -d= -f2)
-    MESSAGE_ADDR=$(grep '^message_addr=' "$MARKER_FILE" | cut -d= -f2)
-    info "Marker info: pid=$REAL_PID counter_addr=$COUNTER_ADDR message_addr=$MESSAGE_ADDR"
-
-    # Verify initial state via /proc/pid/mem
-    step "Verifying initial memory state (should be: counter=42, message=ORIGINAL)..."
-    local counter_val msg_val
-    counter_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$COUNTER_ADDR" int 2>&1) || true
-    msg_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$MESSAGE_ADDR" str 2>&1) || true
-    info "  g_counter = $counter_val (expected: 42)"
-    info "  g_message = \"$msg_val\" (expected: \"ORIGINAL\")"
-
-    # Step 3: Call begin_speculative on ShadowProc (creates COW shadow)
-    echo ""
-    step "Step 3: Calling begin_speculative (creates COW shadow fork)..."
-    local spec_resp
-    spec_resp=$(shadowproc_cmd "{\"action\":\"begin_speculative\",\"pid\":$REAL_PID}")
-    show_json "$spec_resp"
-
-    # Step 4: Resume the process (resume_pid) — it will modify memory then freeze again
-    # NOTE: We use resume_pid (not continue_pid) so the process can be intercepted
-    # again on connect(). continue_pid permanently allows the process through.
-    step "Step 4: Resuming process (resume_pid) — process will modify memory..."
-    local cont_resp
-    cont_resp=$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$REAL_PID}")
-    show_json "$cont_resp"
-
-    # Step 5: Wait for second freeze (connect triggers BPF)
-    # NOTE: We must wait specifically for REAL_PID to enter T state.
-    # The shadow child (created by fork injection) is also in the cgroup in T state,
-    # so wait_for_frozen (which scans cgroup.procs) would return immediately.
-    step "Step 5: Waiting for process to be frozen again (connect intercepted)..."
-    local elapsed=0
-    local frozen_ok=false
-    while [[ $elapsed -lt 15 ]]; do
-        local pstate
-        pstate=$(awk '/^State:/{print $2}' /proc/"$REAL_PID"/status 2>/dev/null) || true
-        if [[ "$pstate" == "T" ]]; then
-            frozen_ok=true
-            break
-        fi
-        sleep 0.5
-        elapsed=$((elapsed + 1))
-    done
-    if $frozen_ok; then
-        info "Process $REAL_PID is FROZEN again (after memory modification)"
-    else
-        warn "Process $REAL_PID did not freeze within timeout"
-        return
-    fi
-    sleep 0.3
-
-    # Step 6: Verify MODIFIED memory state
-    echo ""
-    step "Step 6: Verifying MODIFIED memory state (should be: counter=9999, message=MODIFIED_BY_SPECULATIVE)..."
-    counter_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$COUNTER_ADDR" int 2>&1) || true
-    msg_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$MESSAGE_ADDR" str 2>&1) || true
-    info "  g_counter = $counter_val (expected: 9999)"
-    info "  g_message = \"$msg_val\" (expected: \"MODIFIED_BY_SPECULATIVE\")"
-
-    if [[ "$counter_val" == "9999" ]]; then
-        info "  ✓ Memory was MODIFIED as expected"
-    else
-        warn "  Counter value unexpected: $counter_val"
-    fi
-
-    # Step 7: ROLLBACK memory (restore_memory_pid — restores without killing)
-    echo ""
-    step "Step 7: >>> Calling restore_memory_pid (COW rollback)..."
-    local rb_resp
-    rb_resp=$(shadowproc_cmd "{\"action\":\"restore_memory_pid\",\"pid\":$REAL_PID}")
-    show_json "$rb_resp"
-
-    # Step 8: Verify RESTORED memory state
-    echo ""
-    step "Step 8: Verifying RESTORED memory state (should be back to: counter=42, message=ORIGINAL)..."
-    counter_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$COUNTER_ADDR" int 2>&1) || true
-    msg_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$MESSAGE_ADDR" str 2>&1) || true
-    info "  g_counter = $counter_val (expected: 42)"
-    info "  g_message = \"$msg_val\" (expected: \"ORIGINAL\")"
-
-    if [[ "$counter_val" == "42" && "$msg_val" == "ORIGINAL" ]]; then
-        echo ""
-        echo -e "  ${GREEN}${BOLD}✓ COW MEMORY ROLLBACK SUCCESSFUL!${NC}"
-        echo -e "  ${GREEN}  Memory was restored from 9999→42, MODIFIED_BY_SPECULATIVE→ORIGINAL${NC}"
-    else
-        echo ""
-        echo -e "  ${RED}✗ Memory rollback may have failed${NC}"
-        echo -e "  ${RED}  counter=$counter_val (expected 42), message=$msg_val (expected ORIGINAL)${NC}"
-    fi
-
-    # Cleanup: kill the process via ShadowProc API (removes from frozen list)
-    shadowproc_cmd "{\"action\":\"kill_pid\",\"pid\":$REAL_PID}" >/dev/null 2>&1 || true
-    wait "$AGENT_PID" 2>/dev/null || true
-    rm -f "$MARKER_FILE"
-}
+# ──────────────────────────── Scenario 4 removed (COW rollback superseded by reject) ────────
 
 # ──────────────────────────── Scenario 5: Exit Hold ─────────────────
 
@@ -1712,13 +1583,13 @@ scenario_shm_intercept() {
 }
 
 # ─────── Scenario 12: COW memory COMMIT (accept speculative change) ───────
-# The mirror of Scenario 4: instead of rolling the speculative memory change
-# back, we ACCEPT it with commit_pid (which discards the COW shadow and keeps
-# the modified pages live), then let the process run to completion.
+# The commit counterpart of reject (Scenario 8): instead of discarding the
+# speculative process, we ACCEPT its changes with commit_pid (which discards
+# the COW shadow and keeps the modified pages live), then let it run to done.
 scenario_cow_commit() {
     banner
     section "Scenario 12: COW MEMORY COMMIT (accept speculative change)"
-    echo -e "  ${YELLOW}Modify memory speculatively, then COMMIT (keep it) — mirror of Scenario 4${NC}"
+    echo -e "  ${YELLOW}Modify memory speculatively, then COMMIT (keep it) — the commit counterpart of reject${NC}"
     echo -e "  ${YELLOW}commit_pid discards the shadow; the modified memory stays live${NC}"
     echo ""
 
@@ -1771,17 +1642,45 @@ scenario_cow_commit() {
     info "  g_counter = $counter_val (expected: 9999)"
     info "  g_message = \"$msg_val\" (expected: MODIFIED_BY_SPECULATIVE)"
 
-    step "Step 8: continue_pid — let the process finish with committed memory..."
+    step "Step 8: continue_pid — let the process finish the REST of its run with committed memory..."
     shadowproc_cmd "{\"action\":\"continue_pid\",\"pid\":$REAL_PID}" >/dev/null 2>&1 || true
+
+    # Wait (bounded) for the process to actually run to completion and exit,
+    # rather than blocking forever if continue_pid failed to wake it.
+    local exited=false w=0
+    while [[ $w -lt 20 ]]; do
+        [[ -d "/proc/$REAL_PID" ]] || { exited=true; break; }
+        sleep 0.25; w=$((w + 1))
+    done
     wait "$AGENT_PID" 2>/dev/null || true
 
+    # Phase 4 of mem_modifier appends this record ONLY if it continued running
+    # past the second freeze — so it proves the rest of the run completed and
+    # that the committed memory was visible to that continued execution.
+    local completed final_counter final_msg
+    completed=$(grep '^completed=' "$MARKER_FILE" 2>/dev/null | cut -d= -f2)
+    final_counter=$(grep '^final_counter=' "$MARKER_FILE" 2>/dev/null | cut -d= -f2)
+    final_msg=$(grep '^final_message=' "$MARKER_FILE" 2>/dev/null | cut -d= -f2)
+
+    step "Step 9: Verifying the process CONTINUED and finished the rest of its run..."
+    if $exited; then
+        info "  Process $REAL_PID exited (ran to completion after commit)"
+    else
+        warn "  Process $REAL_PID still alive after continue_pid (did not finish)"
+    fi
+    info "  Post-resume completion record: completed=$completed final_counter=$final_counter final_message=\"$final_msg\""
+
     echo ""
-    if [[ "$counter_val" == "9999" && "$msg_val" == "MODIFIED_BY_SPECULATIVE" ]]; then
+    if [[ "$counter_val" == "9999" && "$msg_val" == "MODIFIED_BY_SPECULATIVE" \
+          && "$completed" == "1" && "$final_counter" == "9999" \
+          && "$final_msg" == "MODIFIED_BY_SPECULATIVE" && "$exited" == "true" ]]; then
         echo -e "  ${GREEN}${BOLD}✓ COW MEMORY COMMIT SUCCESSFUL!${NC}"
         echo -e "  ${GREEN}  Speculative change (9999 / MODIFIED) ACCEPTED and kept live; shadow discarded${NC}"
+        echo -e "  ${GREEN}  Process CONTINUED past the freeze and ran to completion (completed=1, final_counter=9999)${NC}"
     else
         echo -e "  ${RED}${BOLD}✗ COW memory commit check failed${NC}"
         echo -e "  ${RED}  counter=$counter_val (exp 9999), message=$msg_val (exp MODIFIED_BY_SPECULATIVE)${NC}"
+        echo -e "  ${RED}  completed=$completed (exp 1), final_counter=$final_counter (exp 9999), exited=$exited (exp true)${NC}"
     fi
     rm -f "$MARKER_FILE"
 }
@@ -1806,7 +1705,6 @@ main() {
     scenario_commit
     scenario_rollback
     scenario_cascade
-    scenario_cow_rollback
     scenario_exit_hold
     scenario_priv_escalation
     scenario_deferred_release
@@ -1825,7 +1723,6 @@ main() {
     echo "  - Scenario 1 (Commit):       File written → IPC frozen → orchestrator resumed process + committed files"
     echo "  - Scenario 2 (Rollback):     File written → IPC frozen → orchestrator rolled back files + killed process"
     echo "  - Scenario 3 (Cascade):      Agent-A writes → Agent-B reads → ROLLBACK A cascades to B"
-    echo "  - Scenario 4 (COW Memory):   Process modifies globals → COW snapshot → rollback restores original memory"
     echo "  - Scenario 5 (Exit Hold):    Agent completes execution → held at exit → commit lets process exit normally"
     echo "  - Scenario 6 (Priv Escalation): Process attempts setuid(0) → intercepted → rolled back"
     echo "  - Scenario 7 (Deferred Release): Commit downstream B → held frozen until upstream A commits → then released"

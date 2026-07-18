@@ -304,12 +304,10 @@ sudo bash demo/run_demo_full.sh
 | `continue_pid` | `pid` | 恢复指定进程 |
 | `kill_pid` | `pid` | 杀死指定进程 |
 | `freeze_by_cgroup` | `cgroup_id` | 冻结该 cgroup 下所有进程 |
-| `begin_speculative` | `cgroup_id` 或 `pid` | 启动 COW 内存追踪（创建影子进程） |
-| `rollback_by_cgroup` | `cgroup_id` | 回滚该 cgroup 下所有进程的内存 |
-| `rollback_pid` | `pid` | 回滚指定进程的内存 |
+| `begin_speculative` | `cgroup_id` 或 `pid` | 启动 COW 内存追踪（创建影子/检查点进程） |
 | `commit_by_cgroup` | `cgroup_id` | 提交该 cgroup 下所有进程的 COW 追踪 |
 | `commit_pid` | `pid` | 提交指定进程的 COW 追踪 |
-| `restore_memory_pid` | `pid` | 仅恢复指定进程的内存页 |
+| `reject_pid` | `pid` | 丢弃投机进程，恢复其检查点进程作为新的 canonical 进程（canonical PID 会随之改变） |
 | `resume_pid` | `pid` | 临时恢复指定进程（下次拦截事件会再次冻结） |
 
 ### ShadowObserve 直连 API

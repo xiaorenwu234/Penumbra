@@ -1,12 +1,14 @@
-//! COW (Copy-on-Write) Memory Tracker for ShadowProc
+//! COW (Copy-on-Write) Process-Versioning Tracker for ShadowProc
 //!
-//! Implements memory rollback by leveraging the Linux kernel's native COW mechanism:
-//! 1. Inject fork() via ptrace into the target process → creates a "shadow" child
-//! 2. The shadow child shares physical pages with the parent (COW semantics)
-//! 3. When the parent writes to a page, the kernel automatically preserves the
-//!    original page in the shadow child
-//! 4. On rollback: scan soft-dirty pages, restore from shadow child's /proc/pid/mem
-//! 5. On commit: kill the shadow child
+//! Implements memory rollback via PROCESS VERSIONING on top of the kernel's
+//! native COW mechanism:
+//! 1. Inject clone() via ptrace into the target process → creates a coherent
+//!    "shadow" checkpoint that shares physical pages with the parent (COW).
+//! 2. The shadow is frozen (SIGSTOP) with the target's registers at the snapshot
+//!    instant, so its memory + registers describe one coherent moment.
+//! 3. On reject: discard the live (speculative) process and RESUME the shadow
+//!    checkpoint as the new canonical process.
+//! 4. On commit: discard the shadow checkpoint (accept all memory changes).
 
 use anyhow::{Context, Result};
 use nix::sys::ptrace;
@@ -15,37 +17,12 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::io::RawFd;
-
-const PAGE_SIZE: u64 = 4096;
-/// Bit 55 in pagemap entry indicates soft-dirty
-const SOFT_DIRTY_BIT: u64 = 1 << 55;
-/// Bit 63 indicates page is present
-const PAGE_PRESENT_BIT: u64 = 1 << 63;
-
-/// Statistics returned after a rollback operation
-#[derive(Debug, Clone)]
-pub struct RollbackStats {
-    pub pages_scanned: u64,
-    pub pages_dirty: u64,
-    pub pages_restored: u64,
-    pub bytes_restored: u64,
-}
-
-/// A writable private memory region parsed from /proc/pid/maps
-#[derive(Debug, Clone)]
-struct MemRegion {
-    start: u64,
-    end: u64,
-}
+use std::io::{Read, Seek, SeekFrom};
 
 /// State for a single tracked process
 struct ShadowState {
     target_pid: u32,
     shadow_pid: u32,
-    memfd: RawFd,
-    writable_regions: Vec<MemRegion>,
 }
 
 impl Drop for ShadowState {
@@ -54,10 +31,6 @@ impl Drop for ShadowState {
         let _ = nix::sys::signal::kill(Pid::from_raw(self.shadow_pid as i32), Signal::SIGKILL);
         // Wait to reap zombie
         let _ = waitpid(Pid::from_raw(self.shadow_pid as i32), Some(WaitPidFlag::WNOHANG));
-        // Close memfd
-        unsafe {
-            libc::close(self.memfd);
-        }
     }
 }
 
@@ -157,92 +130,31 @@ impl MemoryTracker {
     ///
     /// This will:
     /// 1. Attach via ptrace
-    /// 2. Inject a fork() syscall to create a shadow child
-    /// 3. Freeze the shadow child permanently
+    /// 2. Inject a clone() syscall to create a coherent shadow checkpoint
+    /// 3. Freeze the shadow permanently (with the target's snapshot registers)
     /// 4. Detach from the parent
-    /// 5. Clear soft-dirty bits on the parent
     pub fn begin_tracking(&mut self, pid: u32) -> Result<()> {
         if self.shadows.contains_key(&pid) {
             anyhow::bail!("Process {} is already being tracked for COW", pid);
         }
 
-        // Parse writable private regions before ptrace (proc is accessible)
-        let regions = parse_maps(pid)?;
-        if regions.is_empty() {
-            anyhow::bail!("No writable private regions found for pid {}", pid);
-        }
-
-        // Create memfd for page transfer buffer
-        let memfd = create_memfd()?;
-
-        // Inject fork via ptrace to create shadow child
+        // Inject fork via ptrace to create the shadow checkpoint. The shadow
+        // shares the parent's pages copy-on-write and is frozen with the
+        // target's snapshot registers (see inject_fork_via_ptrace).
         let shadow_pid = inject_fork_via_ptrace(pid)
             .with_context(|| format!("Failed to inject fork into pid {}", pid))?;
 
-        // Clear soft-dirty bits so we can track future writes
-        clear_soft_dirty(pid)
-            .with_context(|| format!("Failed to clear soft-dirty for pid {}", pid))?;
-
-        eprintln!(
-            "[cow] Started tracking pid {} -> shadow pid {}, {} writable regions",
-            pid,
-            shadow_pid,
-            regions.len()
-        );
+        eprintln!("[cow] Started tracking pid {} -> shadow pid {}", pid, shadow_pid);
 
         self.shadows.insert(
             pid,
             ShadowState {
                 target_pid: pid,
                 shadow_pid,
-                memfd,
-                writable_regions: regions,
             },
         );
 
         Ok(())
-    }
-
-    /// Rollback a process's memory to the state captured at begin_tracking().
-    /// The process MUST be frozen (SIGSTOP) when this is called.
-    ///
-    /// Returns statistics about the rollback operation.
-    pub fn rollback(&mut self, pid: u32) -> Result<RollbackStats> {
-        let state = self
-            .shadows
-            .get(&pid)
-            .ok_or_else(|| anyhow::anyhow!("Process {} is not being COW-tracked", pid))?;
-
-        // Scan for dirty pages
-        let dirty_pages = scan_dirty_pages(pid, &state.writable_regions)?;
-        let pages_scanned: u64 = state
-            .writable_regions
-            .iter()
-            .map(|r| (r.end - r.start) / PAGE_SIZE)
-            .sum();
-
-        let pages_dirty = dirty_pages.len() as u64;
-
-        // Restore dirty pages from shadow child
-        let pages_restored =
-            restore_pages(pid, state.shadow_pid, &dirty_pages, state.memfd)?;
-
-        let stats = RollbackStats {
-            pages_scanned,
-            pages_dirty,
-            pages_restored: pages_restored as u64,
-            bytes_restored: pages_restored as u64 * PAGE_SIZE,
-        };
-
-        eprintln!(
-            "[cow] Rollback pid {}: scanned={}, dirty={}, restored={} ({} bytes)",
-            pid, stats.pages_scanned, stats.pages_dirty, stats.pages_restored, stats.bytes_restored
-        );
-
-        // Clean up shadow process
-        self.shadows.remove(&pid);
-
-        Ok(stats)
     }
 
     /// Commit: discard the shadow process (accept all memory changes).
@@ -273,14 +185,9 @@ impl MemoryTracker {
             .remove(&pid)
             .ok_or_else(|| anyhow::anyhow!("Process {} is not being COW-tracked", pid))?;
         let shadow_pid = state.shadow_pid;
-        let memfd = state.memfd;
         // We are PROMOTING the shadow, so its ShadowState::Drop (which SIGKILLs
-        // the shadow and closes the memfd) must NOT run. Skip Drop via forget
-        // and release the memfd ourselves.
+        // the shadow) must NOT run. Skip Drop via forget.
         std::mem::forget(state);
-        unsafe {
-            libc::close(memfd);
-        }
 
         // Discard the speculative (live) process and reap it.
         let _ = nix::sys::signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
@@ -321,84 +228,6 @@ impl MemoryTracker {
 // ═══════════════════════════════════════════════════════════════
 // Helper functions
 // ═══════════════════════════════════════════════════════════════
-
-/// Parse /proc/pid/maps to find writable private (anonymous + file-backed) regions.
-/// These are regions where COW tracking is meaningful.
-fn parse_maps(pid: u32) -> Result<Vec<MemRegion>> {
-    let maps_path = format!("/proc/{}/maps", pid);
-    let content = fs::read_to_string(&maps_path)
-        .with_context(|| format!("Failed to read {}", maps_path))?;
-
-    let mut regions = Vec::new();
-
-    for line in content.lines() {
-        // Format: address perms offset dev inode pathname
-        // e.g.: 7f8a1000-7f8a2000 rw-p 00000000 00:00 0  [heap]
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            continue;
-        }
-
-        let perms = parts[1];
-        // We want: writable (w) + private (p)
-        // perms format: rwxp or rwxs (s = shared)
-        if perms.len() < 4 {
-            continue;
-        }
-        let is_writable = perms.as_bytes()[1] == b'w';
-        let is_private = perms.as_bytes()[3] == b'p';
-
-        if !is_writable || !is_private {
-            continue;
-        }
-
-        // Skip [vvar] and [vdso] - kernel-managed, can't write to them
-        if let Some(name) = parts.get(5) {
-            if *name == "[vvar]" || *name == "[vdso]" || *name == "[vsyscall]" {
-                continue;
-            }
-        }
-
-        // Parse address range
-        let addr_parts: Vec<&str> = parts[0].split('-').collect();
-        if addr_parts.len() != 2 {
-            continue;
-        }
-        let start = u64::from_str_radix(addr_parts[0], 16).unwrap_or(0);
-        let end = u64::from_str_radix(addr_parts[1], 16).unwrap_or(0);
-
-        if start < end {
-            regions.push(MemRegion { start, end });
-        }
-    }
-
-    Ok(regions)
-}
-
-/// Create a memfd for use as a page transfer buffer
-fn create_memfd() -> Result<RawFd> {
-    let name = std::ffi::CString::new("shadow_cow_buffer").unwrap();
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
-    if fd < 0 {
-        anyhow::bail!(
-            "memfd_create failed: {}",
-            std::io::Error::last_os_error()
-        );
-    }
-    // Pre-allocate one page
-    unsafe {
-        libc::ftruncate(fd, PAGE_SIZE as i64);
-    }
-    Ok(fd)
-}
-
-/// Clear soft-dirty bits for a process by writing "4" to /proc/pid/clear_refs
-fn clear_soft_dirty(pid: u32) -> Result<()> {
-    let path = format!("/proc/{}/clear_refs", pid);
-    fs::write(&path, "4")
-        .with_context(|| format!("Failed to write to {}", path))?;
-    Ok(())
-}
 
 /// Inject a fork() system call into the target process via ptrace.
 ///
@@ -674,101 +503,4 @@ fn find_syscall_instruction(pid: u32, regs: &libc::user_regs_struct) -> Result<u
     }
 
     anyhow::bail!("Could not find syscall instruction in pid {}", pid)
-}
-
-/// Scan /proc/pid/pagemap for soft-dirty pages in the given regions.
-/// Returns a list of virtual page addresses that have been written to.
-fn scan_dirty_pages(pid: u32, regions: &[MemRegion]) -> Result<Vec<u64>> {
-    let pagemap_path = format!("/proc/{}/pagemap", pid);
-    let mut pagemap = OpenOptions::new()
-        .read(true)
-        .open(&pagemap_path)
-        .with_context(|| format!("Failed to open {}", pagemap_path))?;
-
-    let mut dirty_pages = Vec::new();
-
-    for region in regions {
-        let start_page = region.start / PAGE_SIZE;
-        let end_page = region.end / PAGE_SIZE;
-
-        for page_idx in start_page..end_page {
-            let offset = page_idx * 8; // Each pagemap entry is 8 bytes
-            if pagemap.seek(SeekFrom::Start(offset)).is_err() {
-                continue;
-            }
-
-            let mut entry_bytes = [0u8; 8];
-            if pagemap.read_exact(&mut entry_bytes).is_err() {
-                continue;
-            }
-
-            let entry = u64::from_ne_bytes(entry_bytes);
-
-            // Check if page is present and soft-dirty
-            if (entry & PAGE_PRESENT_BIT) != 0 && (entry & SOFT_DIRTY_BIT) != 0 {
-                dirty_pages.push(page_idx * PAGE_SIZE);
-            }
-        }
-    }
-
-    Ok(dirty_pages)
-}
-
-/// Restore dirty pages from the shadow child process to the target process.
-/// Uses memfd as an intermediate buffer.
-/// Returns the number of pages successfully restored.
-fn restore_pages(target_pid: u32, shadow_pid: u32, pages: &[u64], _memfd: RawFd) -> Result<u32> {
-    let shadow_mem_path = format!("/proc/{}/mem", shadow_pid);
-    let target_mem_path = format!("/proc/{}/mem", target_pid);
-
-    let mut shadow_mem = OpenOptions::new()
-        .read(true)
-        .open(&shadow_mem_path)
-        .with_context(|| format!("Failed to open {}", shadow_mem_path))?;
-
-    let mut target_mem = OpenOptions::new()
-        .write(true)
-        .open(&target_mem_path)
-        .with_context(|| format!("Failed to open {}", target_mem_path))?;
-
-    let mut page_buf = [0u8; PAGE_SIZE as usize];
-    let mut restored = 0u32;
-
-    for &page_addr in pages {
-        // Read original page from shadow child
-        if shadow_mem.seek(SeekFrom::Start(page_addr)).is_err() {
-            eprintln!(
-                "[cow] Warning: could not seek to 0x{:x} in shadow pid {}",
-                page_addr, shadow_pid
-            );
-            continue;
-        }
-        if shadow_mem.read_exact(&mut page_buf).is_err() {
-            eprintln!(
-                "[cow] Warning: could not read page at 0x{:x} from shadow pid {}",
-                page_addr, shadow_pid
-            );
-            continue;
-        }
-
-        // Write page to target process
-        if target_mem.seek(SeekFrom::Start(page_addr)).is_err() {
-            eprintln!(
-                "[cow] Warning: could not seek to 0x{:x} in target pid {}",
-                page_addr, target_pid
-            );
-            continue;
-        }
-        if target_mem.write_all(&page_buf).is_err() {
-            eprintln!(
-                "[cow] Warning: could not write page at 0x{:x} to target pid {}",
-                page_addr, target_pid
-            );
-            continue;
-        }
-
-        restored += 1;
-    }
-
-    Ok(restored)
 }
