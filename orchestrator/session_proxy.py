@@ -90,6 +90,12 @@ class _Session:
         self.fifo_wfd = None        # held-open write end (keeps FIFO from EOF)
         self.live_pid = None        # current canonical pid (agent never sees it)
         self.epoch = None           # {"baseline": pid, "candidate": pid} or None
+        # Commit-gated output. `committed_output` is the durable transcript that
+        # is safe to release externally (get_output). `epoch_buffer` holds the
+        # SPECULATIVE output produced during the current epoch; it is merged
+        # into committed_output on commit and dropped on reject.
+        self.committed_output = []
+        self.epoch_buffer = []
 
 
 # ──────────────────────────── The proxy ────────────────────────────────────
@@ -242,6 +248,14 @@ class SessionProxy:
 
         Works both between epochs (on the committed shell) and inside an epoch
         (on the speculative candidate) — the caller doesn't need to care which.
+
+        Output is commit-gated: the speculating agent still receives this
+        command's stdout directly (it needs the candidate's result to decide
+        what to do next), but the externally-releasable transcript is only
+        updated when the output is canonical. Output produced INSIDE an epoch is
+        held in the epoch buffer and released to the committed transcript on
+        commit / discarded on reject; output produced outside an epoch is
+        committed immediately. See get_output().
         """
         sess = self.sessions[sid]
         sentinel = f"__SHADOW_DONE_{next(self._sentinel_ids)}__"
@@ -253,9 +267,25 @@ class SessionProxy:
             lines = self._loglines(sess)
             if sentinel in lines[n0:]:
                 idx = lines.index(sentinel, n0)
-                return "\n".join(lines[n0:idx])
+                out = "\n".join(lines[n0:idx])
+                if sess.epoch is not None:
+                    sess.epoch_buffer.append(out)   # speculative: hold pending commit
+                else:
+                    sess.committed_output.append(out)  # canonical: release now
+                return out
             time.sleep(0.05)
         raise TimeoutError(f"command timed out: {command!r}")
+
+    def get_output(self, sid):
+        """Return the session's COMMITTED transcript (commit-gated).
+
+        This is the only output safe to release externally: it contains output
+        from committed epochs and non-speculative commands, but NEVER output
+        from an epoch that is still in flight or was rejected. It mirrors the
+        orchestrator's commit-gated output buffer, applied per speculative epoch.
+        """
+        sess = self.sessions[sid]
+        return "\n".join(sess.committed_output)
 
     # ---- speculative epoch -------------------------------------------------
     def begin_epoch(self, sid, retries=3):
@@ -311,6 +341,9 @@ class SessionProxy:
         self.client.call("continue_pid", pid=candidate)
         sess.live_pid = candidate            # unchanged: candidate stays live
         sess.epoch = None
+        # Release the speculative transcript: the epoch's output is now canonical.
+        sess.committed_output.extend(sess.epoch_buffer)
+        sess.epoch_buffer = []
         time.sleep(0.2)                      # let it settle back into read()
         self._log(f"session {sid}: COMMIT — candidate {candidate} is now canonical "
                   f"(baseline {baseline} discarded)")
@@ -333,6 +366,9 @@ class SessionProxy:
         pids = resp.get("pids") or [baseline]
         sess.live_pid = pids[0]
         sess.epoch = None
+        # Discard the speculative transcript: from the baseline's point of view
+        # the epoch never happened, so its output is never released.
+        sess.epoch_buffer = []
         time.sleep(0.2)                      # let the baseline settle back into read()
         self._log(f"session {sid}: REJECT — discarded candidate {candidate}, "
                   f"resumed pristine baseline {sess.live_pid}")
@@ -393,6 +429,16 @@ def _demo(proxy):
         after_commit = proxy.run(sid, "echo VAL=$SHADOW_VAR")
         print(f"  after COMMIT:          {after_commit}")
         ok &= (after_commit.strip() == "VAL=COMMITTED_VALUE")
+
+        # ── Commit-gated output: the released transcript must contain the
+        #    COMMITTED epoch's output but NEVER the REJECTED epoch's output ──
+        transcript = proxy.get_output(sid)
+        gate_ok = ("MODIFIED_BY_AGENT" not in transcript
+                   and "VAL=COMMITTED_VALUE" in transcript)
+        print(f"\n  committed transcript gate: "
+              f"{'OK' if gate_ok else 'FAILED'} "
+              f"(rejected output absent, committed output present)")
+        ok &= gate_ok
 
         print()
         if ok:

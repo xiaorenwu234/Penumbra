@@ -322,6 +322,54 @@ class ShadowOrchestrator:
 
         return fs_resp
 
+    def _rollback_proc(self, cgroup_id: str) -> dict:
+        """
+        Roll back ShadowProc's process layer for a cgroup.
+
+        Long-lived speculative sessions are rolled back LOSSLESSLY: discard the
+        candidate (and its epoch descendants) and RESUME the pristine baseline
+        via reject_by_cgroup, so the session's shell survives with its identity,
+        session and parent lineage intact. Only NON-versioned frozen processes
+        (e.g. one-shot audited processes with no active epoch) are killed.
+
+        This replaces the old kill-everything path, which would have destroyed a
+        long-lived session's shell along with its speculative work.
+
+        Returns {"resumed": [...baseline pids...], "killed": [...pids...]}.
+        """
+        resumed: List[int] = []
+        killed: List[int] = []
+
+        # Step 1: Reject any active speculative epochs — discard the candidate,
+        # resume the pristine baseline. Lossless; the canonical pid is unchanged.
+        reject_resp = self.proc_client.request({
+            "action": "reject_by_cgroup",
+            "cgroup_id": cgroup_id,
+        })
+        if reject_resp.get("status") == "ok":
+            resumed = reject_resp.get("pids", []) or []
+            if resumed:
+                log.info("  Restored %d baseline(s) in cgroup %s: %s",
+                         len(resumed), cgroup_id, resumed)
+        else:
+            log.warning("  reject_by_cgroup failed for %s: %s",
+                        cgroup_id, reject_resp.get("message"))
+
+        # Step 2: Kill any remaining NON-versioned frozen processes. The
+        # just-resumed baselines were removed from ShadowProc's frozen set by the
+        # reject, so they are not affected here.
+        kill_resp = self.proc_client.request({
+            "action": "kill_by_cgroup",
+            "cgroup_id": cgroup_id,
+        })
+        if kill_resp.get("status") == "ok":
+            killed = kill_resp.get("pids", []) or []
+            if killed:
+                log.info("  Killed %d non-versioned process(es) in cgroup %s: %s",
+                         len(killed), cgroup_id, killed)
+
+        return {"resumed": resumed, "killed": killed}
+
     def rollback(self, cgroup_id: str) -> dict:
         """
         Rollback changes for a cgroup (with cascade).
@@ -347,20 +395,18 @@ class ShadowOrchestrator:
         affected = fs_resp.get("affected", [])
         log.info("  ShadowFS rollback successful, affected cgroups: %s", affected)
 
-        # Step 2: Kill frozen processes for all affected cgroups
+        # Step 2: Roll back the process layer for all affected cgroups. Each
+        # long-lived speculative session is restored to its pristine baseline
+        # (lossless); only non-versioned frozen processes are killed.
         total_killed = []
+        total_resumed = []
         for affected_cgroup in affected:
-            kill_resp = self.proc_client.request({
-                "action": "kill_by_cgroup",
-                "cgroup_id": affected_cgroup,
-            })
-            if kill_resp["status"] == "ok":
-                killed = kill_resp.get("pids", [])
-                if killed:
-                    log.info("  Killed PIDs in cgroup %s: %s",
-                             affected_cgroup, killed)
-                    total_killed.extend(killed)
+            res = self._rollback_proc(affected_cgroup)
+            total_resumed.extend(res["resumed"])
+            total_killed.extend(res["killed"])
 
+        if total_resumed:
+            log.info("  Total baselines restored: %d", len(total_resumed))
         if total_killed:
             log.info("  Total killed processes: %d", len(total_killed))
 
@@ -370,13 +416,14 @@ class ShadowOrchestrator:
         self._discard_output(cgroup_id)
 
         # Drop any deferred releases for cgroups undone by this cascade:
-        # their processes were just killed, so there is nothing to release.
+        # their processes were rolled back, so there is nothing to release.
         with self._pending_lock:
             for affected_cgroup in affected:
                 self._pending_release.discard(affected_cgroup)
             self._pending_release.discard(cgroup_id)
 
-        return {"status": "ok", "affected": affected, "killed_pids": total_killed}
+        return {"status": "ok", "affected": affected,
+                "killed_pids": total_killed, "resumed_pids": total_resumed}
 
     def list_agents(self) -> List[str]:
         """List all active ShadowFS agents."""
@@ -632,18 +679,19 @@ class ShadowOrchestrator:
             else:
                 log.error("  ShadowFS rollback failed: %s", fs_resp.get("message"))
 
-            # Kill frozen processes (all affected cgroups)
+            # Roll back the process layer (all affected cgroups). Long-lived
+            # speculative sessions are restored to their pristine baseline
+            # (lossless); only non-versioned frozen processes are killed.
             total_killed = []
+            total_resumed = []
             kill_cgroups = affected if affected else [cgroup_id]
             for cg in kill_cgroups:
-                kill_resp = self.proc_client.request({
-                    "action": "kill_by_cgroup",
-                    "cgroup_id": cg,
-                })
-                if kill_resp.get("status") == "ok":
-                    killed = kill_resp.get("pids", [])
-                    total_killed.extend(killed)
+                res = self._rollback_proc(cg)
+                total_resumed.extend(res["resumed"])
+                total_killed.extend(res["killed"])
 
+            if total_resumed:
+                log.info("  Restored baselines: %s", total_resumed)
             if total_killed:
                 log.info("  Killed PIDs: %s", total_killed)
 
@@ -666,6 +714,7 @@ class ShadowOrchestrator:
                 "total_violations": total_violations,
                 "violations": violations,
                 "killed_pids": total_killed,
+                "resumed_pids": total_resumed,
             }
 
     @staticmethod

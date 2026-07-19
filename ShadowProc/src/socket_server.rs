@@ -541,6 +541,36 @@ impl SocketServer {
                 }
             }
 
+            "reject_by_cgroup" => {
+                let Some(cgroup_id) = &req.cgroup_id else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("cgroup_id required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                let mut pm = process_manager.lock().unwrap();
+                match pm.reject_by_cgroup(cgroup_id) {
+                    Ok(pids) => Response {
+                        status: "ok".into(),
+                        message: Some(format!(
+                            "Rolled back {} speculative epoch(s): discarded candidates (and their descendants), resumed pristine baselines",
+                            pids.len()
+                        )),
+                        frozen: None,
+                        // pids are the resumed baseline pids, canonical from now on.
+                        pids: Some(pids),
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                    },
+                }
+            }
+
             "freeze_by_cgroup" => {
                 let Some(cgroup_id) = &req.cgroup_id else {
                     return Response {

@@ -295,17 +295,42 @@ impl ProcessManager {
     }
 
     /// Roll back a speculative epoch via the Frozen-Baseline model: discard the
-    /// candidate (the speculative fork) and RESUME the pristine baseline — the
-    /// original process, which never executed the epoch's command. Returns the
-    /// baseline pid, which is the canonical process from now on.
+    /// candidate (the speculative fork) AND its surviving epoch descendants,
+    /// then RESUME the pristine baseline — the original process, which never
+    /// executed the epoch's command. Returns the baseline pid, which is the
+    /// canonical process from now on.
     ///
     /// Unlike splicing a stale memory image onto live registers, this can never
     /// crash the target and never changes the canonical pid: the original keeps
-    /// its identity, session and parent lineage. Epoch descendants created by
-    /// the candidate are cleaned separately at the cgroup level.
+    /// its identity, session and parent lineage.
     pub fn reject_to_checkpoint(&mut self, pid: u32) -> Result<u32> {
         let live = self.resolve_pid(pid);
         let baseline = self.memory_tracker.reject_to_checkpoint(live)?;
+
+        // Discard the candidate's surviving epoch descendants. The candidate
+        // (just killed) may have forked children during the epoch; being born
+        // inside the epoch they are part of the speculative work that, from the
+        // baseline's point of view, never happened. When the candidate dies they
+        // are reparented (NOT reaped), so we must kill them explicitly. Cleanup
+        // is cgroup-scoped: kill every pid in the candidate's cgroup EXCEPT the
+        // baseline we are about to resume (and any other epoch's pristine
+        // baseline). This is the "discard the epoch as a unit" guarantee the
+        // Frozen-Baseline model relies on.
+        let cgroup_path = self
+            .frozen
+            .get(&baseline)
+            .map(|fp| fp.cgroup_path.clone())
+            .or_else(|| read_process_cgroup(baseline));
+        if let Some(cg) = cgroup_path {
+            let killed = self.kill_cgroup_descendants(&cg, baseline);
+            if !killed.is_empty() {
+                eprintln!(
+                    "[cow] Rollback: discarded {} surviving epoch descendant(s): {:?}",
+                    killed.len(),
+                    killed
+                );
+            }
+        }
 
         // The candidate is dead; drop its frozen record (if any).
         self.frozen.remove(&live);
@@ -321,6 +346,74 @@ impl ProcessManager {
         self.promoted.remove(&baseline);
         self.frozen.remove(&baseline);
         Ok(baseline)
+    }
+
+    /// Kill every process in `cgroup_path` EXCEPT `keep` and any versioning
+    /// baseline (a pristine rollback copy). Used to discard a rejected
+    /// candidate's surviving epoch descendants as a unit. Returns killed pids.
+    fn kill_cgroup_descendants(&mut self, cgroup_path: &str, keep: u32) -> Vec<u32> {
+        let cgroup_dir = if cgroup_path.starts_with('/') {
+            format!("/sys/fs/cgroup{}/cgroup.procs", cgroup_path)
+        } else {
+            format!("/sys/fs/cgroup/{}/cgroup.procs", cgroup_path)
+        };
+        let data = match fs::read_to_string(&cgroup_dir) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        let mut killed = Vec::new();
+        for line in data.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let cpid: u32 = match line.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            // Never kill the baseline we are resuming, nor any other epoch's
+            // pristine versioning baseline.
+            if cpid == keep || self.memory_tracker.is_shadow_pid(cpid) {
+                continue;
+            }
+            if signal::kill(Pid::from_raw(cpid as i32), Signal::SIGKILL).is_ok() {
+                self.frozen.remove(&cpid);
+                self.promoted.retain(|_, v| *v != cpid);
+                killed.push(cpid);
+            }
+        }
+        killed
+    }
+
+    /// Roll back all speculative epochs whose baseline lives in `cgroup_path`:
+    /// for each, discard the candidate (and its epoch descendants) and resume
+    /// the pristine baseline. Returns the resumed baseline pids. Non-versioned
+    /// frozen processes in the cgroup are left untouched (kill them separately
+    /// via kill_by_cgroup if desired).
+    pub fn reject_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
+        // Epochs are keyed by baseline pid. Select those whose baseline lives in
+        // this cgroup (prefer the recorded frozen cgroup, fall back to /proc).
+        let baselines: Vec<u32> = self
+            .memory_tracker
+            .tracked_pids()
+            .into_iter()
+            .filter(|&b| {
+                self.frozen
+                    .get(&b)
+                    .map(|fp| fp.cgroup_path == cgroup_path)
+                    .unwrap_or(false)
+                    || read_process_cgroup(b)
+                        .map(|c| c == cgroup_path)
+                        .unwrap_or(false)
+            })
+            .collect();
+        let mut resumed = Vec::new();
+        for b in baselines {
+            if let Ok(baseline) = self.reject_to_checkpoint(b) {
+                resumed.push(baseline);
+            }
+        }
+        Ok(resumed)
     }
 
     /// Resolve a possibly-stale pid to its current canonical pid by following
