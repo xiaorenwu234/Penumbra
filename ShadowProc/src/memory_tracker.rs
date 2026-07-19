@@ -1,14 +1,31 @@
-//! COW (Copy-on-Write) Process-Versioning Tracker for ShadowProc
+//! Frozen-Baseline + Speculative-Clone versioning for ShadowProc
 //!
-//! Implements memory rollback via PROCESS VERSIONING on top of the kernel's
-//! native COW mechanism:
-//! 1. Inject clone() via ptrace into the target process → creates a coherent
-//!    "shadow" checkpoint that shares physical pages with the parent (COW).
-//! 2. The shadow is frozen (SIGSTOP) with the target's registers at the snapshot
-//!    instant, so its memory + registers describe one coherent moment.
-//! 3. On reject: discard the live (speculative) process and RESUME the shadow
-//!    checkpoint as the new canonical process.
-//! 4. On commit: discard the shadow checkpoint (accept all memory changes).
+//! Implements memory rollback by PROCESS VERSIONING on top of the kernel's
+//! native COW mechanism, using the "Frozen Baseline + Speculative Clone" model:
+//!
+//! 1. At an epoch boundary the ORIGINAL process is already SIGSTOP-frozen.
+//!    We inject clone() via ptrace to fork a coherent COW copy of it.
+//! 2. We keep the ORIGINAL frozen as the pristine **baseline** (it never runs
+//!    the epoch's command) and let the **candidate** (the fork) run
+//!    speculatively. Both share physical pages copy-on-write, and both carry
+//!    the same snapshot registers (orig_regs), so either is a coherent moment.
+//! 3. On ROLLBACK: discard the candidate (and its epoch descendants, cleaned at
+//!    the cgroup level by ProcessManager) and RESUME the pristine baseline — the
+//!    original process, with its real pid / session / parent lineage intact,
+//!    which never executed the command, so rollback is lossless by construction.
+//! 4. On COMMIT: discard the baseline; the candidate becomes the new canonical
+//!    process. The next epoch clones a fresh candidate from it.
+//!
+//! The clone is created with CLONE_PARENT so it is a SIBLING of the original
+//! (its parent is the original's parent), not a child. This keeps the
+//! original's job-control / SIGCHLD handling undisturbed, and — crucially —
+//! means that when the baseline is killed on commit, the surviving candidate is
+//! NOT reparented to init: it keeps proper lineage under the launcher/supervisor.
+//!
+//! NOTE: lossless rollback requires the caller to take the snapshot at a
+//! pre-command boundary (e.g. the stdin read() boundary driven by a Session
+//! Proxy). The mechanism here is boundary-agnostic; boundary selection is the
+//! caller's responsibility.
 
 use anyhow::{Context, Result};
 use nix::sys::ptrace;
@@ -19,209 +36,211 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 
-/// State for a single tracked process
-struct ShadowState {
-    target_pid: u32,
-    shadow_pid: u32,
+/// Linux clone() flag: make the new task a sibling of the caller (its parent is
+/// the caller's parent) instead of a child of the caller.
+const CLONE_PARENT: u64 = 0x0000_8000;
+
+/// State for a single tracked epoch.
+///
+/// `baseline_pid` is the ORIGINAL process, kept frozen as the pristine rollback
+/// target. `candidate_pid` is the COW fork that runs the epoch speculatively.
+struct EpochState {
+    baseline_pid: u32,
+    candidate_pid: u32,
 }
 
-impl Drop for ShadowState {
+impl Drop for EpochState {
     fn drop(&mut self) {
-        // Kill shadow child if still alive
-        let _ = nix::sys::signal::kill(Pid::from_raw(self.shadow_pid as i32), Signal::SIGKILL);
-        // Wait to reap zombie
-        let _ = waitpid(Pid::from_raw(self.shadow_pid as i32), Some(WaitPidFlag::WNOHANG));
+        // Safety net for abnormal teardown: the candidate (the speculative
+        // fork) is the disposable one — kill and reap it. The baseline is the
+        // real, original process and is never touched here.
+        let _ = nix::sys::signal::kill(Pid::from_raw(self.candidate_pid as i32), Signal::SIGKILL);
+        let _ = waitpid(Pid::from_raw(self.candidate_pid as i32), Some(WaitPidFlag::WNOHANG));
     }
 }
 
-/// COW Memory Tracker - manages shadow processes for memory rollback
+/// COW Memory Tracker - manages baseline/candidate epochs for memory rollback
 pub struct MemoryTracker {
-    shadows: HashMap<u32, ShadowState>,
-    /// If true, auto-track new child processes when fork events arrive
+    /// Keyed by baseline_pid (the original pid the caller knows at begin time).
+    epochs: HashMap<u32, EpochState>,
+    /// If true, fork events from eBPF are considered for descendant handling.
+    /// In the Frozen-Baseline model descendants are NOT individually versioned;
+    /// they are cleaned as a unit via the epoch cgroup, so this only gates
+    /// logging.
     auto_track_enabled: bool,
 }
 
 impl MemoryTracker {
     pub fn new() -> Self {
         MemoryTracker {
-            shadows: HashMap::new(),
+            epochs: HashMap::new(),
             auto_track_enabled: false,
         }
     }
 
-    /// Enable or disable auto-tracking of child processes.
-    /// When enabled, fork events from eBPF will trigger automatic begin_tracking
-    /// on the new child process.
+    /// Enable or disable descendant fork awareness.
     pub fn set_auto_track(&mut self, enabled: bool) {
         self.auto_track_enabled = enabled;
-        eprintln!("[cow] Auto-track child processes: {}", if enabled { "enabled" } else { "disabled" });
+        eprintln!("[cow] Descendant fork awareness: {}", if enabled { "enabled" } else { "disabled" });
     }
 
-    /// Check if auto-tracking is enabled
+    /// Check if descendant fork awareness is enabled
     pub fn is_auto_track_enabled(&self) -> bool {
         self.auto_track_enabled
     }
 
-    /// Handle a fork event: if the parent is being tracked, also track the child.
-    /// The child process must be briefly stopped (SIGSTOP) for fork injection.
-    /// Returns Ok(true) if tracking was initiated, Ok(false) if skipped.
+    /// Handle a fork event from eBPF.
+    ///
+    /// In the Frozen-Baseline + Speculative-Clone model we do NOT create a
+    /// per-descendant COW checkpoint: a candidate's children are born inside
+    /// the epoch cgroup and are discarded as a unit on rollback (cgroup kill)
+    /// or kept as a unit on commit. So this is now purely informational and
+    /// never injects a fork into the child. Returns Ok(false) (nothing tracked).
     pub fn handle_fork_event(&mut self, parent_tgid: u32, child_tgid: u32) -> Result<bool> {
         if !self.auto_track_enabled {
             return Ok(false);
         }
-
-        // Only auto-track if the parent is being tracked
-        if !self.shadows.contains_key(&parent_tgid) {
-            return Ok(false);
+        // Only note descendants of a process we are actually versioning.
+        let parent_is_tracked = self
+            .epochs
+            .values()
+            .any(|e| e.baseline_pid == parent_tgid || e.candidate_pid == parent_tgid);
+        if parent_is_tracked {
+            eprintln!(
+                "[cow] Epoch descendant pid {} (of {}) noted; cgroup-scoped cleanup applies (no per-child checkpoint)",
+                child_tgid, parent_tgid
+            );
         }
-
-        // Don't double-track
-        if self.shadows.contains_key(&child_tgid) {
-            return Ok(false);
-        }
-
-        // CRITICAL: Don't track shadow children created by our own fork injection!
-        // Without this check, inject_fork_via_ptrace creates a shadow child which
-        // triggers sched_process_fork, which calls handle_fork_event again,
-        // causing infinite recursion.
-        for state in self.shadows.values() {
-            if state.shadow_pid == child_tgid {
-                eprintln!(
-                    "[cow] Skipping fork event: child {} is a shadow process (of pid {})",
-                    child_tgid, state.target_pid
-                );
-                return Ok(false);
-            }
-        }
-
-        // The child was just forked - we need to SIGSTOP it, then begin tracking
-        // Send SIGSTOP to the child so we can ptrace it
-        nix::sys::signal::kill(Pid::from_raw(child_tgid as i32), Signal::SIGSTOP)
-            .with_context(|| format!("Failed to SIGSTOP child {} for COW tracking", child_tgid))?;
-
-        // Give the child a moment to actually stop
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Begin tracking the child
-        match self.begin_tracking(child_tgid) {
-            Ok(()) => {
-                eprintln!(
-                    "[cow] Auto-tracked child pid {} (parent {})",
-                    child_tgid, parent_tgid
-                );
-                // Resume the child after tracking is set up
-                let _ = nix::sys::signal::kill(Pid::from_raw(child_tgid as i32), Signal::SIGCONT);
-                Ok(true)
-            }
-            Err(e) => {
-                eprintln!(
-                    "[cow] Failed to auto-track child pid {}: {}",
-                    child_tgid, e
-                );
-                // Resume the child even if tracking failed
-                let _ = nix::sys::signal::kill(Pid::from_raw(child_tgid as i32), Signal::SIGCONT);
-                Err(e)
-            }
-        }
+        Ok(false)
     }
 
-    /// Begin COW tracking for a process.
-    /// The process MUST be in SIGSTOP state (already frozen by eBPF).
+    /// Begin a versioning epoch for a process.
+    /// The process MUST be in SIGSTOP state (already frozen at the snapshot
+    /// boundary).
     ///
     /// This will:
     /// 1. Attach via ptrace
-    /// 2. Inject a clone() syscall to create a coherent shadow checkpoint
-    /// 3. Freeze the shadow permanently (with the target's snapshot registers)
-    /// 4. Detach from the parent
-    pub fn begin_tracking(&mut self, pid: u32) -> Result<()> {
-        if self.shadows.contains_key(&pid) {
-            anyhow::bail!("Process {} is already being tracked for COW", pid);
+    /// 2. Inject clone(CLONE_PARENT) to create a coherent COW sibling
+    /// 3. Freeze both with the snapshot registers
+    /// 4. Keep the ORIGINAL as the pristine baseline; return the CANDIDATE
+    ///    (the fork) as the process that should run the epoch speculatively.
+    pub fn begin_tracking(&mut self, pid: u32) -> Result<u32> {
+        if let Some(e) = self.epochs.get(&pid) {
+            anyhow::bail!(
+                "Process {} already has an active epoch (candidate {})",
+                pid, e.candidate_pid
+            );
         }
 
-        // Inject fork via ptrace to create the shadow checkpoint. The shadow
-        // shares the parent's pages copy-on-write and is frozen with the
-        // target's snapshot registers (see inject_fork_via_ptrace).
-        let shadow_pid = inject_fork_via_ptrace(pid)
-            .with_context(|| format!("Failed to inject fork into pid {}", pid))?;
+        // Inject a clone via ptrace to create the candidate. It shares the
+        // original's pages copy-on-write and is frozen with the snapshot
+        // registers (see inject_fork_via_ptrace). With CLONE_PARENT it is a
+        // sibling of the original, not a child.
+        let candidate_pid = inject_fork_via_ptrace(pid)
+            .with_context(|| format!("Failed to inject clone into pid {}", pid))?;
 
-        eprintln!("[cow] Started tracking pid {} -> shadow pid {}", pid, shadow_pid);
+        eprintln!(
+            "[cow] Epoch started: baseline (frozen) pid {} -> candidate (runs) pid {}",
+            pid, candidate_pid
+        );
 
-        self.shadows.insert(
+        self.epochs.insert(
             pid,
-            ShadowState {
-                target_pid: pid,
-                shadow_pid,
+            EpochState {
+                baseline_pid: pid,
+                candidate_pid,
             },
         );
 
-        Ok(())
+        Ok(candidate_pid)
     }
 
-    /// Commit: discard the shadow process (accept all memory changes).
-    pub fn commit(&mut self, pid: u32) -> Result<()> {
-        if self.shadows.remove(&pid).is_none() {
-            anyhow::bail!("Process {} is not being COW-tracked", pid);
+    /// Resolve any pid belonging to an epoch (baseline OR candidate) to its
+    /// baseline key.
+    fn find_key(&self, pid: u32) -> Option<u32> {
+        if self.epochs.contains_key(&pid) {
+            return Some(pid);
         }
-        eprintln!("[cow] Committed pid {} - shadow discarded", pid);
-        Ok(())
+        self.epochs
+            .iter()
+            .find(|(_, e)| e.candidate_pid == pid)
+            .map(|(k, _)| *k)
     }
 
-    /// Reject the speculative version and roll back via PROCESS VERSIONING.
-    ///
-    /// Instead of splicing the checkpoint's memory pages onto the live process
-    /// (restore_memory), which fails whenever the snapshot boundary and the
-    /// rollback boundary differ (the live registers/stack reference heap/arena
-    /// state that the page-restore reverts → dangling pointers → libc segfault),
-    /// this discards the speculative process `pid` entirely and RESUMES its
-    /// pristine checkpoint (the shadow) as the new canonical process.
-    ///
-    /// The shadow is a full fork-checkpoint whose registers, stack, heap, TLS
-    /// and userspace runtime state all belong to a single coherent instant, so
-    /// resuming it can never produce a T0/T1 mismatch. Returns the promoted
-    /// (shadow) pid, which becomes the live canonical pid.
-    pub fn reject_to_checkpoint(&mut self, pid: u32) -> Result<u32> {
-        let state = self
-            .shadows
-            .remove(&pid)
-            .ok_or_else(|| anyhow::anyhow!("Process {} is not being COW-tracked", pid))?;
-        let shadow_pid = state.shadow_pid;
-        // We are PROMOTING the shadow, so its ShadowState::Drop (which SIGKILLs
-        // the shadow) must NOT run. Skip Drop via forget.
+    /// Commit: accept the speculative candidate as canonical and discard the
+    /// pristine baseline. Accepts either the baseline or candidate pid.
+    pub fn commit(&mut self, pid: u32) -> Result<u32> {
+        let key = self
+            .find_key(pid)
+            .ok_or_else(|| anyhow::anyhow!("Process {} is not part of a tracked epoch", pid))?;
+        let state = self.epochs.remove(&key).unwrap();
+        let baseline = state.baseline_pid;
+        let candidate = state.candidate_pid;
+        // The candidate must SURVIVE the commit, so suppress EpochState::Drop
+        // (which would SIGKILL the candidate) and kill the baseline instead.
         std::mem::forget(state);
 
-        // Discard the speculative (live) process and reap it.
-        let _ = nix::sys::signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-        let _ = waitpid(Pid::from_raw(pid as i32), Some(WaitPidFlag::WNOHANG));
-
-        // Promote the checkpoint: resume the shadow as the canonical process.
-        // It was left SIGSTOP'd at begin_tracking with coherent registers, so a
-        // plain SIGCONT continues it exactly from the snapshot instant.
-        nix::sys::signal::kill(Pid::from_raw(shadow_pid as i32), Signal::SIGCONT)
-            .with_context(|| format!("Failed to resume checkpoint (shadow) pid {}", shadow_pid))?;
+        let _ = nix::sys::signal::kill(Pid::from_raw(baseline as i32), Signal::SIGKILL);
+        let _ = waitpid(Pid::from_raw(baseline as i32), Some(WaitPidFlag::WNOHANG));
 
         eprintln!(
-            "[cow] Reject pid {}: killed speculative version, resumed checkpoint (shadow) pid {} as canonical",
-            pid, shadow_pid
+            "[cow] Commit: discarded baseline pid {}; candidate pid {} is now canonical",
+            baseline, candidate
         );
-        Ok(shadow_pid)
+        // Return the discarded baseline pid so the caller can clean up its
+        // bookkeeping (the candidate stays live and resumable).
+        Ok(baseline)
     }
 
-    /// Check if a process is currently being COW-tracked
+    /// Roll back the speculative epoch: discard the candidate and return the
+    /// pristine baseline (the original process) so the caller can resume it.
+    /// Accepts either the baseline or candidate pid.
+    ///
+    /// The baseline never executed the epoch's command; its registers, stack,
+    /// heap, TLS and cwd are exactly as they were at the snapshot instant, so
+    /// resuming it is lossless — with no memory/register splicing and no pid
+    /// change (the original keeps its identity, session and parent lineage).
+    ///
+    /// The candidate's epoch descendants are cleaned separately at the cgroup
+    /// level by ProcessManager. Returns the baseline pid.
+    pub fn reject_to_checkpoint(&mut self, pid: u32) -> Result<u32> {
+        let key = self
+            .find_key(pid)
+            .ok_or_else(|| anyhow::anyhow!("Process {} is not part of a tracked epoch", pid))?;
+        let state = self.epochs.remove(&key).unwrap();
+        let baseline = state.baseline_pid;
+        let candidate = state.candidate_pid;
+        // Kill the candidate explicitly; suppress Drop to avoid a redundant
+        // second kill/reap of the same pid.
+        std::mem::forget(state);
+
+        let _ = nix::sys::signal::kill(Pid::from_raw(candidate as i32), Signal::SIGKILL);
+        let _ = waitpid(Pid::from_raw(candidate as i32), Some(WaitPidFlag::WNOHANG));
+
+        eprintln!(
+            "[cow] Rollback: killed candidate pid {}; baseline pid {} restored as canonical",
+            candidate, baseline
+        );
+        Ok(baseline)
+    }
+
+    /// Check if a process is part of an active epoch (as baseline or candidate).
     pub fn is_tracking(&self, pid: u32) -> bool {
-        self.shadows.contains_key(&pid)
+        self.find_key(pid).is_some()
     }
 
-    /// Check if a pid is a COW shadow process (an internal artifact created by
-    /// fork injection). Shadow processes happen to live inside the monitored
-    /// cgroup, but must NEVER be frozen/killed by cgroup-level operations:
-    /// they are ptrace-managed snapshots holding pristine memory for rollback.
+    /// Check if a pid is a frozen BASELINE (the pristine, original copy held for
+    /// rollback). Baselines live inside the monitored cgroup but must NEVER be
+    /// frozen/killed by cgroup-level operations while an epoch is live: they are
+    /// ptrace-snapshotted pristine copies. (The candidate, by contrast, is the
+    /// live process that cgroup freeze/kill legitimately acts on.)
     pub fn is_shadow_pid(&self, pid: u32) -> bool {
-        self.shadows.values().any(|s| s.shadow_pid == pid)
+        self.epochs.values().any(|e| e.baseline_pid == pid)
     }
 
-    /// Get all tracked PIDs
+    /// Get all baseline PIDs with an active epoch.
     pub fn tracked_pids(&self) -> Vec<u32> {
-        self.shadows.keys().copied().collect()
+        self.epochs.keys().copied().collect()
     }
 }
 
@@ -229,13 +248,15 @@ impl MemoryTracker {
 // Helper functions
 // ═══════════════════════════════════════════════════════════════
 
-/// Inject a fork() system call into the target process via ptrace.
+/// Inject a clone() system call into the target process via ptrace to create a
+/// coherent COW copy (the candidate).
 ///
 /// The target process must be in a stopped state (SIGSTOP).
-/// Returns the PID of the newly created shadow child (also stopped).
+/// Returns the PID of the newly created candidate (also stopped).
 ///
-/// Uses PTRACE_O_TRACEFORK + PTRACE_CONT for reliable syscall injection
-/// (PTRACE_SINGLESTEP is unreliable across `syscall` instructions on some kernels).
+/// Uses PTRACE_O_TRACEFORK/CLONE/VFORK + PTRACE_CONT for reliable syscall
+/// injection (PTRACE_SINGLESTEP is unreliable across `syscall` instructions on
+/// some kernels).
 fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
     let target = Pid::from_raw(pid as i32);
 
@@ -283,26 +304,29 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
     let syscall_addr = find_syscall_instruction(pid, &orig_regs)?;
     eprintln!("[cow] Found syscall instruction at 0x{:x} for pid {}", syscall_addr, pid);
 
-    // 4. Set up registers for clone(0, 0, 0, 0, 0) → a fork-like COW child with
-    //    NO exit signal.
+    // 4. Set up registers for clone(CLONE_PARENT, 0, 0, 0, 0) → a fork-like COW
+    //    SIBLING with NO exit signal.
     //
-    //    We deliberately pass exit_signal = 0 (NOT SIGCHLD). Without CLONE_VM the
-    //    child still receives a full copy-on-write snapshot of the parent's
-    //    address space (exactly what we need), and child_stack = NULL makes it
-    //    resume on the parent's (COW) stack — i.e. identical memory semantics to
-    //    fork(). The only difference from fork() is that the child sends NO
-    //    signal to the parent when it stops or exits.
+    //    Raw x86-64 clone() arg order is clone(flags, stack, ptid, ctid, tls).
+    //    Without CLONE_VM the child still receives a full copy-on-write snapshot
+    //    of the parent's address space (exactly what we need), and
+    //    child_stack = NULL makes it resume on the parent's (COW) stack — i.e.
+    //    identical memory semantics to fork().
     //
-    //    This is critical for tracking real, signal-aware processes such as a
-    //    shell: with SIGCHLD as the exit signal, the shadow child appears as a
-    //    mysterious child of the target, and the target's SIGCHLD handler / job
-    //    control would waitpid() it and race with our inject/resume sequence,
-    //    intermittently crashing the target. exit_signal = 0 makes the shadow
-    //    completely invisible to the target's signal handling.
+    //    CLONE_PARENT makes the candidate a SIBLING of the original (its real
+    //    parent is the original's parent), not a child. Two payoffs:
+    //      - the original's SIGCHLD / job-control / wait() logic is never
+    //        disturbed by the appearance of a mystery child, and
+    //      - when the baseline (original) is killed on commit, the surviving
+    //        candidate is NOT reparented to init — it keeps proper lineage
+    //        under the launcher/supervisor.
+    //    exit_signal is left 0 (low byte of flags) so the candidate sends no
+    //    signal to that parent either; a real supervisor would instead use
+    //    SIGCHLD + pidfd to reap it deterministically.
     let mut new_regs = orig_regs;
     new_regs.rip = syscall_addr;
-    new_regs.rax = libc::SYS_clone as u64;  // __NR_clone = 56
-    new_regs.rdi = 0;                        // flags = 0 (no CLONE_VM → COW; no exit_signal)
+    new_regs.rax = libc::SYS_clone as u64;   // __NR_clone = 56
+    new_regs.rdi = CLONE_PARENT;             // flags = CLONE_PARENT (COW; exit_signal = 0)
     new_regs.rsi = 0;                        // child_stack = NULL (use parent's stack)
     new_regs.rdx = 0;                        // parent_tidptr = NULL
     new_regs.r10 = 0;                        // child_tidptr = NULL
@@ -310,13 +334,13 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
 
     // 5. (Fork/clone/vfork trace options were already armed at PTRACE_SEIZE time.)
     ptrace::setregs(target, new_regs)
-        .context("Failed to set registers for fork injection")?;
+        .context("Failed to set registers for clone injection")?;
 
     // 6. Continue execution — process will execute the clone() syscall.
     //    With PTRACE_O_TRACECLONE/FORK, the kernel will stop the parent with
     //    a PTRACE_EVENT before it resumes after clone.
     ptrace::cont(target, None)
-        .context("Failed to continue for fork injection")?;
+        .context("Failed to continue for clone injection")?;
 
     // 7. Wait for the fork/clone ptrace event
     let child_pid: u32 = loop {
@@ -331,7 +355,7 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
                     let child = ptrace::getevent(target)
                         .context("Failed to get event data (child pid)")?;
                     eprintln!(
-                        "[cow] Got ptrace event {} (fork/clone/vfork), child pid = {}",
+                        "[cow] Got ptrace event {} (fork/clone/vfork), candidate pid = {}",
                         event, child
                     );
                     break child as u32;
@@ -352,7 +376,7 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
                     .context("Failed to continue after SIGCHLD")?;
             }
             Ok(WaitStatus::Stopped(_, sig)) => {
-                eprintln!("[cow] Unexpected signal {:?} during fork injection, suppressing", sig);
+                eprintln!("[cow] Unexpected signal {:?} during clone injection, suppressing", sig);
                 ptrace::cont(target, None)
                     .context("Failed to continue after unexpected signal")?;
             }
@@ -360,20 +384,21 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
                 ptrace::setregs(target, orig_regs).ok();
                 ptrace::detach(target, None).ok();
                 anyhow::bail!(
-                    "Unexpected wait status during fork injection: {:?}",
+                    "Unexpected wait status during clone injection: {:?}",
                     status
                 );
             }
             Err(e) => {
                 ptrace::setregs(target, orig_regs).ok();
                 ptrace::detach(target, None).ok();
-                anyhow::bail!("waitpid failed during fork injection: {}", e);
+                anyhow::bail!("waitpid failed during clone injection: {}", e);
             }
         }
     };
 
-    // 8. The child is auto-traced (PTRACE_O_TRACECLONE/FORK auto-attaches the child).
-    //    Wait for the child's initial ptrace-stop, then detach it with SIGSTOP.
+    // 8. The candidate is auto-traced (PTRACE_O_TRACECLONE/FORK auto-attaches
+    //    the child to the tracer). Wait for its initial ptrace-stop, then detach
+    //    it with SIGSTOP.
     match waitpid(Pid::from_raw(child_pid as i32), Some(WaitPidFlag::__WALL)) {
         Ok(WaitStatus::Stopped(_, _)) | Ok(WaitStatus::PtraceEvent(_, _, _)) => {}
         _ => {
@@ -386,23 +411,18 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
         }
     }
 
-    // Send SIGSTOP and detach the child so it stays permanently frozen
-    //
-    // Before freezing it, promote it from a passive "memory donor" into a
-    // fully COHERENT, RESUMABLE checkpoint by giving it the target's register
-    // state at the snapshot instant (orig_regs). Left untouched, the shadow's
-    // registers point at the injected clone site (rip = syscall_addr+2, rax = 0)
-    // — fine for reading its memory, but garbage to actually run. With orig_regs
-    // the shadow's MEMORY (a COW copy taken at the clone) and its REGISTERS
-    // describe the SAME coherent moment, so it can later be SIGCONT'd to run as
-    // the canonical process (process-versioning rollback: kill the speculative
-    // version, resume this checkpoint) with no T0/T1 memory/register splicing.
+    // Give the candidate the SAME snapshot registers as the original (orig_regs)
+    // so that its MEMORY (a COW copy taken at the clone) and its REGISTERS
+    // describe the SAME coherent moment. Then SIGSTOP + detach it so it stays
+    // frozen and resumable: either it (the candidate) is SIGCONT'd to run the
+    // epoch speculatively, or — on commit — it is promoted, or — on rollback —
+    // it is discarded while the baseline is resumed instead.
     let _ = ptrace::setregs(Pid::from_raw(child_pid as i32), orig_regs);
 
     let _ = nix::sys::signal::kill(Pid::from_raw(child_pid as i32), Signal::SIGSTOP);
     ptrace::detach(Pid::from_raw(child_pid as i32), Some(Signal::SIGSTOP))
         .unwrap_or_else(|e| {
-            eprintln!("[cow] Warning: detach from shadow child {} failed: {}", child_pid, e);
+            eprintln!("[cow] Warning: detach from candidate {} failed: {}", child_pid, e);
         });
 
     // 9. Restore original registers. The target was group-stopped inside its
@@ -410,18 +430,17 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
     //    kernel's restart state (rax = -ERESTARTSYS with rip just past the
     //    `syscall` instruction). On resume the kernel's own signal-return path
     //    rewinds rip and reloads the syscall number, transparently restarting
-    //    the interrupted syscall — so a plain restore is correct here. (A manual
-    //    re-arm was tried and is exactly equivalent to this kernel behaviour; it
-    //    did not affect the residual injection race, so it was removed to keep
-    //    the resume path minimal.)
+    //    the interrupted syscall — so a plain restore is correct here.
     ptrace::setregs(target, orig_regs)
         .context("Failed to restore original registers")?;
 
-    // 10. Detach from parent (let it remain in SIGSTOP from eBPF)
+    // 10. Detach from the baseline (it remains SIGSTOP-frozen from eBPF). The
+    //     baseline is the pristine rollback copy and stays frozen until the
+    //     epoch is committed (baseline killed) or rolled back (baseline resumed).
     ptrace::detach(target, Some(Signal::SIGSTOP))
         .with_context(|| format!("Failed to detach from pid {}", pid))?;
 
-    eprintln!("[cow] Injected fork: pid {} → shadow child {}", pid, child_pid);
+    eprintln!("[cow] Injected clone: baseline pid {} → candidate {}", pid, child_pid);
 
     Ok(child_pid)
 }

@@ -432,11 +432,14 @@ impl SocketServer {
                 } else if let Some(pid) = req.pid {
                     let mut pm = process_manager.lock().unwrap();
                     match pm.begin_speculative(pid) {
-                        Ok(()) => Response {
+                        Ok(candidate) => Response {
                             status: "ok".into(),
-                            message: Some(format!("COW tracking started for pid {}", pid)),
+                            message: Some(format!(
+                                "Epoch started for pid {}: froze it as pristine baseline, forked speculative candidate pid {} (the live process for this epoch)",
+                                pid, candidate
+                            )),
                             frozen: None,
-                            pids: None,
+                            pids: Some(vec![candidate]),
                         },
                         Err(e) => Response {
                             status: "error".into(),
@@ -518,16 +521,16 @@ impl SocketServer {
                 };
                 let mut pm = process_manager.lock().unwrap();
                 match pm.reject_to_checkpoint(pid) {
-                    Ok(shadow) => Response {
+                    Ok(baseline) => Response {
                         status: "ok".into(),
                         message: Some(format!(
-                            "Rejected speculative pid {}, resumed checkpoint pid {} as canonical (canonical pid changed {} -> {})",
-                            pid, shadow, pid, shadow
+                            "Rolled back epoch for pid {}: discarded speculative candidate, resumed pristine baseline pid {} as canonical",
+                            pid, baseline
                         )),
                         frozen: None,
-                        // pids[0] is the NEW canonical pid the caller must track
-                        // from now on; the old pid is dead.
-                        pids: Some(vec![shadow]),
+                        // pids[0] is the canonical pid the caller tracks from now
+                        // on (the original baseline, resumed unchanged).
+                        pids: Some(vec![baseline]),
                     },
                     Err(e) => Response {
                         status: "error".into(),

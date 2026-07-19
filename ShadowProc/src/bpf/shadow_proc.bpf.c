@@ -829,8 +829,13 @@ int BPF_PROG(shadow_capset, struct cred *new_cred, const struct cred *old,
 char LICENSE[] SEC("license") = "GPL";
 
 // ═══════════════════════════════════════════════════════════════
-// Fork tracking - detect new child processes in monitored cgroups
-// for automatic COW tracking
+// Fork tracking - detect new child processes in monitored cgroups.
+//
+// In the Frozen-Baseline + Speculative-Clone model, a candidate's descendants
+// are NOT individually versioned: they are born inside the epoch cgroup and are
+// discarded/kept as a unit via cgroup-level cleanup on rollback/commit. This
+// hook therefore only REPORTS forks (informational); userspace does not inject
+// a per-child checkpoint. It fires only when cow auto-tracking is enabled.
 // ═══════════════════════════════════════════════════════════════
 
 SEC("tp_btf/sched_process_fork")
@@ -849,7 +854,8 @@ int BPF_PROG(shadow_sched_fork, struct task_struct *parent, struct task_struct *
     if (!check_cgroup())
         return 0;
 
-    // Emit a fork event so userspace can begin COW tracking on the child
+    // Emit a fork event so userspace can NOTE the epoch descendant (for
+    // logging / observability). Cleanup is cgroup-scoped, not per-child.
     __u32 child_pid = BPF_CORE_READ(child, pid);
     __u32 child_tgid = BPF_CORE_READ(child, tgid);
     __u32 parent_tgid = BPF_CORE_READ(parent, tgid);

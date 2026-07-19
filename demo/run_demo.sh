@@ -1168,63 +1168,54 @@ scenario_deferred_release() {
     rm -f "$LOWER_DIR/data7.txt" "$LOWER_DIR/derived7.txt" 2>/dev/null || true
 }
 
-# ─────── Scenario 8: Forked Child Env Var Rollback via Process Versioning ───────
-# Demonstrates speculative rollback of a REAL forked bash child inside a
-# MONITORED cgroup, using PROCESS VERSIONING instead of in-place memory patching.
+# ─────── Scenario 8: Bash Env Var Rollback via Frozen Baseline + Speculative Clone ───────
+# Demonstrates LOSSLESS speculative rollback of a REAL bash session inside a
+# MONITORED cgroup, using the Frozen-Baseline + Speculative-Clone model.
 #
-# eBPF interception is proven directly: the child issues connect() from inside
-# the monitored cgroup (via a `< /dev/tcp/127.0.0.1/PORT` redirection) and
-# lsm/socket_connect traps + freezes it. This is only possible because the
-# mmap-hook fix exempts bash's read-only MAP_SHARED startup mappings.
+# eBPF interception is proven directly: the speculative shell issues connect()
+# from inside the monitored cgroup (via a `< /dev/tcp/127.0.0.1/PORT`
+# redirection) and lsm/socket_connect traps + freezes it. This is only possible
+# because the mmap-hook fix exempts bash's read-only MAP_SHARED startup mappings.
 #
-# Why process versioning (not restore_memory): patching a live process's pages
-# from the snapshot only works when the snapshot boundary and the rollback
-# boundary share the same live call chain. An auto-tracked forked child is
-# snapshotted at fork() but would be rolled back at a different point, so its
-# registers/stack reference heap/arena state the page-restore reverts → dangling
-# pointers → libc segfault. Instead we keep the fork-time checkpoint (the shadow)
-# as a complete, resumable process and, on reject, DISCARD the speculative child
-# and RESUME the checkpoint as canonical — no T0/T1 boundary mismatch possible.
-#
-# We drive the child through its own FIFO (fd 8) as a command REPL:
-#   begin_speculative(bash)      -> auto-track ON; child auto-forked at birth = P0
-#   read ORIGINAL                -> child (P1) observes inherited value
-#   export SHADOW_VAR=MODIFIED    -> speculative modification in P1
-#   connect()                    -> eBPF freezes the cgroup (interception proof)
-#   reject_pid(P1)               -> kill P1, SIGCONT its fork-checkpoint P0
-#   read SHADOW_VAR              -> P0 reports ORIGINAL (proves rollback)
+# Model: begin_speculative freezes the ORIGINAL bash as the pristine BASELINE
+# (it never runs the epoch's command) and forks a COW CANDIDATE (a CLONE_PARENT
+# sibling) that runs the epoch. Because both share the same idle-in-read()
+# snapshot instant, either can resume coherently:
+#   begin_speculative(bash)      -> baseline=BASH_PID frozen, candidate=SPEC_PID
+#   resume_pid(SPEC_PID)          -> the CANDIDATE becomes the live shell
+#   echo $SHADOW_VAR              -> candidate observes inherited ORIGINAL
+#   export SHADOW_VAR=MODIFIED    -> speculative modification in the candidate
+#   connect()                    -> eBPF freezes the candidate (interception proof)
+#   reject_pid(bash)             -> kill candidate, SIGCONT the pristine baseline
+#   echo $SHADOW_VAR              -> baseline reports ORIGINAL (proves rollback)
+# The candidate and baseline share one FIFO (fd 9); only one is unfrozen at a
+# time, so commands route to whichever is live.
 # NOTE: verification uses `echo` (not /proc/PID/environ): bash's `export` only
 # mutates its heap variable table, never the execve-time stack env region that
 # /proc/PID/environ exposes.
 scenario_bash_env_rollback() {
     banner
-    section "Scenario 8: FORKED CHILD ENV VAR COW ROLLBACK (real shell)"
+    section "Scenario 8: BASH ENV VAR COW ROLLBACK (frozen baseline + speculative clone)"
     echo -e "  ${YELLOW}A real bash exports SHADOW_VAR=ORIGINAL — bash itself is NOT intercepted${NC}"
-    echo -e "  ${YELLOW}bash is COW-tracked (begin_speculative) → auto-track ON for its children${NC}"
-    echo -e "  ${YELLOW}bash forks a child; the child is auto-snapshotted at fork() = ORIGINAL${NC}"
-    echo -e "  ${YELLOW}Child changes SHADOW_VAR=MODIFIED_BY_AGENT, then connect() → eBPF auto-freezes${NC}"
-    echo -e "  ${YELLOW}the cgroup. REJECT = discard the speculative child, resume its pristine${NC}"
-    echo -e "  ${YELLOW}fork-checkpoint (process versioning) → SHADOW_VAR is ORIGINAL again${NC}"
+    echo -e "  ${YELLOW}begin_speculative freezes it as the pristine BASELINE and forks a COW CANDIDATE${NC}"
+    echo -e "  ${YELLOW}The CANDIDATE runs: SHADOW_VAR=MODIFIED_BY_AGENT, then connect() → eBPF freezes it${NC}"
+    echo -e "  ${YELLOW}REJECT = discard the speculative candidate, resume the pristine baseline${NC}"
+    echo -e "  ${YELLOW}(the ORIGINAL process, lineage intact) → SHADOW_VAR is ORIGINAL again${NC}"
     echo ""
 
     local CGROUP_ID="/$CGROUP_NAME_C"
-    local CHILD_FIFO="/tmp/shadow-demo-child.fifo"
-    local CHILD_LOG="/tmp/shadow-demo-child.log"
     mkdir -p "$CGROUP_PATH_C"
-    # Register cgroup-C with ShadowProc's eBPF so bash + its forked children are
+    # Register cgroup-C with ShadowProc's eBPF so bash + its candidate clone are
     # genuinely MONITORED. bash can live here without freezing at startup because
     # the mmap hook exempts its read-only MAP_SHARED loader mappings.
     step "Registering cgroup-C with ShadowProc (eBPF-monitored)..."
     show_json "$(shadowproc_cmd "{\"action\":\"add_cgroup\",\"cgroup_path\":\"$CGROUP_PATH_C\"}")"
-    info "bash + its forked children live in eBPF-MONITORED cgroup: $CGROUP_ID"
+    info "bash + its speculative candidate live in eBPF-MONITORED cgroup: $CGROUP_ID"
 
-    # Read the value part of the last "tag:VALUE" line from bash's / the child's log.
+    # Read the value part of the last "tag:VALUE" line from bash's log.
     read_bash()  { grep "^$1:" "$BASH_LOG"  2>/dev/null | tail -1 | cut -d: -f2- || true; }
-    read_child() { grep "^$1:" "$CHILD_LOG" 2>/dev/null | tail -1 | cut -d: -f2- || true; }
-    # Feed a command to bash (fd 9 is the FIFO write end) and let it run.
+    # Feed a command to the live shell (fd 9 is the FIFO write end) and let it run.
     feed_bash() { printf '%s\n' "$1" >&9; sleep 0.5; }
-    # Feed a command to the FIFO-driven CHILD (fd 8 is its FIFO write end).
-    feed_child() { printf '%s\n' "$1" >&8; sleep 0.5; }
     # Poll /proc/PID/status until the process reaches stopped state 'T' (or timeout).
     wait_state_T() {
         local pid=$1 t=0
@@ -1234,7 +1225,7 @@ scenario_bash_env_rollback() {
         done
         return 1
     }
-    # Purge leftover processes in cgroup-C (bash, its subshell, COW shadows) at teardown.
+    # Purge leftover processes in cgroup-C (bash, its candidate) at teardown.
     purge_cgroup_c() {
         if [[ -f "$CGROUP_PATH_C/cgroup.procs" ]]; then
             while read -r p; do kill -9 "$p" 2>/dev/null || true; done < "$CGROUP_PATH_C/cgroup.procs"
@@ -1244,7 +1235,7 @@ scenario_bash_env_rollback() {
     local orig="" before="" after="" success=false
     warn "ptrace fork-injection (begin_speculative) into a live, signal-driven shell"
     warn "has a small residual timing race (the SIGSTOP crash-class is already fixed"
-    warn "via PTRACE_SEIZE); if bash / its child loses it, this scenario retries (max 3)."
+    warn "via PTRACE_SEIZE); if the shell loses it, this scenario retries (max 3)."
 
     local attempt
     for attempt in 1 2 3; do
@@ -1253,15 +1244,12 @@ scenario_bash_env_rollback() {
         purge_cgroup_c
         orig=""; before=""; after=""
 
-        # Fresh FIFOs + logs each attempt. Hold the bash FIFO open read-write on
-        # fd 9 so bash never sees EOF and the write side never blocks. The child
-        # gets its OWN FIFO used purely as a clean idle-in-read boundary.
-        rm -f "$BASH_FIFO" "$BASH_LOG" "$CHILD_FIFO" "$CHILD_LOG"
-        mkfifo "$BASH_FIFO"; mkfifo "$CHILD_FIFO"; : > "$BASH_LOG"; : > "$CHILD_LOG"
+        # Fresh FIFO + log each attempt. Hold the FIFO open read-write on fd 9 so
+        # the shell never sees EOF and the write side never blocks. Both baseline
+        # and candidate inherit this fd (COW), and only one is unfrozen at a time.
+        rm -f "$BASH_FIFO" "$BASH_LOG"
+        mkfifo "$BASH_FIFO"; : > "$BASH_LOG"
         exec 9<>"$BASH_FIFO"
-        # Hold the child's FIFO open rw on fd 8 too, so the child (and its
-        # resumed checkpoint) never see EOF and our command writes never block.
-        exec 8<>"$CHILD_FIFO"
 
         # Launch a real bash inside the MONITORED cgroup-C. cgroup_exec exec()s in
         # place, so BASH_PID is the actual bash.
@@ -1270,7 +1258,7 @@ scenario_bash_env_rollback() {
         local BASH_PID=$!
         sleep 0.5
         if ! kill -0 "$BASH_PID" 2>/dev/null; then
-            warn "bash failed to start — retrying"; exec 8>&- 9>&-; continue
+            warn "bash failed to start — retrying"; exec 9>&-; continue
         fi
         info "bash running (PID $BASH_PID)"
 
@@ -1280,89 +1268,80 @@ scenario_bash_env_rollback() {
         sleep 0.3
         info "parent bash: SHADOW_VAR=$(read_bash parent_val) (bash itself is never intercepted)"
 
-        # Step 2: Freeze bash at its idle-in-read boundary + begin_speculative.
-        # begin_speculative snapshots bash AND turns ON auto-track + eBPF fork
-        # reporting, so any child bash forks will be COW-snapshotted at fork time.
+        # Step 2: Freeze bash at its idle-in-read() boundary, then begin_speculative:
+        # it freezes the ORIGINAL as the pristine baseline and forks a COW candidate
+        # (the returned pid). resume_pid(candidate) makes the candidate the live shell.
         echo ""
-        step "Step 2: Freeze bash (freeze_by_cgroup) + begin_speculative (COW snapshot + auto-track children ON)..."
+        step "Step 2: Freeze bash + begin_speculative (freeze baseline, fork speculative candidate)..."
         show_json "$(shadowproc_cmd "{\"action\":\"freeze_by_cgroup\",\"cgroup_id\":\"$CGROUP_ID\"}")"
         wait_state_T "$BASH_PID" || warn "bash never reached state=T"
         sleep 0.2
-        show_json "$(shadowproc_cmd "{\"action\":\"begin_speculative\",\"pid\":$BASH_PID}")"
-        show_json "$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$BASH_PID}")"
+        local begin_resp SPEC_PID
+        begin_resp=$(shadowproc_cmd "{\"action\":\"begin_speculative\",\"pid\":$BASH_PID}")
+        show_json "$begin_resp"
+        SPEC_PID=$(echo "$begin_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('pids') or [0])[0])" 2>/dev/null || echo 0)
+        if [[ -z "$SPEC_PID" || "$SPEC_PID" == "0" ]]; then
+            warn "begin_speculative returned no candidate — retrying"
+            kill -9 "$BASH_PID" 2>/dev/null || true
+            exec 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
+            continue
+        fi
+        info "baseline (frozen pristine) pid: $BASH_PID; candidate (speculative) pid: $SPEC_PID"
+        show_json "$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$SPEC_PID}")"
         sleep 0.4
 
-        # Step 3: bash forks a FIFO-driven REPL child. eBPF reports the fork and
-        # ShadowProc injects a fork into it, producing a FROZEN process-checkpoint
-        # P0 (a complete, resumable clone of the child at birth = ORIGINAL). The
-        # live child is the speculative version P1, driven command-by-command
-        # through CHILD_FIFO (fd 8). P0 and P1 share the same env at fork.
+        # Step 3: drive the CANDIDATE: observe ORIGINAL, mutate to MODIFIED_BY_AGENT,
+        # observe it, then connect(). The connect() is intercepted by eBPF, which
+        # SIGSTOPs the candidate (mid-syscall — we don't care, we'll DISCARD it) and
+        # auto-freezes the cgroup (the baseline is exempt as a tracked baseline).
         echo ""
-        step "Step 3: bash forks a FIFO-REPL child → auto fork-checkpoint P0 (ORIGINAL) + speculative P1..."
-        feed_bash "( while IFS= read -r _cmd; do eval \"\$_cmd\"; done ) < $CHILD_FIFO & echo \"childpid:\$!\""
-        sleep 0.5
-        local CHILD_PID
-        CHILD_PID=$(read_bash childpid | tr -d ' ')
-        if [[ -z "$CHILD_PID" ]]; then
-            warn "could not capture child pid — retrying"
-            kill -9 "$BASH_PID" 2>/dev/null || true
-            exec 8>&- 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
-            continue
-        fi
-        info "speculative child P1 PID: $CHILD_PID (its fork-checkpoint P0 is frozen alongside)"
-
-        # Step 4: feed the speculative sequence to P1: observe ORIGINAL, mutate to
-        # MODIFIED_BY_AGENT, observe it, then connect(). The connect() is
-        # intercepted by eBPF, which SIGSTOPs P1 (mid-syscall — we don't care,
-        # we're going to DISCARD P1 wholesale) and auto-freezes the whole cgroup.
-        echo ""
-        step "Step 4: drive P1: read ORIGINAL → export MODIFIED_BY_AGENT → connect() → eBPF freezes the cgroup..."
-        feed_child "echo \"child_orig:\$SHADOW_VAR\" >> $CHILD_LOG"
-        feed_child "export SHADOW_VAR=MODIFIED_BY_AGENT"
-        feed_child "echo \"child_before:\$SHADOW_VAR\" >> $CHILD_LOG"
-        feed_child "read -t 1 _ < /dev/tcp/127.0.0.1/9 2>/dev/null || true"
-        if wait_state_T "$CHILD_PID"; then
-            info "speculative P1 is FROZEN (state=T) by lsm/socket_connect; cgroup auto-frozen too"
+        step "Step 3: drive candidate: read ORIGINAL → export MODIFIED_BY_AGENT → connect() → eBPF freezes it..."
+        feed_bash 'echo spec_orig:$SHADOW_VAR'
+        feed_bash 'export SHADOW_VAR=MODIFIED_BY_AGENT'
+        feed_bash 'echo spec_before:$SHADOW_VAR'
+        feed_bash 'read -t 1 _ < /dev/tcp/127.0.0.1/9 2>/dev/null || true'
+        if wait_state_T "$SPEC_PID"; then
+            info "speculative candidate is FROZEN (state=T) by lsm/socket_connect; cgroup auto-frozen too"
         else
-            warn "P1 did not freeze on connect() — retrying"
-            kill -9 "$CHILD_PID" "$BASH_PID" 2>/dev/null || true
-            exec 8>&- 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
+            warn "candidate did not freeze on connect() — retrying"
+            kill -9 "$SPEC_PID" "$BASH_PID" 2>/dev/null || true
+            exec 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
             continue
         fi
-        orig=$(read_child child_orig)
-        before=$(read_child child_before)
-        info "P1 inherited SHADOW_VAR=$orig at fork, mutated it to $before before connecting"
+        orig=$(read_bash spec_orig)
+        before=$(read_bash spec_before)
+        info "candidate inherited SHADOW_VAR=$orig, mutated it to $before before connecting"
         if [[ "$before" != "MODIFIED_BY_AGENT" ]]; then
-            warn "P1 never applied the modification (lost race / crashed) — retrying"
-            kill -9 "$CHILD_PID" "$BASH_PID" 2>/dev/null || true
-            exec 8>&- 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
+            warn "candidate never applied the modification (lost race / crashed) — retrying"
+            kill -9 "$SPEC_PID" "$BASH_PID" 2>/dev/null || true
+            exec 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
             continue
         fi
 
-        # Step 5: REJECT. Instead of patching P1's memory (which mixes fork-time
-        # snapshot with idle-time registers and crashes glibc), we DISCARD the
-        # speculative version P1 entirely and RESUME its pristine fork-checkpoint
-        # P0 as the canonical process. P0's registers/stack/heap/TLS all belong to
-        # the same instant, so it resumes cleanly with SHADOW_VAR=ORIGINAL.
+        # Step 4: REJECT. Discard the speculative candidate entirely and RESUME the
+        # pristine baseline — the ORIGINAL process, with its real pid / session /
+        # parent lineage intact, which never ran the epoch's command. Its
+        # registers/stack/heap/TLS all belong to the same idle-in-read() instant,
+        # so it resumes cleanly with SHADOW_VAR=ORIGINAL.
         echo ""
-        step "Step 5: >>> REJECT: kill speculative P1, resume its fork-checkpoint P0 as canonical (process versioning)..."
-        show_json "$(shadowproc_cmd "{\"action\":\"reject_pid\",\"pid\":$CHILD_PID}")"
+        step "Step 4: >>> REJECT: kill speculative candidate, resume the pristine baseline as canonical..."
+        show_json "$(shadowproc_cmd "{\"action\":\"reject_pid\",\"pid\":$BASH_PID}")"
         sleep 0.6
 
-        # Step 6: P0 is now the live child, back at its FIFO read loop. Feed it one
-        # observation command; it reports SHADOW_VAR from its own (ORIGINAL) state.
-        # The speculative export/connect were consumed by the now-dead P1 and never
-        # touched P0, so P0 reads ORIGINAL.
+        # Step 5: the baseline is now the live shell, back at its FIFO read loop.
+        # Feed it one observation command; it reports SHADOW_VAR from its own
+        # (ORIGINAL) state. The speculative export/connect were consumed by the
+        # now-dead candidate and never touched the baseline, so it reads ORIGINAL.
         echo ""
-        step "Step 6: drive the resumed checkpoint P0 → it reports SHADOW_VAR (expect ORIGINAL)..."
-        feed_child "echo \"child_after:\$SHADOW_VAR\" >> $CHILD_LOG"
+        step "Step 5: drive the resumed baseline → it reports SHADOW_VAR (expect ORIGINAL)..."
+        feed_bash 'echo spec_after:$SHADOW_VAR'
         sleep 0.6
-        after=$(read_child child_after)
-        info "child value after reject: SHADOW_VAR=$after (expected: ORIGINAL)"
+        after=$(read_bash spec_after)
+        info "value after reject: SHADOW_VAR=$after (expected: ORIGINAL)"
 
         # Per-attempt teardown.
-        kill -9 "$CHILD_PID" "$BASH_PID" 2>/dev/null || true
-        exec 8>&- 9>&-
+        kill -9 "$SPEC_PID" "$BASH_PID" 2>/dev/null || true
+        exec 9>&-
         wait "$BASH_PID" 2>/dev/null || true
         purge_cgroup_c
 
@@ -1376,16 +1355,16 @@ scenario_bash_env_rollback() {
     # Verdict
     echo ""
     if $success; then
-        echo -e "  ${GREEN}${BOLD}✓ FORKED CHILD ENV VAR COW ROLLBACK SUCCESSFUL!${NC}"
-        echo -e "  ${GREEN}  child: ORIGINAL → MODIFIED_BY_AGENT → connect() → frozen → REJECT → checkpoint resumed → ORIGINAL${NC}"
-        echo -e "  ${GREEN}  The speculative version was discarded and its pristine fork-checkpoint resumed as canonical.${NC}"
+        echo -e "  ${GREEN}${BOLD}✓ BASH ENV VAR COW ROLLBACK SUCCESSFUL!${NC}"
+        echo -e "  ${GREEN}  candidate: ORIGINAL → MODIFIED_BY_AGENT → connect() → frozen → REJECT → baseline resumed → ORIGINAL${NC}"
+        echo -e "  ${GREEN}  The speculative candidate was discarded and the pristine baseline (original process) resumed as canonical.${NC}"
     else
-        echo -e "  ${RED}${BOLD}✗ Forked child env var rollback check failed after 3 attempts${NC}"
+        echo -e "  ${RED}${BOLD}✗ Bash env var rollback check failed after 3 attempts${NC}"
         echo -e "  ${RED}  orig=$orig (exp ORIGINAL), before=$before (exp MODIFIED_BY_AGENT), after=$after (exp ORIGINAL)${NC}"
         echo -e "  ${RED}  (ptrace fork-injection / connect-freeze lost the race on every attempt)${NC}"
     fi
 
-    rm -f "$BASH_FIFO" "$BASH_LOG" "$CHILD_FIFO" "$CHILD_LOG"
+    rm -f "$BASH_FIFO" "$BASH_LOG"
 }
 
 # ─────── Scenario 9: Modify an EXISTING file (rollback + commit) ───────
@@ -1613,45 +1592,58 @@ scenario_cow_commit() {
     MESSAGE_ADDR=$(grep '^message_addr=' "$MARKER_FILE" | cut -d= -f2)
     info "Marker: pid=$REAL_PID counter_addr=$COUNTER_ADDR"
 
-    step "Step 3: begin_speculative (creates COW shadow)..."
-    show_json "$(shadowproc_cmd "{\"action\":\"begin_speculative\",\"pid\":$REAL_PID}")"
-    step "Step 4: resume_pid — process modifies memory..."
-    show_json "$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$REAL_PID}")"
+    step "Step 3: begin_speculative (freeze $REAL_PID as pristine baseline, fork speculative candidate)..."
+    local begin_resp SPEC_PID
+    begin_resp=$(shadowproc_cmd "{\"action\":\"begin_speculative\",\"pid\":$REAL_PID}")
+    show_json "$begin_resp"
+    SPEC_PID=$(echo "$begin_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('pids') or [0])[0])" 2>/dev/null || echo 0)
+    if [[ -z "$SPEC_PID" || "$SPEC_PID" == "0" ]]; then
+        warn "begin_speculative returned no candidate pid"; return
+    fi
+    info "Speculative candidate = pid $SPEC_PID (baseline $REAL_PID stays frozen & pristine)"
+    step "Step 4: resume_pid — the CANDIDATE ($SPEC_PID) runs and modifies memory..."
+    show_json "$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$SPEC_PID}")"
 
-    step "Step 5: Waiting for second freeze (after modification)..."
+    step "Step 5: Waiting for second freeze of the candidate (after modification)..."
     local elapsed=0 frozen_ok=false
     while [[ $elapsed -lt 15 ]]; do
         local pstate
-        pstate=$(awk '/^State:/{print $2}' /proc/"$REAL_PID"/status 2>/dev/null) || true
+        pstate=$(awk '/^State:/{print $2}' /proc/"$SPEC_PID"/status 2>/dev/null) || true
         [[ "$pstate" == "T" ]] && { frozen_ok=true; break; }
         sleep 0.5; elapsed=$((elapsed + 1))
     done
     if ! $frozen_ok; then warn "Second freeze timed out"; return; fi
     sleep 0.3
     local counter_val msg_val
-    counter_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$COUNTER_ADDR" int 2>&1) || true
-    msg_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$MESSAGE_ADDR" str 2>&1) || true
-    info "  Modified: g_counter=$counter_val (expected 9999), g_message=\"$msg_val\""
+    counter_val=$(python3 "$READ_PROC_MEM" "$SPEC_PID" "$COUNTER_ADDR" int 2>&1) || true
+    msg_val=$(python3 "$READ_PROC_MEM" "$SPEC_PID" "$MESSAGE_ADDR" str 2>&1) || true
+    info "  Candidate modified: g_counter=$counter_val (expected 9999), g_message=\"$msg_val\""
 
-    step "Step 6: >>> commit_pid (ACCEPT the speculative memory, discard shadow)..."
-    show_json "$(shadowproc_cmd "{\"action\":\"commit_pid\",\"pid\":$REAL_PID}")"
+    step "Step 6: >>> commit_pid (ACCEPT candidate as canonical, discard the frozen baseline)..."
+    show_json "$(shadowproc_cmd "{\"action\":\"commit_pid\",\"pid\":$SPEC_PID}")"
 
-    step "Step 7: Verifying memory is STILL modified after commit..."
-    counter_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$COUNTER_ADDR" int 2>&1) || true
-    msg_val=$(python3 "$READ_PROC_MEM" "$REAL_PID" "$MESSAGE_ADDR" str 2>&1) || true
+    step "Step 7: Verifying the candidate's memory is STILL modified after commit..."
+    counter_val=$(python3 "$READ_PROC_MEM" "$SPEC_PID" "$COUNTER_ADDR" int 2>&1) || true
+    msg_val=$(python3 "$READ_PROC_MEM" "$SPEC_PID" "$MESSAGE_ADDR" str 2>&1) || true
     info "  g_counter = $counter_val (expected: 9999)"
     info "  g_message = \"$msg_val\" (expected: MODIFIED_BY_SPECULATIVE)"
 
-    step "Step 8: continue_pid — let the process finish the REST of its run with committed memory..."
-    shadowproc_cmd "{\"action\":\"continue_pid\",\"pid\":$REAL_PID}" >/dev/null 2>&1 || true
+    step "Step 8: continue_pid — let the candidate finish the REST of its run with committed memory..."
+    shadowproc_cmd "{\"action\":\"continue_pid\",\"pid\":$SPEC_PID}" >/dev/null 2>&1 || true
 
-    # Wait (bounded) for the process to actually run to completion and exit,
-    # rather than blocking forever if continue_pid failed to wake it.
+    # Wait (bounded) for the candidate to actually run to completion and exit,
+    # rather than blocking forever if continue_pid failed to wake it. A reaped
+    # or zombie (Z) task both count as "finished".
     local exited=false w=0
     while [[ $w -lt 20 ]]; do
-        [[ -d "/proc/$REAL_PID" ]] || { exited=true; break; }
+        local st
+        st=$(awk '/^State:/{print $2}' /proc/"$SPEC_PID"/status 2>/dev/null) || true
+        if [[ -z "$st" || "$st" == "Z" ]]; then exited=true; break; fi
         sleep 0.25; w=$((w + 1))
     done
+    # Best-effort reap of the candidate (a CLONE_PARENT sibling) and the
+    # now-dead baseline launcher handle.
+    wait "$SPEC_PID" 2>/dev/null || true
     wait "$AGENT_PID" 2>/dev/null || true
 
     # Phase 4 of mem_modifier appends this record ONLY if it continued running
@@ -1662,11 +1654,11 @@ scenario_cow_commit() {
     final_counter=$(grep '^final_counter=' "$MARKER_FILE" 2>/dev/null | cut -d= -f2)
     final_msg=$(grep '^final_message=' "$MARKER_FILE" 2>/dev/null | cut -d= -f2)
 
-    step "Step 9: Verifying the process CONTINUED and finished the rest of its run..."
+    step "Step 9: Verifying the candidate CONTINUED and finished the rest of its run..."
     if $exited; then
-        info "  Process $REAL_PID exited (ran to completion after commit)"
+        info "  Candidate $SPEC_PID exited (ran to completion after commit)"
     else
-        warn "  Process $REAL_PID still alive after continue_pid (did not finish)"
+        warn "  Candidate $SPEC_PID still alive after continue_pid (did not finish)"
     fi
     info "  Post-resume completion record: completed=$completed final_counter=$final_counter final_message=\"$final_msg\""
 

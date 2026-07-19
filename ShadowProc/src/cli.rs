@@ -118,7 +118,10 @@ impl Cli {
                 let pid: u32 = parts[1].parse().unwrap_or(0);
                 let mut pm = self.process_manager.lock().unwrap();
                 match pm.begin_speculative(pid) {
-                    Ok(()) => println!("\x1b[32m[OK]\x1b[0m COW tracking started for pid {}", pid),
+                    Ok(candidate) => println!(
+                        "\x1b[32m[OK]\x1b[0m Epoch started: froze pid {} as pristine baseline, forked speculative candidate pid {} (the live process for this epoch)",
+                        pid, candidate
+                    ),
                     Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
                 }
             }
@@ -131,9 +134,9 @@ impl Cli {
                 let pid: u32 = parts[1].parse().unwrap_or(0);
                 let mut pm = self.process_manager.lock().unwrap();
                 match pm.reject_to_checkpoint(pid) {
-                    Ok(shadow) => println!(
-                        "\x1b[32m[OK]\x1b[0m Rejected speculative pid {}; resumed checkpoint pid {} as canonical (canonical pid: {} -> {})",
-                        pid, shadow, pid, shadow
+                    Ok(baseline) => println!(
+                        "\x1b[32m[OK]\x1b[0m Rolled back epoch for pid {}; discarded candidate, resumed pristine baseline pid {} as canonical",
+                        pid, baseline
                     ),
                     Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
                 }
@@ -159,9 +162,9 @@ impl Cli {
                 println!("  discard (d) <pid>      - Kill a frozen process");
                 println!("  checkpoint (cp) <pid>  - CRIU checkpoint a frozen process");
                 println!("  restore <path>         - Restore from a CRIU checkpoint");
-                println!("  speculative (spec) <pid> - Start COW memory tracking");
-                println!("  reject (rj) <pid>      - Discard speculative version, resume its checkpoint as canonical");
-                println!("  commit <pid>           - Commit (discard COW shadow)");
+                println!("  speculative (spec) <pid> - Begin a versioning epoch (fork speculative candidate)");
+                println!("  reject (rj) <pid>      - Roll back: discard candidate, resume pristine baseline");
+                println!("  commit <pid>           - Commit: discard baseline, keep candidate as canonical");
                 println!("  quit (q)               - Exit ShadowProc");
                 println!("  help (h)               - Show this help");
             }

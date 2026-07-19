@@ -246,21 +246,37 @@ impl ProcessManager {
     // COW Memory Tracking API
     // ═══════════════════════════════════════════════════════════════
 
-    /// Begin speculative COW tracking for a frozen process.
-    /// The process must be in SIGSTOP state.
-    pub fn begin_speculative(&mut self, pid: u32) -> Result<()> {
+    /// Begin a versioning epoch for a frozen process.
+    /// The process must be in SIGSTOP state at the snapshot boundary.
+    ///
+    /// The ORIGINAL becomes the frozen pristine baseline; a COW candidate is
+    /// forked to run the epoch speculatively. Subsequent resume/commit/rollback
+    /// on the caller's pid are transparently redirected to the candidate.
+    pub fn begin_speculative(&mut self, pid: u32) -> Result<u32> {
         let pid = self.resolve_pid(pid);
-        self.memory_tracker.begin_tracking(pid)?;
-        // Enable auto-tracking of child processes
-        if !self.memory_tracker.is_auto_track_enabled() {
-            self.memory_tracker.set_auto_track(true);
-            // Enable eBPF fork event reporting
-            self.bpf_manager.set_cow_enabled(true)?;
-        }
-        Ok(())
+        let candidate = self.memory_tracker.begin_tracking(pid)?;
+        // The live/canonical handle for this epoch is the candidate; redirect
+        // the caller's (baseline) pid to it and register it as resumable.
+        self.register_candidate(pid, candidate);
+        Ok(candidate)
     }
 
-    /// Begin speculative COW tracking for all frozen processes in a cgroup.
+    /// Redirect a baseline pid to its speculative candidate AND register the
+    /// candidate as a resumable frozen process. The candidate (the COW fork) is
+    /// the process that actually runs the epoch, so resume_pid / continue_pid /
+    /// cgroup operations must be able to act on it. It inherits the baseline's
+    /// frozen record (same cgroup) with the candidate pid/tgid substituted.
+    fn register_candidate(&mut self, baseline: u32, candidate: u32) {
+        self.promoted.insert(baseline, candidate);
+        if let Some(fp) = self.frozen.get(&baseline).cloned() {
+            let mut c = fp;
+            c.pid = candidate;
+            c.tgid = candidate;
+            self.frozen.insert(candidate, c);
+        }
+    }
+
+    /// Begin a versioning epoch for all frozen processes in a cgroup.
     pub fn begin_speculative_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
         let pids: Vec<u32> = self.frozen.values()
             .filter(|p| p.cgroup_path == cgroup_path)
@@ -268,39 +284,43 @@ impl ProcessManager {
             .collect();
         let mut tracked = Vec::new();
         for pid in pids {
-            if self.memory_tracker.begin_tracking(pid).is_ok() {
+            if let Ok(candidate) = self.memory_tracker.begin_tracking(pid) {
+                // Redirect the baseline pid to its speculative candidate and
+                // register the candidate as resumable.
+                self.register_candidate(pid, candidate);
                 tracked.push(pid);
             }
-        }
-        // Enable auto-tracking if we tracked at least one process
-        if !tracked.is_empty() && !self.memory_tracker.is_auto_track_enabled() {
-            self.memory_tracker.set_auto_track(true);
-            self.bpf_manager.set_cow_enabled(true)?;
         }
         Ok(tracked)
     }
 
-    /// Reject a speculative process via PROCESS VERSIONING: discard the live
-    /// (speculative) process `pid` and resume its pristine checkpoint (the COW
-    /// shadow) as the new canonical process. Returns the promoted (shadow) pid.
+    /// Roll back a speculative epoch via the Frozen-Baseline model: discard the
+    /// candidate (the speculative fork) and RESUME the pristine baseline — the
+    /// original process, which never executed the epoch's command. Returns the
+    /// baseline pid, which is the canonical process from now on.
     ///
-    /// This is the sound alternative to restore_memory_only for processes that
-    /// were snapshotted at a different boundary than where they are rolled back:
-    /// it never splices a stale memory image onto live registers, so it cannot
-    /// crash the target. The promoted process keeps running from the exact
-    /// coherent instant the checkpoint was taken.
+    /// Unlike splicing a stale memory image onto live registers, this can never
+    /// crash the target and never changes the canonical pid: the original keeps
+    /// its identity, session and parent lineage. Epoch descendants created by
+    /// the candidate are cleaned separately at the cgroup level.
     pub fn reject_to_checkpoint(&mut self, pid: u32) -> Result<u32> {
-        let pid = self.resolve_pid(pid);
-        let shadow_pid = self.memory_tracker.reject_to_checkpoint(pid)?;
-        // The discarded speculative process is gone; drop its frozen record and
-        // clear any stale eBPF stopped-state keyed on its (now dead) tgid.
-        let _ = self.bpf_manager.clear_stopped(pid);
-        self.frozen.remove(&pid);
-        // Record the pid transition so callers still holding the old (now dead)
-        // pid are transparently redirected to the promoted canonical pid, and so
-        // the promoted process stays addressable for later kill/commit.
-        self.promoted.insert(pid, shadow_pid);
-        Ok(shadow_pid)
+        let live = self.resolve_pid(pid);
+        let baseline = self.memory_tracker.reject_to_checkpoint(live)?;
+
+        // The candidate is dead; drop its frozen record (if any).
+        self.frozen.remove(&live);
+
+        // The baseline was frozen at the snapshot boundary (in eBPF's
+        // stopped_pids). Clear that state and SIGCONT it so it continues as the
+        // canonical process, re-guarded on future boundary operations.
+        let _ = self.bpf_manager.clear_stopped_only(baseline);
+        let _ = signal::kill(Pid::from_raw(baseline as i32), Signal::SIGCONT);
+
+        // The baseline is live again under its own pid: drop the promotion that
+        // had redirected it to the (now dead) candidate, and its frozen record.
+        self.promoted.remove(&baseline);
+        self.frozen.remove(&baseline);
+        Ok(baseline)
     }
 
     /// Resolve a possibly-stale pid to its current canonical pid by following
@@ -325,10 +345,21 @@ impl ProcessManager {
         self.promoted.values().any(|&v| v == pid)
     }
 
-    /// Commit speculative execution for a process (discard COW shadow).
+    /// Commit a speculative epoch: accept the candidate as canonical and
+    /// discard the pristine baseline. The candidate keeps running; the caller's
+    /// pid stays redirected to it.
     pub fn commit_process(&mut self, pid: u32) -> Result<()> {
-        let pid = self.resolve_pid(pid);
-        self.memory_tracker.commit(pid)
+        let live = self.resolve_pid(pid);
+        // commit() kills the baseline and keeps the candidate live; it returns
+        // the discarded baseline pid.
+        let baseline = self.memory_tracker.commit(live)?;
+        // The baseline is gone; drop its frozen record and stale eBPF state. The
+        // candidate stays as-is (still frozen at its boundary, resumable via
+        // continue_pid). The promotion baseline -> candidate is kept so any
+        // lingering reference to the old pid resolves to the canonical candidate.
+        let _ = self.bpf_manager.clear_stopped(baseline);
+        self.frozen.remove(&baseline);
+        Ok(())
     }
 
     /// Commit all tracked processes in a cgroup.
@@ -340,7 +371,7 @@ impl ProcessManager {
         let mut committed = Vec::new();
         for pid in pids {
             if self.memory_tracker.is_tracking(pid) {
-                if self.memory_tracker.commit(pid).is_ok() {
+                if self.commit_process(pid).is_ok() {
                     committed.push(pid);
                 }
             }
@@ -353,8 +384,9 @@ impl ProcessManager {
         self.memory_tracker.is_tracking(pid)
     }
 
-    /// Check if a pid is a COW shadow process (internal artifact). Such pids
-    /// must be excluded from cgroup-level freeze/kill operations.
+    /// Check if a pid is a frozen versioning BASELINE (the pristine original
+    /// copy held for rollback). Such pids must be excluded from cgroup-level
+    /// freeze operations while their epoch is live.
     pub fn is_shadow_pid(&self, pid: u32) -> bool {
         self.memory_tracker.is_shadow_pid(pid)
     }
@@ -405,10 +437,12 @@ impl ProcessManager {
                 continue;
             }
 
-            // Skip COW shadow processes: they live in the cgroup only because
-            // they were fork-injected from a tracked process, but they are
-            // ptrace-managed snapshots. SIGSTOP'ing them corrupts the COW
-            // rollback machinery, so they must never be frozen as siblings.
+            // Skip frozen versioning baselines: they live in the cgroup only
+            // as pristine, ptrace-snapshotted rollback copies of a tracked
+            // process. SIGSTOP'ing them again would disturb the versioning
+            // machinery, so they must never be re-frozen as siblings. (The
+            // candidate, i.e. the live fork, is NOT skipped — cgroup freeze
+            // legitimately acts on it.)
             if self.memory_tracker.is_shadow_pid(pid) {
                 continue;
             }
