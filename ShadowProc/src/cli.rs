@@ -17,7 +17,7 @@ impl Cli {
 
     /// Process a command from the user
     pub fn process_command(&mut self, input: &str) -> Result<bool> {
-        let parts: Vec<&str> = input.trim().split_whitespace().collect();
+        let parts: Vec<&str> = input.split_whitespace().collect();
         if parts.is_empty() {
             return Ok(false);
         }
@@ -29,7 +29,7 @@ impl Cli {
                 if frozen.is_empty() {
                     println!("No frozen processes.");
                 } else {
-                    println!("{:<8} {:<8} {:<16} {:<12} {:<10} {}", "PID", "TGID", "COMM", "TYPE", "SYSCALL", "CGROUP");
+                    println!("{:<8} {:<8} {:<16} {:<12} {:<10} CGROUP", "PID", "TGID", "COMM", "TYPE", "SYSCALL");
                     println!("{}", "-".repeat(80));
                     for p in frozen {
                         println!(
@@ -116,13 +116,36 @@ impl Cli {
                     return Ok(false);
                 }
                 let pid: u32 = parts[1].parse().unwrap_or(0);
+                // Mirror the socket path's three-phase setup so the multi-second
+                // ptrace clone injection runs WITHOUT the ProcessManager lock
+                // held: reserve (locked) -> inject (unlocked) -> finish/abort
+                // (locked). Otherwise the whole event loop and every socket
+                // client would block for the entire duration of the injection.
+                let reserved = {
+                    let mut pm = self.process_manager.lock().unwrap();
+                    pm.reserve_speculative(pid)
+                };
+                let baseline = match reserved {
+                    Ok(b) => b,
+                    Err(e) => {
+                        println!("\x1b[31m[ERROR]\x1b[0m {}", e);
+                        return Ok(false);
+                    }
+                };
+                let injected = ProcessManager::inject_speculative(baseline);
                 let mut pm = self.process_manager.lock().unwrap();
-                match pm.begin_speculative(pid) {
-                    Ok(candidate) => println!(
-                        "\x1b[32m[OK]\x1b[0m Epoch started: froze pid {} as pristine baseline, forked speculative candidate pid {} (the live process for this epoch)",
-                        pid, candidate
-                    ),
-                    Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
+                match injected {
+                    Ok((candidate, regs)) => {
+                        pm.finish_speculative(baseline, candidate, regs);
+                        println!(
+                            "\x1b[32m[OK]\x1b[0m Epoch started: froze pid {} as pristine baseline, forked speculative candidate pid {} (the live process for this epoch)",
+                            baseline, candidate
+                        );
+                    }
+                    Err(e) => {
+                        pm.abort_speculative(baseline);
+                        println!("\x1b[31m[ERROR]\x1b[0m {}", e);
+                    }
                 }
             }
 

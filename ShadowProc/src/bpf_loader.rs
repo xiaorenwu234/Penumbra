@@ -5,8 +5,9 @@ use libbpf_rs::{MapFlags, RingBufferBuilder};
 use std::fs::File;
 use std::os::fd::AsFd;
 use std::os::unix::io::AsRawFd;
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -73,6 +74,24 @@ unsafe fn libc_bpf_map_update_elem(
     )
 }
 
+/// Tracks cgroup_map slot allocation so cgroups can be added AND removed.
+///
+/// The old design used a monotonic index + append-only Vec of fds, so slots
+/// were never reclaimed: a long-lived daemon serving many sessions would hit
+/// the 64-slot cap and permanently fail add_cgroup. This recycles freed indices
+/// and keeps the kernel-side cgroup_count at (highest occupied index + 1) so
+/// check_cgroup() never scans dead slots.
+struct CgroupSlots {
+    /// idx -> open fd (kept alive so the kernel cgroup_map entry stays valid).
+    used: HashMap<u32, File>,
+    /// cgroup path -> idx, so a cgroup can be removed by path.
+    by_path: HashMap<String, u32>,
+    /// Freed indices, reused before growing high_water.
+    free: Vec<u32>,
+    /// Next never-used index.
+    high_water: u32,
+}
+
 pub struct BpfManager {
     running: Arc<AtomicBool>,
     poll_thread: Option<thread::JoinHandle<()>>,
@@ -88,10 +107,8 @@ pub struct BpfManager {
     cow_enabled_fd: i32,
     /// Raw fd of allow_once map (deterministic single-syscall pass for resume)
     allow_once_fd: i32,
-    /// Number of registered cgroups
-    cgroup_next_idx: AtomicU32,
-    /// Keep cgroup fds alive
-    cgroup_fds: Mutex<Vec<File>>,
+    /// cgroup_map slot bookkeeping (add/remove with index recycling).
+    cgroup_slots: Mutex<CgroupSlots>,
 }
 
 impl BpfManager {
@@ -167,8 +184,12 @@ impl BpfManager {
             cgroup_count_fd,
             cow_enabled_fd,
             allow_once_fd,
-            cgroup_next_idx: AtomicU32::new(0),
-            cgroup_fds: Mutex::new(Vec::new()),
+            cgroup_slots: Mutex::new(CgroupSlots {
+                used: HashMap::new(),
+                by_path: HashMap::new(),
+                free: Vec::new(),
+                high_water: 0,
+            }),
         };
 
         // Add initial cgroup if provided
@@ -180,15 +201,33 @@ impl BpfManager {
     }
 
     /// Add a cgroup to the monitored set. Returns the index assigned.
+    /// Idempotent: re-adding an already-registered path returns its existing
+    /// index without consuming a new slot.
     pub fn add_cgroup(&self, cgroup_path: &Path) -> Result<u32> {
         let cgroup_fd = File::open(cgroup_path)
             .with_context(|| format!("Failed to open cgroup path: {:?}", cgroup_path))?;
 
-        let idx = self.cgroup_next_idx.fetch_add(1, Ordering::SeqCst);
-        if idx >= 64 {
-            self.cgroup_next_idx.fetch_sub(1, Ordering::SeqCst);
-            anyhow::bail!("Maximum 64 cgroups supported");
+        let path_key = cgroup_path.to_string_lossy().to_string();
+        let mut slots = self.cgroup_slots.lock().unwrap();
+
+        // Already registered -> return the existing index (idempotent).
+        if let Some(&idx) = slots.by_path.get(&path_key) {
+            return Ok(idx);
         }
+
+        // Allocate a slot: reuse a freed index first, else grow the high-water
+        // mark. Only the number of *live* cgroups is bounded by 64, not the
+        // total ever added over the daemon's lifetime.
+        let idx = if let Some(idx) = slots.free.pop() {
+            idx
+        } else {
+            if slots.high_water >= 64 {
+                anyhow::bail!("Maximum 64 concurrent cgroups supported");
+            }
+            let i = slots.high_water;
+            slots.high_water += 1;
+            i
+        };
 
         // Update cgroup_map[idx] = cgroup_fd
         let key_bytes = idx.to_ne_bytes();
@@ -201,22 +240,66 @@ impl BpfManager {
             );
         }
 
-        // Update cgroup_count[0] = idx + 1
-        let count_key: u32 = 0;
-        let count_val = idx + 1;
-        unsafe {
-            libc_bpf_map_update_elem(
-                self.cgroup_count_fd,
-                count_key.to_ne_bytes().as_ptr() as *const _,
-                count_val.to_ne_bytes().as_ptr() as *const _,
-            );
-        }
+        // Keep the fd alive (dropping it would invalidate the map entry).
+        slots.used.insert(idx, cgroup_fd);
+        slots.by_path.insert(path_key, idx);
 
-        // Keep the fd alive
-        self.cgroup_fds.lock().unwrap().push(cgroup_fd);
+        // Keep cgroup_count at (highest occupied index + 1).
+        Self::sync_cgroup_count(self.cgroup_count_fd, &slots);
 
         eprintln!("[+] Added cgroup {:?} at index {}", cgroup_path, idx);
         Ok(idx)
+    }
+
+    /// Remove a previously-added cgroup from the monitored set, freeing its
+    /// cgroup_map slot for reuse. This is what makes a long-lived daemon able to
+    /// churn through an unbounded number of sessions without exhausting the
+    /// 64-slot array. No-op error if the path was never registered.
+    pub fn remove_cgroup(&self, cgroup_path: &Path) -> Result<()> {
+        let path_key = cgroup_path.to_string_lossy().to_string();
+        let mut slots = self.cgroup_slots.lock().unwrap();
+
+        let idx = slots
+            .by_path
+            .remove(&path_key)
+            .ok_or_else(|| anyhow::anyhow!("cgroup not registered: {:?}", cgroup_path))?;
+
+        // Delete the kernel map entry, then drop the fd (closes it).
+        let key_bytes = idx.to_ne_bytes();
+        unsafe {
+            libc_bpf_map_delete_elem(self.cgroup_map_fd, key_bytes.as_ptr() as *const _);
+        }
+        slots.used.remove(&idx); // drops File -> closes the held fd
+
+        // Recycle the index and tighten cgroup_count so check_cgroup() stops
+        // scanning past the highest live slot.
+        slots.free.push(idx);
+        Self::sync_cgroup_count(self.cgroup_count_fd, &slots);
+
+        eprintln!("[+] Removed cgroup {:?} (freed index {})", cgroup_path, idx);
+        Ok(())
+    }
+
+    /// Set cgroup_count[0] = (highest occupied index + 1), or 0 if none.
+    /// Empty interior slots are safe: bpf_current_task_under_cgroup() on a
+    /// deleted CGROUP_ARRAY entry returns an error (not 1), so check_cgroup()
+    /// skips them.
+    fn sync_cgroup_count(count_fd: i32, slots: &CgroupSlots) {
+        let count: u32 = slots
+            .used
+            .keys()
+            .copied()
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        let count_key: u32 = 0;
+        unsafe {
+            libc_bpf_map_update_elem(
+                count_fd,
+                count_key.to_ne_bytes().as_ptr() as *const _,
+                count.to_ne_bytes().as_ptr() as *const _,
+            );
+        }
     }
 
     /// Allow a process to pass all future interception, then remove from stopped list.

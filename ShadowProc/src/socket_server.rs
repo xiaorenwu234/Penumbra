@@ -212,6 +212,31 @@ impl SocketServer {
                 }
             }
 
+            "remove_cgroup" => {
+                let Some(path) = &req.cgroup_path else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("cgroup_path required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                match bpf_manager.remove_cgroup(Path::new(path)) {
+                    Ok(_) => Response {
+                        status: "ok".into(),
+                        message: None,
+                        frozen: None,
+                        pids: None,
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                    },
+                }
+            }
+
             "list_all_frozen" => {
                 let pm = process_manager.lock().unwrap();
                 let frozen: Vec<FrozenInfo> = pm.list_frozen().iter().map(|p| FrozenInfo {
@@ -261,7 +286,7 @@ impl SocketServer {
                 let filter_cgroup = req.cgroup_id.as_deref();
                 let completed: Vec<FrozenInfo> = pm.list_frozen().iter()
                     .filter(|p| p.event.event_type == 8) // EVENT_EXIT_HOLD
-                    .filter(|p| filter_cgroup.map_or(true, |cg| p.cgroup_path == cg))
+                    .filter(|p| filter_cgroup.is_none_or(|cg| p.cgroup_path == cg))
                     .map(|p| FrozenInfo {
                         pid: p.pid,
                         tgid: p.tgid,
@@ -413,40 +438,87 @@ impl SocketServer {
             // ═══════════════════════════════════════════════════════════
 
             "begin_speculative" => {
+                // Epoch setup runs the slow ptrace clone injection WITHOUT the
+                // ProcessManager lock held (phase 2), so concurrent clients and
+                // the event loop are not blocked for its duration. Phase 1
+                // (reserve) and phase 3 (finalize/abort) take the lock only
+                // briefly.
                 if let Some(cgroup_id) = &req.cgroup_id {
-                    let mut pm = process_manager.lock().unwrap();
-                    match pm.begin_speculative_by_cgroup(cgroup_id) {
-                        Ok(pids) => Response {
-                            status: "ok".into(),
-                            message: Some(format!("COW tracking started for {} processes", pids.len())),
-                            frozen: None,
-                            pids: Some(pids),
-                        },
-                        Err(e) => Response {
-                            status: "error".into(),
-                            message: Some(e.to_string()),
-                            frozen: None,
-                            pids: None,
-                        },
+                    let reserved = {
+                        let mut pm = process_manager.lock().unwrap();
+                        pm.reserve_speculative_by_cgroup(cgroup_id)
+                    };
+                    // Inject each reserved baseline with the lock released.
+                    let results: Vec<_> = reserved
+                        .into_iter()
+                        .map(|b| (b, ProcessManager::inject_speculative(b)))
+                        .collect();
+                    let mut candidates = Vec::new();
+                    {
+                        let mut pm = process_manager.lock().unwrap();
+                        for (baseline, res) in results {
+                            match res {
+                                Ok((candidate, regs)) => {
+                                    pm.finish_speculative(baseline, candidate, regs);
+                                    candidates.push(candidate);
+                                }
+                                Err(e) => {
+                                    pm.abort_speculative(baseline);
+                                    eprintln!(
+                                        "[socket] begin_speculative: inject failed for {}: {}",
+                                        baseline, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Response {
+                        status: "ok".into(),
+                        message: Some(format!("COW tracking started for {} processes", candidates.len())),
+                        frozen: None,
+                        pids: Some(candidates),
                     }
                 } else if let Some(pid) = req.pid {
+                    let baseline = {
+                        let mut pm = process_manager.lock().unwrap();
+                        pm.reserve_speculative(pid)
+                    };
+                    let baseline = match baseline {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return Response {
+                                status: "error".into(),
+                                message: Some(e.to_string()),
+                                frozen: None,
+                                pids: None,
+                            }
+                        }
+                    };
+                    // Slow injection, lock released.
+                    let injected = ProcessManager::inject_speculative(baseline);
                     let mut pm = process_manager.lock().unwrap();
-                    match pm.begin_speculative(pid) {
-                        Ok(candidate) => Response {
-                            status: "ok".into(),
-                            message: Some(format!(
-                                "Epoch started for pid {}: froze it as pristine baseline, forked speculative candidate pid {} (the live process for this epoch)",
-                                pid, candidate
-                            )),
-                            frozen: None,
-                            pids: Some(vec![candidate]),
-                        },
-                        Err(e) => Response {
-                            status: "error".into(),
-                            message: Some(e.to_string()),
-                            frozen: None,
-                            pids: None,
-                        },
+                    match injected {
+                        Ok((candidate, regs)) => {
+                            pm.finish_speculative(baseline, candidate, regs);
+                            Response {
+                                status: "ok".into(),
+                                message: Some(format!(
+                                    "Epoch started for pid {}: froze it as pristine baseline, forked speculative candidate pid {} (the live process for this epoch)",
+                                    baseline, candidate
+                                )),
+                                frozen: None,
+                                pids: Some(vec![candidate]),
+                            }
+                        }
+                        Err(e) => {
+                            pm.abort_speculative(baseline);
+                            Response {
+                                status: "error".into(),
+                                message: Some(e.to_string()),
+                                frozen: None,
+                                pids: None,
+                            }
+                        }
                     }
                 } else {
                     Response {

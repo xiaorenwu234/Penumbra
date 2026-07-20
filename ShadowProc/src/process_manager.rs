@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -22,6 +22,20 @@ pub struct FrozenProcess {
     pub cgroup_path: String,
 }
 
+/// A promotion record: a stale (baseline) pid now transparently resolves to
+/// `canonical`. Because bare pids are recycled by the kernel, we also store the
+/// /proc `starttime` of both endpoints captured when the promotion was created.
+/// resolve_pid refuses to follow a hop whose endpoint pid is alive but carries a
+/// DIFFERENT starttime — i.e. the number was reused by an unrelated process.
+#[derive(Debug, Clone, Copy)]
+struct Promotion {
+    canonical: u32,
+    /// starttime of the KEY (old) pid at promotion time.
+    key_start: u64,
+    /// starttime of the canonical pid at promotion time.
+    canonical_start: u64,
+}
+
 #[allow(dead_code)]
 /// Manages frozen processes - checkpoint, restore, continue, discard
 pub struct ProcessManager {
@@ -30,10 +44,11 @@ pub struct ProcessManager {
     next_checkpoint_id: u32,
     bpf_manager: Arc<BpfManager>,
     memory_tracker: MemoryTracker,
-    /// Maps an old (rejected, now-dead) pid to the canonical pid its checkpoint
-    /// was promoted to by reject_to_checkpoint(). Lets callers still holding a
-    /// stale pid transparently address the live process.
-    promoted: HashMap<u32, u32>,
+    /// Maps an old (rejected/committed) baseline pid to the canonical pid its
+    /// work was promoted to. Lets callers still holding a stale pid transparently
+    /// address the live process. Each entry also records the /proc start time of
+    /// BOTH endpoints so pid reuse is detected (see `Promotion` / resolve_pid).
+    promoted: HashMap<u32, Promotion>,
 }
 
 impl ProcessManager {
@@ -127,7 +142,7 @@ impl ProcessManager {
 
         self.frozen.remove(&pid);
         // Drop any promotion records that pointed at this now-dead pid.
-        self.promoted.retain(|_, v| *v != pid);
+        self.promoted.retain(|_, v| v.canonical != pid);
         Ok(())
     }
 
@@ -261,13 +276,80 @@ impl ProcessManager {
         Ok(candidate)
     }
 
+    /// Lock-free epoch setup, phase 1 (call under the PM lock): resolve the
+    /// caller's pid to its canonical baseline and reserve it. Returns the
+    /// baseline pid to inject into. The caller then RELEASES the lock, calls
+    /// `inject_speculative`, and re-acquires the lock for `finish_speculative`
+    /// / `abort_speculative`.
+    pub fn reserve_speculative(&mut self, pid: u32) -> Result<u32> {
+        let pid = self.resolve_pid(pid);
+        self.memory_tracker.reserve(pid)?;
+        Ok(pid)
+    }
+
+    /// Reserve every frozen (non-baseline) process in `cgroup_path` for a new
+    /// epoch. Returns the reserved baseline pids. Call under the PM lock.
+    pub fn reserve_speculative_by_cgroup(&mut self, cgroup_path: &str) -> Vec<u32> {
+        let pids: Vec<u32> = self
+            .frozen
+            .values()
+            .filter(|p| p.cgroup_path == cgroup_path)
+            .map(|p| p.tgid)
+            .collect();
+        let mut reserved = Vec::new();
+        for pid in pids {
+            let r = self.resolve_pid(pid);
+            if self.memory_tracker.reserve(r).is_ok() {
+                reserved.push(r);
+            }
+        }
+        reserved
+    }
+
+    /// Lock-free epoch setup, phase 2 (call WITHOUT the PM lock): the slow
+    /// ptrace clone injection for a reserved baseline pid.
+    pub fn inject_speculative(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
+        MemoryTracker::inject(pid)
+    }
+
+    /// Lock-free epoch setup, phase 3a (call under the PM lock): record the
+    /// injected candidate and redirect the baseline pid to it. Returns the
+    /// candidate pid (the live process for this epoch).
+    pub fn finish_speculative(
+        &mut self,
+        baseline: u32,
+        candidate: u32,
+        orig_regs: libc::user_regs_struct,
+    ) -> u32 {
+        self.memory_tracker
+            .finish_tracking(baseline, candidate, orig_regs);
+        self.register_candidate(baseline, candidate);
+        candidate
+    }
+
+    /// Lock-free epoch setup, phase 3b (call under the PM lock): release a
+    /// reservation whose injection failed.
+    pub fn abort_speculative(&mut self, baseline: u32) {
+        self.memory_tracker.abort_reserve(baseline);
+    }
+
     /// Redirect a baseline pid to its speculative candidate AND register the
     /// candidate as a resumable frozen process. The candidate (the COW fork) is
     /// the process that actually runs the epoch, so resume_pid / continue_pid /
     /// cgroup operations must be able to act on it. It inherits the baseline's
     /// frozen record (same cgroup) with the candidate pid/tgid substituted.
     fn register_candidate(&mut self, baseline: u32, candidate: u32) {
-        self.promoted.insert(baseline, candidate);
+        // Capture both endpoints' process identity (pid + starttime) now, while
+        // both are alive, so a later pid reuse of either number cannot silently
+        // hijack this redirection (see resolve_pid).
+        self.promoted.insert(
+            baseline,
+            Promotion {
+                canonical: candidate,
+                key_start: process_starttime(baseline).unwrap_or(0),
+                canonical_start: process_starttime(candidate).unwrap_or(0),
+            },
+        );
         if let Some(fp) = self.frozen.get(&baseline).cloned() {
             let mut c = fp;
             c.pid = candidate;
@@ -358,29 +440,48 @@ impl ProcessManager {
         } else {
             format!("/sys/fs/cgroup/{}/cgroup.procs", cgroup_path)
         };
-        let data = match fs::read_to_string(&cgroup_dir) {
-            Ok(d) => d,
-            Err(_) => return Vec::new(),
-        };
         let mut killed = Vec::new();
-        for line in data.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let cpid: u32 = match line.parse() {
-                Ok(p) => p,
-                Err(_) => continue,
+        // Track pids we've already SIGKILL'd: a killed task can linger as a
+        // zombie in cgroup.procs until reaped, and we must neither re-count it
+        // nor spin on it.
+        let mut done: HashSet<u32> = HashSet::new();
+        // Loop to a fixpoint so descendants forked mid-teardown are also caught:
+        // a killed parent cannot spawn more children, so once a pass kills
+        // nothing new the subtree is drained. The 1000-pass cap bounds
+        // pathological cases.
+        for _ in 0..1000 {
+            let data = match fs::read_to_string(&cgroup_dir) {
+                Ok(d) => d,
+                Err(_) => break,
             };
-            // Never kill the baseline we are resuming, nor any other epoch's
-            // pristine versioning baseline.
-            if cpid == keep || self.memory_tracker.is_shadow_pid(cpid) {
-                continue;
+            let mut killed_new = false;
+            for line in data.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let cpid: u32 = match line.parse() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                // Never kill the baseline we are resuming, nor any other epoch's
+                // pristine versioning baseline; skip pids already killed.
+                if cpid == keep
+                    || self.memory_tracker.is_shadow_pid(cpid)
+                    || done.contains(&cpid)
+                {
+                    continue;
+                }
+                if signal::kill(Pid::from_raw(cpid as i32), Signal::SIGKILL).is_ok() {
+                    self.frozen.remove(&cpid);
+                    self.promoted.retain(|_, v| v.canonical != cpid);
+                    killed.push(cpid);
+                    done.insert(cpid);
+                    killed_new = true;
+                }
             }
-            if signal::kill(Pid::from_raw(cpid as i32), Signal::SIGKILL).is_ok() {
-                self.frozen.remove(&cpid);
-                self.promoted.retain(|_, v| *v != cpid);
-                killed.push(cpid);
+            if !killed_new {
+                break;
             }
         }
         killed
@@ -423,8 +524,25 @@ impl ProcessManager {
     pub fn resolve_pid(&self, pid: u32) -> u32 {
         let mut cur = pid;
         let mut hops = 0;
-        while let Some(&next) = self.promoted.get(&cur) {
-            cur = next;
+        while let Some(promo) = self.promoted.get(&cur) {
+            // If `cur` is a currently-LIVE process whose start time differs from
+            // the one recorded at promotion time, the pid has been reused by a
+            // new, unrelated process. The caller means THAT process, so stop
+            // following the (now stale) redirection.
+            if let Some(st) = process_starttime(cur) {
+                if st != promo.key_start {
+                    break;
+                }
+            }
+            // Likewise, if the canonical endpoint's pid is alive but was reused
+            // (different starttime), the mapping is stale — do not redirect onto
+            // an unrelated process.
+            if let Some(cst) = process_starttime(promo.canonical) {
+                if cst != promo.canonical_start {
+                    break;
+                }
+            }
+            cur = promo.canonical;
             hops += 1;
             if hops > 64 {
                 break; // guard against accidental cycles
@@ -436,7 +554,7 @@ impl ProcessManager {
     /// Check if a pid is a canonical process promoted from a rejected
     /// speculative process (i.e. it is the target of a promotion mapping).
     fn is_promoted_pid(&self, pid: u32) -> bool {
-        self.promoted.values().any(|&v| v == pid)
+        self.promoted.values().any(|p| p.canonical == pid)
     }
 
     /// Commit a speculative epoch: accept the candidate as canonical and
@@ -464,10 +582,8 @@ impl ProcessManager {
             .collect();
         let mut committed = Vec::new();
         for pid in pids {
-            if self.memory_tracker.is_tracking(pid) {
-                if self.commit_process(pid).is_ok() {
-                    committed.push(pid);
-                }
+            if self.memory_tracker.is_tracking(pid) && self.commit_process(pid).is_ok() {
+                committed.push(pid);
             }
         }
         Ok(committed)
@@ -512,58 +628,164 @@ impl ProcessManager {
             format!("/sys/fs/cgroup/{}/cgroup.procs", cgroup_path)
         };
 
-        let data = fs::read_to_string(&cgroup_dir)
-            .with_context(|| format!("Failed to read cgroup.procs: {}", cgroup_dir))?;
-
         let mut frozen_pids = Vec::new();
-        for line in data.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let pid: u32 = match line.parse() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
+        // Loop to a fixpoint: a SIGSTOP'd parent cannot fork, so once a full pass
+        // over cgroup.procs stops no new pids the whole subtree is quiescent.
+        // This closes the TOCTOU/fork race where a child is forked between
+        // reading cgroup.procs and SIGSTOP'ing its parent. The 1000-pass cap is
+        // a safety bound; convergence normally takes 1-2 passes.
+        for _ in 0..1000 {
+            let data = fs::read_to_string(&cgroup_dir)
+                .with_context(|| format!("Failed to read cgroup.procs: {}", cgroup_dir))?;
 
-            // Skip if already frozen
-            if self.frozen.contains_key(&pid) {
-                continue;
-            }
-
-            // Skip frozen versioning baselines: they live in the cgroup only
-            // as pristine, ptrace-snapshotted rollback copies of a tracked
-            // process. SIGSTOP'ing them again would disturb the versioning
-            // machinery, so they must never be re-frozen as siblings. (The
-            // candidate, i.e. the live fork, is NOT skipped — cgroup freeze
-            // legitimately acts on it.)
-            if self.memory_tracker.is_shadow_pid(pid) {
-                continue;
-            }
-
-            // Send SIGSTOP
-            if signal::kill(Pid::from_raw(pid as i32), Signal::SIGSTOP).is_ok() {
-                let cgroup_id = read_process_cgroup(pid)
-                    .unwrap_or_else(|| cgroup_path.to_string());
-                let comm = fs::read_to_string(format!("/proc/{}/comm", pid))
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-
-                let frozen = FrozenProcess {
-                    pid,
-                    tgid: pid,
-                    comm,
-                    event: InterceptEvent::dummy_freeze(pid),
-                    checkpoint_path: None,
-                    cgroup_path: cgroup_id,
+            let mut added = false;
+            for line in data.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let pid: u32 = match line.parse() {
+                    Ok(p) => p,
+                    Err(_) => continue,
                 };
-                self.frozen.insert(pid, frozen);
-                frozen_pids.push(pid);
+
+                // Skip if already frozen (also makes each pass act only on
+                // genuinely new pids, so the loop converges).
+                if self.frozen.contains_key(&pid) {
+                    continue;
+                }
+
+                // Skip frozen versioning baselines: they live in the cgroup only
+                // as pristine, ptrace-snapshotted rollback copies of a tracked
+                // process. SIGSTOP'ing them again would disturb the versioning
+                // machinery, so they must never be re-frozen as siblings. (The
+                // candidate, i.e. the live fork, is NOT skipped — cgroup freeze
+                // legitimately acts on it.)
+                if self.memory_tracker.is_shadow_pid(pid) {
+                    continue;
+                }
+
+                // Send SIGSTOP
+                if signal::kill(Pid::from_raw(pid as i32), Signal::SIGSTOP).is_ok() {
+                    let cgroup_id = read_process_cgroup(pid)
+                        .unwrap_or_else(|| cgroup_path.to_string());
+                    let comm = fs::read_to_string(format!("/proc/{}/comm", pid))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+
+                    let frozen = FrozenProcess {
+                        pid,
+                        tgid: pid,
+                        comm,
+                        event: InterceptEvent::dummy_freeze(pid),
+                        checkpoint_path: None,
+                        cgroup_path: cgroup_id,
+                    };
+                    self.frozen.insert(pid, frozen);
+                    frozen_pids.push(pid);
+                    added = true;
+                }
+            }
+
+            if !added {
+                break;
             }
         }
 
         Ok(frozen_pids)
+    }
+
+    /// Shutdown helper: leave NO process stuck in SIGSTOP.
+    ///
+    /// The BPF programs detach when the daemon exits, after which the LSM hooks
+    /// no longer fire — but any process we already SIGSTOP'd (frozen siblings,
+    /// pristine baselines, speculative candidates) would remain stopped forever
+    /// as orphaned, wedged tasks. This releases them all:
+    ///
+    ///   1. For every active speculative epoch, abandon the speculation the way
+    ///      a reject would: discard the disposable candidate (and its epoch
+    ///      descendants) and resume the pristine baseline as canonical. This is
+    ///      the safe direction — it never lets speculative side effects leak.
+    ///   2. SIGCONT every remaining plain frozen process, clearing its kernel
+    ///      stopped mark first so a still-attached hook can't immediately
+    ///      re-stop the restarted syscall.
+    ///
+    /// Returns the number of processes resumed.
+    pub fn release_all(&mut self) -> usize {
+        let mut resumed = 0;
+
+        // 1. Abandon in-flight speculation: resume baselines, discard candidates.
+        for b in self.memory_tracker.tracked_pids() {
+            if self.reject_to_checkpoint(b).is_ok() {
+                resumed += 1;
+            }
+        }
+
+        // 2. Resume every remaining frozen process so none is left stopped.
+        let pids: Vec<u32> = self.frozen.keys().copied().collect();
+        for pid in pids {
+            let _ = self.bpf_manager.clear_stopped(pid);
+            if signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT).is_ok() {
+                resumed += 1;
+            }
+            self.frozen.remove(&pid);
+        }
+
+        resumed
+    }
+
+    /// Drop bookkeeping for processes that have exited on their own.
+    ///
+    /// The eBPF `sched_process_exit` hook cleans the kernel-side maps, but the
+    /// user-side `frozen` / `epochs` / `promoted` tables have no exit callback,
+    /// so a process that crashes or is killed externally would otherwise leave
+    /// a stale entry forever (shown by `list`, operated on by mistake, and — on
+    /// pid reuse — able to misdirect a promotion). Called periodically from the
+    /// main loop to keep those tables consistent.
+    pub fn reap_dead(&mut self) {
+        // 1. Drop frozen records whose process has exited.
+        let dead: Vec<u32> = self
+            .frozen
+            .keys()
+            .copied()
+            .filter(|&p| !pid_is_alive(p))
+            .collect();
+        for p in &dead {
+            self.frozen.remove(p);
+        }
+
+        // 2. Drop promotion mappings that can never legitimately fire again:
+        //    the canonical target has exited or been reused (pid recycled), or
+        //    the key pid is alive but reused by a different process. This bounds
+        //    the map's growth and removes stale redirections.
+        self.promoted.retain(|&key, promo| {
+            match process_starttime(promo.canonical) {
+                Some(st) if st == promo.canonical_start => {}
+                _ => return false, // canonical dead or reused -> stale
+            }
+            if let Some(kst) = process_starttime(key) {
+                if kst != promo.key_start {
+                    return false; // key pid reused -> stale
+                }
+            }
+            true
+        });
+
+        // 3. Tear down fully-dead epochs and clean their bookkeeping.
+        let gone = self.memory_tracker.reap_dead();
+        for b in gone {
+            self.frozen.remove(&b);
+            self.promoted.retain(|k, _| *k != b);
+        }
+
+        if !dead.is_empty() {
+            eprintln!(
+                "[reap] dropped {} exited frozen process(es): {:?}",
+                dead.len(),
+                dead
+            );
+        }
     }
 }
 
@@ -589,4 +811,36 @@ fn read_process_cgroup(pid: u32) -> Option<String> {
         }
     }
     None
+}
+
+/// Returns false if `pid` has no /proc entry or its task is a zombie/dead. Used
+/// to garbage-collect stale bookkeeping for processes that exited on their own.
+fn pid_is_alive(pid: u32) -> bool {
+    let stat = match fs::read_to_string(format!("/proc/{}/stat", pid)) {
+        Ok(s) => s,
+        Err(_) => return false, // no /proc entry -> gone
+    };
+    // /proc/<pid>/stat: "pid (comm) state ...". comm may contain spaces and
+    // parens, so find the LAST ')' — the state char is the first non-space
+    // token after it.
+    match stat.rfind(')') {
+        Some(idx) => {
+            let state = stat[idx + 1..].trim_start().chars().next();
+            !matches!(state, Some('Z') | Some('X') | Some('x'))
+        }
+        None => true, // unparseable but present: assume alive
+    }
+}
+
+/// Read a process's start time (jiffies since boot; /proc/<pid>/stat field 22).
+/// Combined with the pid this forms a stable process identity that survives pid
+/// reuse: a recycled pid gets a fresh (larger) starttime. Returns None if the
+/// process is gone or stat can't be parsed.
+fn process_starttime(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    // Fields after the ")": state is field 3, ... starttime is field 22, i.e.
+    // index 19 in the whitespace-split remainder (comm may contain spaces and
+    // parens, so we anchor on the LAST ')').
+    let after = &stat[stat.rfind(')')? + 1..];
+    after.split_whitespace().nth(19)?.parse().ok()
 }

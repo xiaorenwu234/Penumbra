@@ -1,5 +1,17 @@
 #![allow(dead_code)]
 
+// ShadowProc is x86-64 only. It hard-codes the x86-64 syscall ABI throughout:
+// the register layout for the ptrace-injected clone(2), the 2-byte `0f 05`
+// syscall opcode used to rewind a boundary, __NR_bpf = 321, and fmod_ret hooks
+// attached to __x64_sys_* symbols. On another architecture it would compile but
+// fail at runtime in hard-to-diagnose ways, so fail loudly at build time.
+#[cfg(not(target_arch = "x86_64"))]
+compile_error!(
+    "ShadowProc supports x86-64 only (hard-coded x86-64 syscall ABI: injected \
+     clone register layout, `0f 05` syscall opcode, __NR_bpf=321, and \
+     __x64_sys_* fmod_ret hooks)."
+);
+
 mod bpf_loader;
 mod cli;
 mod event_handler;
@@ -137,6 +149,9 @@ fn main() -> Result<()> {
     // CLI instance (wraps access to process_manager for interactive use)
     let mut cli = Cli::new_with_shared(process_manager.clone());
 
+    // Periodic-cleanup tick counter (see reap_dead call at the end of the loop).
+    let mut tick: u32 = 0;
+
     // Main loop
     while running.load(Ordering::Relaxed) {
         // Check for new events (non-blocking)
@@ -205,9 +220,28 @@ fn main() -> Result<()> {
 
         // Small sleep to avoid busy-waiting
         thread::sleep(Duration::from_millis(10));
+
+        // Roughly once a second, garbage-collect bookkeeping for processes that
+        // exited on their own (crash / external kill). try_lock so this never
+        // contends with event or command handling.
+        tick = tick.wrapping_add(1);
+        if tick.is_multiple_of(100) {
+            if let Ok(mut pm) = process_manager.try_lock() {
+                pm.reap_dead();
+            }
+        }
     }
 
     eprintln!("\n[*] Shutting down ShadowProc...");
+    // Resume everything we froze so no process is left stuck in SIGSTOP once the
+    // BPF programs detach (would otherwise leave orphaned, wedged tasks).
+    {
+        let mut pm = process_manager.lock().unwrap();
+        let n = pm.release_all();
+        if n > 0 {
+            eprintln!("[*] Resumed {} frozen process(es) on shutdown.", n);
+        }
+    }
     // bpf_manager is dropped via Arc when all references go out of scope
     eprintln!("[+] Done.");
 

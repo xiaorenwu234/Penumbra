@@ -26,6 +26,10 @@
 //! pre-command boundary (e.g. the stdin read() boundary driven by a Session
 //! Proxy). The mechanism here is boundary-agnostic; boundary selection is the
 //! caller's responsibility.
+//!
+//! PLATFORM: x86-64 only. The injected clone register layout, the `0f 05`
+//! syscall-opcode check used to rewind a boundary, and the __NR_clone number
+//! are all x86-64 specific (a compile_error! in main.rs enforces this).
 
 use anyhow::{Context, Result};
 use nix::errno::Errno;
@@ -33,7 +37,7 @@ use nix::sys::ptrace;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::time::{Duration, Instant};
@@ -41,6 +45,14 @@ use std::time::{Duration, Instant};
 /// Linux clone() flag: make the new task a sibling of the caller (its parent is
 /// the caller's parent) instead of a child of the caller.
 const CLONE_PARENT: u64 = 0x0000_8000;
+
+/// Termination signal (low byte of clone flags) delivered to the candidate's
+/// parent when the candidate dies. Setting it to SIGCHLD — rather than 0 — is
+/// what lets the launcher reap a killed candidate with an ordinary waitpid():
+/// with exit_signal == 0 the candidate is a "clone child", reapable only via a
+/// __WALL/__WCLONE wait, a flavour most launchers (and Python's os.waitpid)
+/// cannot express — so killed candidates leaked as permanent zombies.
+const SIGCHLD: u64 = 17;
 
 /// State for a single tracked epoch.
 ///
@@ -70,6 +82,11 @@ impl Drop for EpochState {
 pub struct MemoryTracker {
     /// Keyed by baseline_pid (the original pid the caller knows at begin time).
     epochs: HashMap<u32, EpochState>,
+    /// Baseline pids with an in-flight epoch setup: reserved (phase 1) but not
+    /// yet finalized because the slow ptrace injection (phase 2) is running with
+    /// the ProcessManager lock RELEASED. Guards against a second concurrent
+    /// begin (or duplicate clone injection) for the same pid during that window.
+    reserving: HashSet<u32>,
     /// If true, fork events from eBPF are considered for descendant handling.
     /// In the Frozen-Baseline model descendants are NOT individually versioned;
     /// they are cleaned as a unit via the epoch cgroup, so this only gates
@@ -81,6 +98,7 @@ impl MemoryTracker {
     pub fn new() -> Self {
         MemoryTracker {
             epochs: HashMap::new(),
+            reserving: HashSet::new(),
             auto_track_enabled: false,
         }
     }
@@ -132,35 +150,74 @@ impl MemoryTracker {
     /// 4. Keep the ORIGINAL as the pristine baseline; return the CANDIDATE
     ///    (the fork) as the process that should run the epoch speculatively.
     pub fn begin_tracking(&mut self, pid: u32) -> Result<u32> {
+        // Reserve first so this (locked) path shares the same double-begin guard
+        // as the lock-free socket path (reserve -> inject -> finish).
+        self.reserve(pid)?;
+        match inject_fork_via_ptrace(pid)
+            .with_context(|| format!("Failed to inject clone into pid {}", pid))
+        {
+            Ok((candidate_pid, orig_regs)) => {
+                self.finish_tracking(pid, candidate_pid, orig_regs);
+                eprintln!(
+                    "[cow] Epoch started: baseline (frozen) pid {} -> candidate (runs) pid {}",
+                    pid, candidate_pid
+                );
+                Ok(candidate_pid)
+            }
+            Err(e) => {
+                self.abort_reserve(pid);
+                Err(e)
+            }
+        }
+    }
+
+    /// Phase 1 of a lock-free epoch setup: reserve `pid` so no other caller can
+    /// start a second epoch (or a duplicate clone injection) for it while the
+    /// slow ptrace injection runs with the ProcessManager lock released. Call
+    /// while holding the lock. Fails if an epoch is already active or a
+    /// reservation is already in flight for this pid.
+    pub fn reserve(&mut self, pid: u32) -> Result<()> {
         if let Some(e) = self.epochs.get(&pid) {
             anyhow::bail!(
                 "Process {} already has an active epoch (candidate {})",
                 pid, e.candidate_pid
             );
         }
+        if !self.reserving.insert(pid) {
+            anyhow::bail!("Process {} already has an in-flight epoch setup", pid);
+        }
+        Ok(())
+    }
 
-        // Inject a clone via ptrace to create the candidate. It shares the
-        // original's pages copy-on-write and is frozen with the snapshot
-        // registers (see inject_fork_via_ptrace). With CLONE_PARENT it is a
-        // sibling of the original, not a child.
-        let (candidate_pid, orig_regs) = inject_fork_via_ptrace(pid)
-            .with_context(|| format!("Failed to inject clone into pid {}", pid))?;
+    /// Phase 2 (run WITHOUT the ProcessManager lock): the slow ptrace clone
+    /// injection. Touches no tracker state, so it is safe to run unlocked while
+    /// other socket clients and the event loop keep making progress.
+    pub fn inject(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
+        inject_fork_via_ptrace(pid)
+            .with_context(|| format!("Failed to inject clone into pid {}", pid))
+    }
 
-        eprintln!(
-            "[cow] Epoch started: baseline (frozen) pid {} -> candidate (runs) pid {}",
-            pid, candidate_pid
-        );
-
+    /// Phase 3a: finalize a reservation with the injected candidate. Under lock.
+    pub fn finish_tracking(
+        &mut self,
+        pid: u32,
+        candidate: u32,
+        orig_regs: libc::user_regs_struct,
+    ) {
+        self.reserving.remove(&pid);
         self.epochs.insert(
             pid,
             EpochState {
                 baseline_pid: pid,
-                candidate_pid,
+                candidate_pid: candidate,
                 orig_regs,
             },
         );
+    }
 
-        Ok(candidate_pid)
+    /// Phase 3b: cancel a reservation whose injection failed. Under lock.
+    pub fn abort_reserve(&mut self, pid: u32) {
+        self.reserving.remove(&pid);
     }
 
     /// Resolve any pid belonging to an epoch (baseline OR candidate) to its
@@ -267,6 +324,48 @@ impl MemoryTracker {
     pub fn tracked_pids(&self) -> Vec<u32> {
         self.epochs.keys().copied().collect()
     }
+
+    /// Garbage-collect epochs whose processes have exited.
+    ///
+    /// Removes only epochs where BOTH baseline and candidate are gone (pure
+    /// garbage). A half-dead epoch (e.g. the candidate crashed mid-epoch while
+    /// the pristine baseline is still frozen) is left intact and only logged:
+    /// resolving it means resuming or discarding the survivor, which is a
+    /// semantic decision for the caller (reject/commit), not the reaper.
+    /// Returns the baseline keys of the epochs that were dropped.
+    pub fn reap_dead(&mut self) -> Vec<u32> {
+        let mut removed = Vec::new();
+        let keys: Vec<u32> = self.epochs.keys().copied().collect();
+        for k in keys {
+            let (base, cand) = match self.epochs.get(&k) {
+                Some(e) => (e.baseline_pid, e.candidate_pid),
+                None => continue,
+            };
+            let base_alive = task_alive(base);
+            let cand_alive = task_alive(cand);
+            if !base_alive && !cand_alive {
+                // Both gone: pure garbage. Drop it (EpochState::Drop harmlessly
+                // re-kills the already-dead candidate).
+                self.epochs.remove(&k);
+                removed.push(k);
+                eprintln!(
+                    "[cow] reap: epoch baseline {} / candidate {} both gone; dropped",
+                    base, cand
+                );
+            } else if !cand_alive {
+                eprintln!(
+                    "[cow] warn: candidate pid {} died mid-epoch; baseline {} still frozen (resolve via reject/commit)",
+                    cand, base
+                );
+            } else if !base_alive {
+                eprintln!(
+                    "[cow] warn: baseline pid {} of live candidate {} gone unexpectedly",
+                    base, cand
+                );
+            }
+        }
+        removed
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -364,8 +463,8 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     let syscall_addr = find_syscall_instruction(pid, &orig_regs)?;
     eprintln!("[cow] Found syscall instruction at 0x{:x} for pid {}", syscall_addr, pid);
 
-    // 4. Set up registers for clone(CLONE_PARENT, 0, 0, 0, 0) → a fork-like COW
-    //    SIBLING with NO exit signal.
+    // 4. Set up registers for clone(CLONE_PARENT|SIGCHLD, 0, 0, 0, 0) → a
+    //    fork-like COW SIBLING that raises SIGCHLD to its parent on exit.
     //
     //    Raw x86-64 clone() arg order is clone(flags, stack, ptid, ctid, tls).
     //    Without CLONE_VM the child still receives a full copy-on-write snapshot
@@ -380,13 +479,16 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     //      - when the baseline (original) is killed on commit, the surviving
     //        candidate is NOT reparented to init — it keeps proper lineage
     //        under the launcher/supervisor.
-    //    exit_signal is left 0 (low byte of flags) so the candidate sends no
-    //    signal to that parent either; a real supervisor would instead use
-    //    SIGCHLD + pidfd to reap it deterministically.
+    //    exit_signal is set to SIGCHLD (the low byte of flags) so that when the
+    //    candidate dies its parent (the launcher) receives SIGCHLD and can reap
+    //    it with an ordinary waitpid(). Leaving it 0 made the candidate a
+    //    "clone child" reapable only via __WALL/__WCLONE — a wait flavour most
+    //    launchers (and Python's os.waitpid) can't express, so killed
+    //    candidates leaked as permanent zombies under the launcher.
     let mut new_regs = orig_regs;
     new_regs.rip = syscall_addr;
     new_regs.rax = libc::SYS_clone as u64;   // __NR_clone = 56
-    new_regs.rdi = CLONE_PARENT;             // flags = CLONE_PARENT (COW; exit_signal = 0)
+    new_regs.rdi = CLONE_PARENT | SIGCHLD;   // flags = CLONE_PARENT + exit_signal SIGCHLD (COW; reapable)
     new_regs.rsi = 0;                        // child_stack = NULL (use parent's stack)
     new_regs.rdx = 0;                        // parent_tidptr = NULL
     new_regs.r10 = 0;                        // child_tidptr = NULL
@@ -512,21 +614,38 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     Ok((child_pid, orig_regs))
 }
 
-/// Rewind a rejected baseline back onto its interrupted boundary syscall and
-/// leave it group-stopped, ready for the caller to SIGCONT.
+/// x86-64 "restart pending" values the kernel leaves in `rax` when a syscall
+/// was interrupted by a signal and should be re-executed afterwards. Visible via
+/// GETREGS at the signal-delivery / group-stop, BEFORE the kernel performs the
+/// restart rewind. (ERESTARTSYS / ERESTARTNOINTR / ERESTARTNOHAND /
+/// ERESTART_RESTARTBLOCK, seen as their negated errno in rax.)
+fn is_restart_pending(rax: u64) -> bool {
+    matches!(rax as i64, -512 | -513 | -514 | -516)
+}
+
+/// Restore a rejected baseline to its pristine snapshot and leave it
+/// group-stopped, ready for the caller to SIGCONT.
 ///
-/// The baseline is currently group-stopped at a clean userspace boundary: the
-/// injected clone has fully returned, so its rip is just past the original
-/// `syscall` and its rax holds clone's (now irrelevant) return value. We
-/// re-attach, point rip back AT the `syscall` instruction and reload the
-/// original syscall number into rax (from orig_rax), and restore the original
-/// argument registers from the snapshot. On the caller's subsequent SIGCONT the
-/// baseline simply re-executes its boundary syscall (e.g. read) as if it had
-/// never been disturbed.
+/// Two things have to be undone. First, the clone injection clobbered some of
+/// the baseline's registers (the injected `syscall` overwrote rax with the child
+/// pid, plus rcx/r11); restoring the FULL snapshot (orig_regs) fixes that
+/// unconditionally. Second, IF the baseline was frozen mid-syscall with a
+/// restart pending (e.g. blocked in read(), or an LSM/fmod_ret interception that
+/// returned -ERESTARTSYS), its rip sits just past the `syscall` instruction and
+/// the syscall must be rewound so it re-executes on resume; we detect that from
+/// the snapshot — rip-2 is `0f 05` AND rax is a restart-pending value — and
+/// point rip back at the `syscall` while reloading the syscall number from
+/// orig_rax.
 ///
-/// This works where a rewind at inject time does not: here the task is stopped
-/// at a plain userspace instruction boundary (not mid syscall-exit), so SETREGS
-/// is not clobbered by a pending syscall return value.
+/// A baseline frozen anywhere else — after a COMPLETED syscall, or at an
+/// arbitrary userspace instruction — is resumed EXACTLY at the snapshot with no
+/// rewind. That avoids two bugs a naive rip-2 check has: re-executing a finished
+/// syscall (double side effect), and pointing rip into the middle of a
+/// non-syscall instruction.
+///
+/// Doing this at reject time (not inject time) is deliberate: the task is
+/// stopped at a plain userspace boundary, so SETREGS is not clobbered by a
+/// pending syscall-exit return value.
 fn restore_baseline_for_restart(pid: u32, orig_regs: &libc::user_regs_struct) -> Result<()> {
     let target = Pid::from_raw(pid as i32);
 
@@ -548,22 +667,81 @@ fn restore_baseline_for_restart(pid: u32, orig_regs: &libc::user_regs_struct) ->
         }
     }
 
+    // Always start from the FULL snapshot: this alone un-does the register
+    // clobber the clone injection left behind (the injected `syscall` overwrote
+    // rax with the child pid, and rcx/r11 with the sysret rip/flags). Restoring
+    // every register to orig_regs makes the baseline coherent again regardless
+    // of the boundary it was frozen at.
     let mut resume_regs = *orig_regs;
-    resume_regs.rip = orig_regs.rip.wrapping_sub(2); // back onto the `syscall` insn
-    resume_regs.rax = orig_regs.orig_rax;            // reload the syscall number
-    eprintln!(
-        "[cow] reject rewind pid={} rip 0x{:x} -> 0x{:x} rax -> {} (orig_rax)",
-        pid, orig_regs.rip, resume_regs.rip, orig_regs.orig_rax
-    );
+
+    // Decide whether the baseline ALSO needs its boundary syscall rewound so it
+    // re-executes on resume. That is true ONLY when it was frozen mid-syscall
+    // with a restart pending, detected from the snapshot via two independent
+    // signals:
+    //   (a) rip-2 is a 2-byte `syscall` instruction (0f 05), and
+    //   (b) rax holds a kernel "restart pending" value (-ERESTARTSYS etc.),
+    //       i.e. the syscall was interrupted, not completed.
+    // Requiring BOTH avoids re-executing a completed syscall (rip-2 == 0f 05 but
+    // rax is a normal return) and mis-pointing rip when the task was frozen at
+    // an arbitrary (non-syscall) instruction. In those cases the baseline is
+    // resumed EXACTLY at the snapshot instead.
+    let syscall_ip = orig_regs.rip.wrapping_sub(2);
+    let mut rip_is_syscall = false;
+    if orig_regs.rip >= 2 {
+        if let Ok(mut mem) = OpenOptions::new()
+            .read(true)
+            .open(format!("/proc/{}/mem", pid))
+        {
+            let mut buf = [0u8; 2];
+            if mem.seek(SeekFrom::Start(syscall_ip)).is_ok() && mem.read_exact(&mut buf).is_ok() {
+                rip_is_syscall = buf == [0x0f, 0x05];
+            }
+        }
+    }
+
+    if rip_is_syscall && is_restart_pending(orig_regs.rax) {
+        resume_regs.rip = syscall_ip;          // back onto the `syscall` insn
+        resume_regs.rax = orig_regs.orig_rax;  // reload the syscall number
+        eprintln!(
+            "[cow] reject rewind pid={} rip 0x{:x} -> 0x{:x} rax -> {} (orig_rax)",
+            pid, orig_regs.rip, resume_regs.rip, orig_regs.orig_rax
+        );
+    } else {
+        eprintln!(
+            "[cow] reject: baseline pid={} not at an interrupted-syscall boundary \
+             (rip=0x{:x} rax={}); resuming at snapshot without rewind",
+            pid, orig_regs.rip, orig_regs.rax as i64
+        );
+    }
+
     ptrace::setregs(target, resume_regs)
-        .context("reject: failed to rewind baseline registers")?;
+        .context("reject: failed to restore baseline registers")?;
 
     // Detach, leaving the baseline group-stopped (SIGSTOP). The caller SIGCONTs
-    // it, at which point it re-executes the boundary syscall.
+    // it, at which point it either re-executes the boundary syscall (rewound
+    // case) or simply continues from the snapshot.
     ptrace::detach(target, Some(Signal::SIGSTOP))
         .with_context(|| format!("reject: failed to detach from pid {}", pid))?;
 
     Ok(())
+}
+
+/// Returns false if `pid` has no /proc entry or its task is a zombie/dead.
+/// Used by reap_dead() to garbage-collect epochs whose processes have exited.
+fn task_alive(pid: u32) -> bool {
+    let stat = match fs::read_to_string(format!("/proc/{}/stat", pid)) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    // /proc/<pid>/stat: "pid (comm) state ...". comm may contain spaces and
+    // parens, so find the LAST ')' and read the first non-space char after it.
+    match stat.rfind(')') {
+        Some(idx) => {
+            let state = stat[idx + 1..].trim_start().chars().next();
+            !matches!(state, Some('Z') | Some('X') | Some('x'))
+        }
+        None => true,
+    }
 }
 
 /// Find a `syscall` instruction (bytes 0x0f 0x05) accessible to the target process.
@@ -580,10 +758,11 @@ fn find_syscall_instruction(pid: u32, regs: &libc::user_regs_struct) -> Result<u
     // Check RIP-2 (if process was stopped after a syscall)
     if regs.rip >= 2 {
         let mut buf = [0u8; 2];
-        if mem_file.seek(SeekFrom::Start(regs.rip - 2)).is_ok() {
-            if mem_file.read_exact(&mut buf).is_ok() && buf == [0x0f, 0x05] {
-                return Ok(regs.rip - 2);
-            }
+        if mem_file.seek(SeekFrom::Start(regs.rip - 2)).is_ok()
+            && mem_file.read_exact(&mut buf).is_ok()
+            && buf == [0x0f, 0x05]
+        {
+            return Ok(regs.rip - 2);
         }
     }
 
@@ -602,12 +781,12 @@ fn find_syscall_instruction(pid: u32, regs: &libc::user_regs_struct) -> Result<u
                 // Scan vDSO for syscall instruction
                 let scan_size = std::cmp::min(end - start, 4096) as usize;
                 let mut vdso_buf = vec![0u8; scan_size];
-                if mem_file.seek(SeekFrom::Start(start)).is_ok() {
-                    if mem_file.read_exact(&mut vdso_buf).is_ok() {
-                        for i in 0..vdso_buf.len().saturating_sub(1) {
-                            if vdso_buf[i] == 0x0f && vdso_buf[i + 1] == 0x05 {
-                                return Ok(start + i as u64);
-                            }
+                if mem_file.seek(SeekFrom::Start(start)).is_ok()
+                    && mem_file.read_exact(&mut vdso_buf).is_ok()
+                {
+                    for i in 0..vdso_buf.len().saturating_sub(1) {
+                        if vdso_buf[i] == 0x0f && vdso_buf[i + 1] == 0x05 {
+                            return Ok(start + i as u64);
                         }
                     }
                 }

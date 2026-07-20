@@ -140,12 +140,25 @@ class SessionProxy:
         return False
 
     @staticmethod
-    def _reap(pid):
-        """Best-effort reap of a child the daemon killed (avoid zombies)."""
-        try:
-            os.waitpid(pid, os.WNOHANG)
-        except (ChildProcessError, OSError):
-            pass
+    def _reap(pid, timeout=2.0):
+        """Reap a child the daemon killed, so it doesn't linger as a zombie.
+
+        The daemon SIGKILLs the process but is NOT its parent (candidates are
+        CLONE_PARENT siblings of the shell, i.e. children of this launcher), so
+        only we can reap it. The candidate now exits with SIGCHLD, so a normal
+        waitpid() can collect it. Poll briefly because the target may not have
+        become a zombie yet at the instant we're called (the daemon's SIGKILL is
+        asynchronous).
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                wpid, _ = os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                return  # already reaped, or not our child
+            if wpid == pid:
+                return  # reaped
+            time.sleep(0.02)
 
     def _loglines(self, sess):
         try:
@@ -231,6 +244,12 @@ class SessionProxy:
                 os.close(sess.fifo_wfd)
             except OSError:
                 pass
+        # Release the eBPF cgroup slot so the daemon can reclaim it. Without this
+        # every session permanently consumes one of the 64 cgroup_map slots.
+        try:
+            self.client.call("remove_cgroup", cgroup_path=sess.cgroup_path)
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
         for p in (sess.fifo_path, sess.log_path):
             try:
                 os.remove(p)

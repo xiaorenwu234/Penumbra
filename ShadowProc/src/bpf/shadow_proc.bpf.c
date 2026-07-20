@@ -74,6 +74,15 @@ struct {
 // Tracks which tgids are currently stopped
 // Key: tgid, Value: 1 = stopped
 // Userspace MUST delete the entry before sending SIGCONT
+//
+// SIZING (applies to stopped_pids / allowed_pids / allow_once below): 4096
+// entries, keyed by tgid. Entries are reclaimed by the sched_process_exit hook
+// when a tracked process dies, so steady-state occupancy tracks the number of
+// live monitored tgids, not cumulative history. This bounds normal use well;
+// a pathological workload that keeps >4096 monitored tgids resident at once
+// could still saturate a map (update then fails fail-closed: interception is
+// simply not armed for the overflow tgid). Raise max_entries if you expect to
+// monitor that many concurrent process groups.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
@@ -174,14 +183,21 @@ static __always_inline int should_intercept(void)
     return 1;
 }
 
-// Emit event + SIGSTOP + mark as stopped
-static __always_inline void do_intercept(__u32 syscall_nr, __u32 event_type)
+// Emit event + SIGSTOP + mark as stopped. Returns bpf_send_signal()'s result
+// (0 on success). Callers still return -ERESTARTSYS regardless, so a failed
+// stop is fail-closed: the syscall is auto-restarted and the stop is retried.
+static __always_inline int do_intercept(__u32 syscall_nr, __u32 event_type)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 tgid = pid_tgid >> 32;
     __u32 one = 1;
 
-    // Mark as stopped FIRST to prevent re-entry on signal delivery
+    // Mark as stopped FIRST to prevent re-entry on signal delivery.
+    // Trade-off: a sibling thread in the same tgid that reaches an external
+    // syscall inside the tiny window between this update and the SIGSTOP taking
+    // effect will see the stopped mark and be let through (should_intercept
+    // returns false when stopped). The window is a few instructions wide and
+    // the whole tgid is about to stop anyway; accepted as negligible.
     bpf_map_update_elem(&stopped_pids, &tgid, &one, BPF_ANY);
 
     // Emit event to userspace
@@ -196,12 +212,27 @@ static __always_inline void do_intercept(__u32 syscall_nr, __u32 event_type)
         bpf_ringbuf_submit(e, 0);
     }
 
-    // SIGSTOP the process
-    bpf_send_signal(19);
+    // SIGSTOP the process. If the signal could not be queued we must NOT leave
+    // the tgid marked stopped: otherwise should_intercept() would treat a
+    // never-stopped process as already handled and silently let its future
+    // external syscalls through. Drop the mark so interception re-arms; the
+    // caller still returns -ERESTARTSYS, so the kernel auto-restarts the syscall
+    // and we retry the stop on the next pass (fail-closed).
+    long ret = bpf_send_signal(19);
+    if (ret != 0)
+        bpf_map_delete_elem(&stopped_pids, &tgid);
+    return (int)ret;
 }
 
 // ═══════════════════════════════════════════════════════════════
 // Network address-family filtering + AF_UNIX system-socket whitelist
+//
+// SCOPE: only OUTBOUND association is intercepted (connect/bind/sendmsg).
+// Inbound listen()/accept() are intentionally NOT hooked: the threat model is
+// data leaving the sandbox, and an accepted inbound peer cannot itself carry
+// data out until the sandboxed process writes to it — which is already covered
+// by the write/sendmsg hooks. Add socket_listen/socket_accept hooks here if the
+// model expands to inbound exposure.
 //
 // Intercept (external / irreversible):
 //   - AF_INET / AF_INET6  (real remote IP AND loopback 127.0.0.1 / ::1)
@@ -643,11 +674,18 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
     if (!fdt)
         return 0;
 
+    // Reject fds beyond the process's actual fd-table capacity: indexing
+    // fd_array[fd] past max_fds would read past the array and could
+    // misclassify the fd. max_fds is the true size of the current table.
+    unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
+    if (fd >= max_fds)
+        return 0;
+
     struct file **fd_array = BPF_CORE_READ(fdt, fd);
     if (!fd_array)
         return 0;
 
-    // Bound check fd to avoid verifier issues
+    // Keep a constant upper bound so the verifier can prove the index is safe.
     if (fd > 1023)
         return 0;
 
@@ -692,10 +730,16 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
     if (!fdt)
         return 0;
 
+    // Reject fds beyond the process's actual fd-table capacity (see write hook).
+    unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
+    if (fd >= max_fds)
+        return 0;
+
     struct file **fd_array = BPF_CORE_READ(fdt, fd);
     if (!fd_array)
         return 0;
 
+    // Keep a constant upper bound so the verifier can prove the index is safe.
     if (fd > 1023)
         return 0;
 
