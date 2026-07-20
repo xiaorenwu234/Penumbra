@@ -335,9 +335,10 @@ impl ProcessManager {
         // The candidate is dead; drop its frozen record (if any).
         self.frozen.remove(&live);
 
-        // The baseline was frozen at the snapshot boundary (in eBPF's
-        // stopped_pids). Clear that state and SIGCONT it so it continues as the
-        // canonical process, re-guarded on future boundary operations.
+        // The baseline was rewound onto its interrupted boundary syscall by
+        // memory_tracker::reject_to_checkpoint and left group-stopped. Clear its
+        // eBPF stopped mark and SIGCONT it so it re-executes that syscall and
+        // continues as the canonical process, re-guarded on future boundaries.
         let _ = self.bpf_manager.clear_stopped_only(baseline);
         let _ = signal::kill(Pid::from_raw(baseline as i32), Signal::SIGCONT);
 

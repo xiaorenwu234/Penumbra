@@ -28,6 +28,7 @@
 //! caller's responsibility.
 
 use anyhow::{Context, Result};
+use nix::errno::Errno;
 use nix::sys::ptrace;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
@@ -35,6 +36,7 @@ use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+use std::time::{Duration, Instant};
 
 /// Linux clone() flag: make the new task a sibling of the caller (its parent is
 /// the caller's parent) instead of a child of the caller.
@@ -44,9 +46,14 @@ const CLONE_PARENT: u64 = 0x0000_8000;
 ///
 /// `baseline_pid` is the ORIGINAL process, kept frozen as the pristine rollback
 /// target. `candidate_pid` is the COW fork that runs the epoch speculatively.
+/// `orig_regs` are the snapshot registers captured at the boundary BEFORE the
+/// clone was injected; they are needed to cleanly rewind the baseline back onto
+/// its interrupted boundary syscall when the epoch is rejected (see
+/// restore_baseline_for_restart).
 struct EpochState {
     baseline_pid: u32,
     candidate_pid: u32,
+    orig_regs: libc::user_regs_struct,
 }
 
 impl Drop for EpochState {
@@ -136,7 +143,7 @@ impl MemoryTracker {
         // original's pages copy-on-write and is frozen with the snapshot
         // registers (see inject_fork_via_ptrace). With CLONE_PARENT it is a
         // sibling of the original, not a child.
-        let candidate_pid = inject_fork_via_ptrace(pid)
+        let (candidate_pid, orig_regs) = inject_fork_via_ptrace(pid)
             .with_context(|| format!("Failed to inject clone into pid {}", pid))?;
 
         eprintln!(
@@ -149,6 +156,7 @@ impl MemoryTracker {
             EpochState {
                 baseline_pid: pid,
                 candidate_pid,
+                orig_regs,
             },
         );
 
@@ -210,12 +218,29 @@ impl MemoryTracker {
         let state = self.epochs.remove(&key).unwrap();
         let baseline = state.baseline_pid;
         let candidate = state.candidate_pid;
+        let orig_regs = state.orig_regs;
         // Kill the candidate explicitly; suppress Drop to avoid a redundant
         // second kill/reap of the same pid.
         std::mem::forget(state);
 
         let _ = nix::sys::signal::kill(Pid::from_raw(candidate as i32), Signal::SIGKILL);
         let _ = waitpid(Pid::from_raw(candidate as i32), Some(WaitPidFlag::WNOHANG));
+
+        // Rewind the baseline back onto its interrupted boundary syscall. This is
+        // done HERE (at reject), not at begin, on purpose: at begin the baseline
+        // is stopped at the injected clone's syscall-exit, where a SETREGS of rax
+        // is immediately clobbered by the kernel writing clone's return value
+        // (the child pid) into rax. By reject time the baseline has long since
+        // group-stopped at a clean userspace boundary (clone fully returned), so
+        // re-attaching and rewinding its registers there sticks. Without this the
+        // resumed baseline runs read()'s return handler with rax = child pid and
+        // faults (or re-runs `syscall` with a garbage number -> ENOSYS).
+        if let Err(e) = restore_baseline_for_restart(baseline, &orig_regs) {
+            eprintln!(
+                "[cow] Warning: failed to rewind baseline pid {} for restart: {}",
+                baseline, e
+            );
+        }
 
         eprintln!(
             "[cow] Rollback: killed candidate pid {}; baseline pid {} restored as canonical",
@@ -248,16 +273,51 @@ impl MemoryTracker {
 // Helper functions
 // ═══════════════════════════════════════════════════════════════
 
+/// Wait for a state change on `pid` but NEVER block forever.
+///
+/// The injector runs under the global ProcessManager lock (see
+/// ProcessManager::begin_speculative), and the main event loop plus every
+/// socket client contend on that same lock. A plain `waitpid(pid, None)` that
+/// blocks on a target which never delivers the expected ptrace-stop would hang
+/// the entire daemon. So we poll with WNOHANG and give up after `timeout_ms`,
+/// turning a hang into a recoverable error that releases the lock.
+fn waitpid_timeout(
+    pid: Pid,
+    extra: Option<WaitPidFlag>,
+    timeout_ms: u64,
+) -> Result<WaitStatus> {
+    let mut flags = WaitPidFlag::WNOHANG;
+    if let Some(f) = extra {
+        flags |= f;
+    }
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        match waitpid(pid, Some(flags)) {
+            Ok(WaitStatus::StillAlive) => {
+                if Instant::now() >= deadline {
+                    anyhow::bail!("waitpid on {} timed out after {} ms", pid, timeout_ms);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(status) => return Ok(status),
+            Err(Errno::EINTR) => continue,
+            Err(e) => anyhow::bail!("waitpid on {} failed: {}", pid, e),
+        }
+    }
+}
+
 /// Inject a clone() system call into the target process via ptrace to create a
 /// coherent COW copy (the candidate).
 ///
 /// The target process must be in a stopped state (SIGSTOP).
-/// Returns the PID of the newly created candidate (also stopped).
+/// Returns the PID of the newly created candidate (also stopped) together with
+/// the snapshot registers captured at the boundary (needed later to rewind the
+/// baseline for a clean syscall restart on reject).
 ///
 /// Uses PTRACE_O_TRACEFORK/CLONE/VFORK + PTRACE_CONT for reliable syscall
 /// injection (PTRACE_SINGLESTEP is unreliable across `syscall` instructions on
 /// some kernels).
-fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
+fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     let target = Pid::from_raw(pid as i32);
 
     // 1. SEIZE the target WITHOUT injecting a SIGSTOP.
@@ -283,7 +343,7 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
     ptrace::interrupt(target)
         .with_context(|| format!("ptrace interrupt {} failed", pid))?;
 
-    match waitpid(target, None) {
+    match waitpid_timeout(target, None, 2000) {
         // Under SEIZE, the interrupt/group-stop is reported as an event stop.
         Ok(WaitStatus::PtraceEvent(_, _, _)) | Ok(WaitStatus::Stopped(_, _)) => {}
         Ok(status) => {
@@ -344,7 +404,7 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
 
     // 7. Wait for the fork/clone ptrace event
     let child_pid: u32 = loop {
-        match waitpid(target, None) {
+        match waitpid_timeout(target, None, 5000) {
             Ok(WaitStatus::PtraceEvent(_, _, event)) => {
                 // Under PTRACE_SEIZE a group-stop is reported as PTRACE_EVENT_STOP;
                 // only FORK/VFORK/CLONE carry the new child pid via GETEVENTMSG.
@@ -399,7 +459,7 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
     // 8. The candidate is auto-traced (PTRACE_O_TRACECLONE/FORK auto-attaches
     //    the child to the tracer). Wait for its initial ptrace-stop, then detach
     //    it with SIGSTOP.
-    match waitpid(Pid::from_raw(child_pid as i32), Some(WaitPidFlag::__WALL)) {
+    match waitpid_timeout(Pid::from_raw(child_pid as i32), Some(WaitPidFlag::__WALL), 2000) {
         Ok(WaitStatus::Stopped(_, _)) | Ok(WaitStatus::PtraceEvent(_, _, _)) => {}
         _ => {
             // Try a blocking wait if WNOHANG didn't catch it
@@ -425,24 +485,85 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<u32> {
             eprintln!("[cow] Warning: detach from candidate {} failed: {}", child_pid, e);
         });
 
-    // 9. Restore original registers. The target was group-stopped inside its
-    //    original (restartable) syscall, so orig_regs already carries the
-    //    kernel's restart state (rax = -ERESTARTSYS with rip just past the
-    //    `syscall` instruction). On resume the kernel's own signal-return path
-    //    rewinds rip and reloads the syscall number, transparently restarting
-    //    the interrupted syscall — so a plain restore is correct here.
+    // 9. Restore the baseline's registers to the snapshot state and leave it
+    //    group-stopped at a CLEAN userspace boundary.
+    //
+    //    Note we do NOT try to rewind the interrupted syscall here. At this
+    //    PTRACE_EVENT_FORK stop the baseline is mid clone-exit, and any rax we
+    //    SETREGS is immediately clobbered by the kernel writing clone's return
+    //    value (the child pid) into rax when the task resumes. So rax is not
+    //    trustworthy from here; the actual rewind onto the boundary syscall is
+    //    performed later, at reject time, by restore_baseline_for_restart(),
+    //    when the baseline has group-stopped at a clean boundary where SETREGS
+    //    sticks. Here we only restore rip/args to the snapshot so the baseline
+    //    parks at a well-defined userspace return boundary (rip just past the
+    //    original `syscall`).
     ptrace::setregs(target, orig_regs)
-        .context("Failed to restore original registers")?;
+        .context("Failed to restore baseline snapshot registers")?;
 
-    // 10. Detach from the baseline (it remains SIGSTOP-frozen from eBPF). The
-    //     baseline is the pristine rollback copy and stays frozen until the
-    //     epoch is committed (baseline killed) or rolled back (baseline resumed).
+    // 10. Detach from the baseline (it remains SIGSTOP-frozen). The baseline is
+    //     the pristine rollback copy and stays frozen until the epoch is
+    //     committed (baseline killed) or rolled back (baseline rewound + resumed).
     ptrace::detach(target, Some(Signal::SIGSTOP))
         .with_context(|| format!("Failed to detach from pid {}", pid))?;
 
     eprintln!("[cow] Injected clone: baseline pid {} → candidate {}", pid, child_pid);
 
-    Ok(child_pid)
+    Ok((child_pid, orig_regs))
+}
+
+/// Rewind a rejected baseline back onto its interrupted boundary syscall and
+/// leave it group-stopped, ready for the caller to SIGCONT.
+///
+/// The baseline is currently group-stopped at a clean userspace boundary: the
+/// injected clone has fully returned, so its rip is just past the original
+/// `syscall` and its rax holds clone's (now irrelevant) return value. We
+/// re-attach, point rip back AT the `syscall` instruction and reload the
+/// original syscall number into rax (from orig_rax), and restore the original
+/// argument registers from the snapshot. On the caller's subsequent SIGCONT the
+/// baseline simply re-executes its boundary syscall (e.g. read) as if it had
+/// never been disturbed.
+///
+/// This works where a rewind at inject time does not: here the task is stopped
+/// at a plain userspace instruction boundary (not mid syscall-exit), so SETREGS
+/// is not clobbered by a pending syscall return value.
+fn restore_baseline_for_restart(pid: u32, orig_regs: &libc::user_regs_struct) -> Result<()> {
+    let target = Pid::from_raw(pid as i32);
+
+    // Attach without perturbing the existing group-stop, then obtain a
+    // ptrace-stop we can SETREGS on.
+    ptrace::seize(target, ptrace::Options::empty())
+        .with_context(|| format!("reject: ptrace seize {} failed", pid))?;
+    ptrace::interrupt(target)
+        .with_context(|| format!("reject: ptrace interrupt {} failed", pid))?;
+    match waitpid_timeout(target, None, 2000) {
+        Ok(WaitStatus::PtraceEvent(_, _, _)) | Ok(WaitStatus::Stopped(_, _)) => {}
+        Ok(status) => {
+            ptrace::detach(target, Some(Signal::SIGSTOP)).ok();
+            anyhow::bail!("reject: unexpected wait status after seize/interrupt: {:?}", status);
+        }
+        Err(e) => {
+            ptrace::detach(target, Some(Signal::SIGSTOP)).ok();
+            anyhow::bail!("reject: waitpid after seize/interrupt failed: {}", e);
+        }
+    }
+
+    let mut resume_regs = *orig_regs;
+    resume_regs.rip = orig_regs.rip.wrapping_sub(2); // back onto the `syscall` insn
+    resume_regs.rax = orig_regs.orig_rax;            // reload the syscall number
+    eprintln!(
+        "[cow] reject rewind pid={} rip 0x{:x} -> 0x{:x} rax -> {} (orig_rax)",
+        pid, orig_regs.rip, resume_regs.rip, orig_regs.orig_rax
+    );
+    ptrace::setregs(target, resume_regs)
+        .context("reject: failed to rewind baseline registers")?;
+
+    // Detach, leaving the baseline group-stopped (SIGSTOP). The caller SIGCONTs
+    // it, at which point it re-executes the boundary syscall.
+    ptrace::detach(target, Some(Signal::SIGSTOP))
+        .with_context(|| format!("reject: failed to detach from pid {}", pid))?;
+
+    Ok(())
 }
 
 /// Find a `syscall` instruction (bytes 0x0f 0x05) accessible to the target process.
@@ -483,7 +604,7 @@ fn find_syscall_instruction(pid: u32, regs: &libc::user_regs_struct) -> Result<u
                 let mut vdso_buf = vec![0u8; scan_size];
                 if mem_file.seek(SeekFrom::Start(start)).is_ok() {
                     if mem_file.read_exact(&mut vdso_buf).is_ok() {
-                        for i in 0..vdso_buf.len() - 1 {
+                        for i in 0..vdso_buf.len().saturating_sub(1) {
                             if vdso_buf[i] == 0x0f && vdso_buf[i + 1] == 0x05 {
                                 return Ok(start + i as u64);
                             }

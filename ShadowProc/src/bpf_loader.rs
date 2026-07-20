@@ -86,6 +86,8 @@ pub struct BpfManager {
     cgroup_count_fd: i32,
     /// Raw fd of cow_enabled map
     cow_enabled_fd: i32,
+    /// Raw fd of allow_once map (deterministic single-syscall pass for resume)
+    allow_once_fd: i32,
     /// Number of registered cgroups
     cgroup_next_idx: AtomicU32,
     /// Keep cgroup fds alive
@@ -106,6 +108,7 @@ impl BpfManager {
         let cgroup_map_fd = skel.maps().cgroup_map().as_fd().as_raw_fd();
         let cgroup_count_fd = skel.maps().cgroup_count().as_fd().as_raw_fd();
         let cow_enabled_fd = skel.maps().cow_enabled().as_fd().as_raw_fd();
+        let allow_once_fd = skel.maps().allow_once().as_fd().as_raw_fd();
 
         // Enable the interceptor
         let key: u32 = 0;
@@ -163,6 +166,7 @@ impl BpfManager {
             cgroup_map_fd,
             cgroup_count_fd,
             cow_enabled_fd,
+            allow_once_fd,
             cgroup_next_idx: AtomicU32::new(0),
             cgroup_fds: Mutex::new(Vec::new()),
         };
@@ -245,38 +249,31 @@ impl BpfManager {
     /// The process can be intercepted again on future syscalls.
     /// Used for speculative execution where we need multiple freeze/resume cycles.
     ///
-    /// Strategy: temporarily add to allowed_pids (so the restarted -ERESTARTSYS syscall
-    /// passes through), then remove from allowed_pids after 100ms so future syscalls
-    /// (like connect()) are intercepted again.
+    /// Strategy: mark the tgid in `allow_once` so the kernel lets EXACTLY the
+    /// restarted boundary syscall pass, then consumes the flag in
+    /// should_intercept() — so the very next external syscall is intercepted
+    /// again. This is deterministic: it replaces the old "add to allowed_pids,
+    /// sleep 100ms, remove" timer, which was racy (the restart could miss the
+    /// window, or a different syscall could slip through inside it).
+    /// Flow: add to allow_once -> delete from stopped_pids -> caller SIGCONTs.
     pub fn clear_stopped_only(&self, tgid: u32) -> Result<()> {
         let key_bytes = tgid.to_ne_bytes();
+        let val: u32 = 1;
+        let val_bytes = val.to_ne_bytes();
 
         unsafe {
-            // Step 1: Add to allowed_pids temporarily (lets restarted syscall pass)
-            let val: u32 = 1;
-            let val_bytes = val.to_ne_bytes();
+            // Step 1: Allow exactly one interceptable (the restarted) syscall to
+            // pass. The kernel deletes this entry the first time it is honored.
             libc_bpf_map_update_elem(
-                self.allowed_pids_fd,
+                self.allow_once_fd,
                 key_bytes.as_ptr() as *const _,
                 val_bytes.as_ptr() as *const _,
             );
 
-            // Step 2: Remove from stopped_pids
+            // Step 2: Clear the stopped mark so the restart isn't short-circuited
+            // by the stopped_pids check.
             libc_bpf_map_delete_elem(self.stopped_pids_fd, key_bytes.as_ptr() as *const _);
         }
-
-        // Step 3: Schedule removal from allowed_pids after a brief delay
-        // (enough time for the restarted syscall to pass through)
-        let allowed_fd = self.allowed_pids_fd;
-        let key_copy = tgid;
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            let key_bytes = key_copy.to_ne_bytes();
-            unsafe {
-                libc_bpf_map_delete_elem(allowed_fd, key_bytes.as_ptr() as *const _);
-            }
-            eprintln!("[bpf] Removed pid {} from allowed_pids (re-enabling interception)", key_copy);
-        });
 
         Ok(())
     }

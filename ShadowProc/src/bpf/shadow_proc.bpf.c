@@ -91,6 +91,19 @@ struct {
     __type(value, __u32);
 } allowed_pids SEC(".maps");
 
+// Tracks tgids allowed to pass exactly ONE interceptable syscall, then re-arm.
+// Used by speculative/multi-cycle resume: the restarted boundary syscall passes
+// through, and should_intercept() CONSUMES (deletes) the entry so any later
+// external syscall is intercepted again. This is a deterministic replacement
+// for the old userspace 100ms allow-window timer, which had a TOCTOU race.
+// Key: tgid, Value: 1 = allow next interceptable syscall
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u32);
+    __type(value, __u32);
+} allow_once SEC(".maps");
+
 // Tracks which cgroups have COW auto-tracking enabled
 // Key: 0, Value: 1 = enabled (all monitored cgroups auto-track forks)
 struct {
@@ -143,6 +156,15 @@ static __always_inline int should_intercept(void)
     __u32 *allowed = bpf_map_lookup_elem(&allowed_pids, &tgid);
     if (allowed)
         return 0;
+
+    // Allow-once: let exactly one interceptable syscall pass (the restarted
+    // boundary syscall), then consume the entry so interception re-arms for any
+    // subsequent external syscall. Deterministic, no timer race.
+    __u32 *once = bpf_map_lookup_elem(&allow_once, &tgid);
+    if (once) {
+        bpf_map_delete_elem(&allow_once, &tgid);
+        return 0;
+    }
 
     // If already stopped, don't intercept again
     __u32 *val = bpf_map_lookup_elem(&stopped_pids, &tgid);
@@ -871,5 +893,27 @@ int BPF_PROG(shadow_sched_fork, struct task_struct *parent, struct task_struct *
         bpf_ringbuf_submit(e, 0);
     }
 
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Process-exit cleanup - drop all per-tgid state when a process leaves.
+//
+// stopped_pids / allowed_pids / allow_once are keyed by tgid. Without cleanup,
+// a stale "allowed" (or "allow-once") flag would survive process death, and a
+// later pid-reuse inside a monitored cgroup could inherit it and be silently
+// exempt from interception. Fires on thread-group-leader exit only.
+// ═══════════════════════════════════════════════════════════════
+SEC("tp_btf/sched_process_exit")
+int BPF_PROG(shadow_sched_exit, struct task_struct *task)
+{
+    __u32 tgid = BPF_CORE_READ(task, tgid);
+    __u32 pid  = BPF_CORE_READ(task, pid);
+    // Only clean up when the whole thread group is gone (leader exit).
+    if (pid != tgid)
+        return 0;
+    bpf_map_delete_elem(&allowed_pids, &tgid);
+    bpf_map_delete_elem(&stopped_pids, &tgid);
+    bpf_map_delete_elem(&allow_once, &tgid);
     return 0;
 }
