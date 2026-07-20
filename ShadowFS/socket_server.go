@@ -134,6 +134,30 @@ func (s *SocketServer) handleRequest(req Request) Response {
 		agents := shadowBackend.ListAgents()
 		return Response{Status: "ok", Agents: agents}
 
+	case "begin_epoch":
+		if req.CgroupID == "" {
+			return Response{Status: "error", Message: "cgroup_id required"}
+		}
+		log.Printf("[socket] begin_epoch agent=%q", req.CgroupID)
+		shadowBackend.BeginEpoch(req.CgroupID)
+		return Response{Status: "ok"}
+
+	case "commit_epoch":
+		if req.CgroupID == "" {
+			return Response{Status: "error", Message: "cgroup_id required"}
+		}
+		log.Printf("[socket] commit_epoch agent=%q", req.CgroupID)
+		shadowBackend.CommitEpoch(req.CgroupID)
+		return Response{Status: "ok"}
+
+	case "rollback_epoch":
+		if req.CgroupID == "" {
+			return Response{Status: "error", Message: "cgroup_id required"}
+		}
+		log.Printf("[socket] rollback_epoch agent=%q", req.CgroupID)
+		shadowBackend.RollbackEpoch(req.CgroupID)
+		return Response{Status: "ok"}
+
 	default:
 		return Response{Status: "error", Message: "unknown action: " + req.Action}
 	}

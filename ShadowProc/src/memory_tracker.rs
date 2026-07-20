@@ -139,38 +139,6 @@ impl MemoryTracker {
         Ok(false)
     }
 
-    /// Begin a versioning epoch for a process.
-    /// The process MUST be in SIGSTOP state (already frozen at the snapshot
-    /// boundary).
-    ///
-    /// This will:
-    /// 1. Attach via ptrace
-    /// 2. Inject clone(CLONE_PARENT) to create a coherent COW sibling
-    /// 3. Freeze both with the snapshot registers
-    /// 4. Keep the ORIGINAL as the pristine baseline; return the CANDIDATE
-    ///    (the fork) as the process that should run the epoch speculatively.
-    pub fn begin_tracking(&mut self, pid: u32) -> Result<u32> {
-        // Reserve first so this (locked) path shares the same double-begin guard
-        // as the lock-free socket path (reserve -> inject -> finish).
-        self.reserve(pid)?;
-        match inject_fork_via_ptrace(pid)
-            .with_context(|| format!("Failed to inject clone into pid {}", pid))
-        {
-            Ok((candidate_pid, orig_regs)) => {
-                self.finish_tracking(pid, candidate_pid, orig_regs);
-                eprintln!(
-                    "[cow] Epoch started: baseline (frozen) pid {} -> candidate (runs) pid {}",
-                    pid, candidate_pid
-                );
-                Ok(candidate_pid)
-            }
-            Err(e) => {
-                self.abort_reserve(pid);
-                Err(e)
-            }
-        }
-    }
-
     /// Phase 1 of a lock-free epoch setup: reserve `pid` so no other caller can
     /// start a second epoch (or a duplicate clone injection) for it while the
     /// slow ptrace injection runs with the ProcessManager lock released. Call
@@ -374,12 +342,13 @@ impl MemoryTracker {
 
 /// Wait for a state change on `pid` but NEVER block forever.
 ///
-/// The injector runs under the global ProcessManager lock (see
-/// ProcessManager::begin_speculative), and the main event loop plus every
-/// socket client contend on that same lock. A plain `waitpid(pid, None)` that
-/// blocks on a target which never delivers the expected ptrace-stop would hang
-/// the entire daemon. So we poll with WNOHANG and give up after `timeout_ms`,
-/// turning a hang into a recoverable error that releases the lock.
+/// The injector (inject_fork_via_ptrace, phase 2 of
+/// ProcessManager::begin_speculative_unlocked) runs on a socket-connection or
+/// CLI thread. A plain `waitpid(pid, None)` that blocks on a target which never
+/// delivers the expected ptrace-stop would wedge that thread forever (and, on
+/// the legacy locked paths, could hang the whole daemon). So we poll with
+/// WNOHANG and give up after `timeout_ms`, turning a hang into a recoverable
+/// error.
 fn waitpid_timeout(
     pid: Pid,
     extra: Option<WaitPidFlag>,

@@ -116,36 +116,17 @@ impl Cli {
                     return Ok(false);
                 }
                 let pid: u32 = parts[1].parse().unwrap_or(0);
-                // Mirror the socket path's three-phase setup so the multi-second
-                // ptrace clone injection runs WITHOUT the ProcessManager lock
-                // held: reserve (locked) -> inject (unlocked) -> finish/abort
-                // (locked). Otherwise the whole event loop and every socket
-                // client would block for the entire duration of the injection.
-                let reserved = {
-                    let mut pm = self.process_manager.lock().unwrap();
-                    pm.reserve_speculative(pid)
-                };
-                let baseline = match reserved {
-                    Ok(b) => b,
-                    Err(e) => {
-                        println!("\x1b[31m[ERROR]\x1b[0m {}", e);
-                        return Ok(false);
-                    }
-                };
-                let injected = ProcessManager::inject_speculative(baseline);
-                let mut pm = self.process_manager.lock().unwrap();
-                match injected {
-                    Ok((candidate, regs)) => {
-                        pm.finish_speculative(baseline, candidate, regs);
-                        println!(
-                            "\x1b[32m[OK]\x1b[0m Epoch started: froze pid {} as pristine baseline, forked speculative candidate pid {} (the live process for this epoch)",
-                            baseline, candidate
-                        );
-                    }
-                    Err(e) => {
-                        pm.abort_speculative(baseline);
-                        println!("\x1b[31m[ERROR]\x1b[0m {}", e);
-                    }
+                // begin_speculative_unlocked runs the three-phase setup
+                // (reserve -> inject -> finish/abort) internally, keeping the
+                // ProcessManager lock RELEASED during the multi-second ptrace
+                // clone injection so the event loop and every socket client
+                // keep making progress.
+                match ProcessManager::begin_speculative_unlocked(&self.process_manager, pid) {
+                    Ok(candidate) => println!(
+                        "\x1b[32m[OK]\x1b[0m Epoch started: froze pid {} as pristine baseline, forked speculative candidate pid {} (the live process for this epoch)",
+                        pid, candidate
+                    ),
+                    Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
                 }
             }
 

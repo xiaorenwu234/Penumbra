@@ -26,6 +26,16 @@ type AgentState struct {
 	// its writers committed. An upstream rollback still cascades and undoes
 	// this agent's already-committed changes.
 	Committed bool
+	// EpochOpen indicates a speculative epoch is currently active for this
+	// agent (see BeginEpoch/CommitEpoch/RollbackEpoch). While open, every
+	// undo entry whose Seq() > EpochStartSeq belongs to the epoch and can be
+	// undone in isolation by RollbackEpoch, WITHOUT touching pre-epoch state
+	// or cascading to other agents.
+	EpochOpen bool
+	// EpochStartSeq is the control-op seq allocated by BeginEpoch. Undo
+	// entries recorded after the epoch began carry a strictly greater seq,
+	// which is how RollbackEpoch distinguishes epoch work from prior state.
+	EpochStartSeq int64
 }
 
 // WAL tuning parameters.
@@ -218,6 +228,12 @@ func (b *Backend) replayWAL(records []WALRecord) {
 				_ = b.rollbackInternal(rec.CgroupID)
 			case "rollback_last":
 				b.rollbackLastInternal(rec.CgroupID)
+			case "begin_epoch":
+				b.beginEpochInternal(rec.CgroupID, recSeq)
+			case "commit_epoch":
+				b.commitEpochInternal(rec.CgroupID)
+			case "rollback_epoch":
+				b.rollbackEpochInternal(rec.CgroupID)
 			case "read_dep":
 				b.replayReadDep(rec.CgroupID, rec.Entry.OrigPath)
 			default:
@@ -1533,6 +1549,202 @@ func (b *Backend) rollbackLastInternal(cgroupID string) {
 			}
 		}
 	}
+}
+
+// --- Speculative epoch (per-agent, epoch-scoped rollback) ---
+//
+// A speculative epoch segments a single agent's undo log by seq so a batch
+// of file changes can be committed or rolled back in isolation, mirroring
+// the ShadowProc process layer's begin_speculative / reject_pid / commit_pid.
+// This lets the orchestrator roll back a long-lived bash session's file
+// changes AND its process state for one tool invocation together, while the
+// session (agent) keeps living for the next epoch.
+
+// BeginEpoch opens a speculative epoch for the agent. Undo entries recorded
+// after this call carry a strictly greater seq than the marker allocated
+// here, which is how CommitEpoch / RollbackEpoch tell epoch work apart from
+// pre-epoch state. Follows the standard write-ahead protocol.
+func (b *Backend) BeginEpoch(cgroupID string) {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+
+	b.mu.Lock()
+	seqNum := b.nextSeq()
+	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "begin_epoch"}
+	b.mu.Unlock()
+
+	if err := <-b.submitWAL(rec); err != nil {
+		log.Printf("[backend] BeginEpoch WAL: %v", err)
+		b.applyTurnAbort(seqNum)
+		return
+	}
+
+	b.mu.Lock()
+	b.applyTurnWait(seqNum)
+	defer func() {
+		b.applyTurnDone(seqNum)
+		b.mu.Unlock()
+	}()
+	b.beginEpochInternal(cgroupID, seqNum)
+}
+
+// beginEpochInternal performs the in-memory effect of BeginEpoch without
+// touching the WAL. Must be called with b.mu held. Used both by BeginEpoch
+// and by replayWAL.
+func (b *Backend) beginEpochInternal(cgroupID string, startSeq int64) {
+	agent := b.ensureAgent(cgroupID)
+	agent.EpochOpen = true
+	agent.EpochStartSeq = startSeq
+	log.Printf("[backend] BeginEpoch: agent=%q startSeq=%d", cgroupID, startSeq)
+}
+
+// CommitEpoch accepts the current epoch's changes: the epoch's undo entries
+// stay in the agent's undo log as ordinary (still-uncommitted, still-in-
+// overlay) state and will be promoted when the whole agent is committed.
+// Only the epoch marker is cleared. No-op if no epoch is open.
+func (b *Backend) CommitEpoch(cgroupID string) {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+
+	b.mu.Lock()
+	agent, ok := b.agents[cgroupID]
+	if !ok || !agent.EpochOpen {
+		b.mu.Unlock()
+		log.Printf("[backend] CommitEpoch: agent %q has no open epoch, no-op", cgroupID)
+		return
+	}
+	seqNum := b.nextSeq()
+	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "commit_epoch"}
+	b.mu.Unlock()
+
+	if err := <-b.submitWAL(rec); err != nil {
+		log.Printf("[backend] CommitEpoch WAL: %v", err)
+		b.applyTurnAbort(seqNum)
+		return
+	}
+
+	b.mu.Lock()
+	b.applyTurnWait(seqNum)
+	defer func() {
+		b.applyTurnDone(seqNum)
+		b.mu.Unlock()
+	}()
+	b.commitEpochInternal(cgroupID)
+}
+
+// commitEpochInternal performs the in-memory effect of CommitEpoch without
+// touching the WAL. Must be called with b.mu held. Used both by CommitEpoch
+// and by replayWAL.
+func (b *Backend) commitEpochInternal(cgroupID string) {
+	agent, ok := b.agents[cgroupID]
+	if !ok {
+		return
+	}
+	agent.EpochOpen = false
+	log.Printf("[backend] CommitEpoch: agent=%q epoch accepted", cgroupID)
+}
+
+// RollbackEpoch undoes every undo-log entry the agent recorded during the
+// current epoch (Seq > EpochStartSeq), in reverse seq order, then clears the
+// epoch marker. Pre-epoch state is left intact. Unlike the whole-agent
+// Rollback, this is SINGLE-AGENT scoped: it does NOT cascade to dependent
+// agents (an epoch is a private speculative batch of one session). No-op if
+// no epoch is open.
+func (b *Backend) RollbackEpoch(cgroupID string) {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+
+	b.mu.Lock()
+	agent, ok := b.agents[cgroupID]
+	if !ok || !agent.EpochOpen {
+		b.mu.Unlock()
+		log.Printf("[backend] RollbackEpoch: agent %q has no open epoch, no-op", cgroupID)
+		return
+	}
+	seqNum := b.nextSeq()
+	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "rollback_epoch"}
+	b.mu.Unlock()
+
+	if err := <-b.submitWAL(rec); err != nil {
+		log.Printf("[backend] RollbackEpoch WAL: %v", err)
+		b.applyTurnAbort(seqNum)
+		return
+	}
+
+	b.mu.Lock()
+	b.applyTurnWait(seqNum)
+	defer func() {
+		b.applyTurnDone(seqNum)
+		b.mu.Unlock()
+	}()
+	b.rollbackEpochInternal(cgroupID)
+}
+
+// rollbackEpochInternal performs the in-memory + disk effects of
+// RollbackEpoch without touching the WAL. Must be called with b.mu held.
+// Used both by RollbackEpoch and by replayWAL.
+func (b *Backend) rollbackEpochInternal(cgroupID string) {
+	agent, ok := b.agents[cgroupID]
+	if !ok {
+		return
+	}
+	mark := agent.EpochStartSeq
+	// Partition the undo log: keep pre-epoch entries, collect epoch entries
+	// (Seq > mark) to undo.
+	var epochEntries []LogEntry
+	var kept []LogEntry
+	for _, e := range agent.UndoLog {
+		if e.Seq() > mark {
+			epochEntries = append(epochEntries, e)
+		} else {
+			kept = append(kept, e)
+		}
+	}
+	agent.UndoLog = kept
+
+	// Undo in reverse seq order (most recent first), reusing each entry's
+	// own Rollback primitive.
+	sort.Slice(epochEntries, func(i, j int) bool { return epochEntries[i].Seq() > epochEntries[j].Seq() })
+	var invalidatePaths []string
+	seen := make(map[string]struct{})
+	for _, e := range epochEntries {
+		if err := e.Rollback(); err != nil {
+			log.Printf("[backend] RollbackEpoch: agent=%q seq=%d: %v", cgroupID, e.Seq(), err)
+		}
+		if p := e.Path(); p != "" {
+			if _, dup := seen[p]; !dup {
+				seen[p] = struct{}{}
+				invalidatePaths = append(invalidatePaths, p)
+			}
+		}
+	}
+
+	// Recompute dirty tracking: a path stays dirty only if a kept (pre-epoch)
+	// entry still references it.
+	for p := range seen {
+		stillReferenced := false
+		for _, k := range agent.UndoLog {
+			if k.Path() == p {
+				stillReferenced = true
+				break
+			}
+		}
+		if !stillReferenced {
+			delete(agent.DirtyFiles, p)
+			if writers, ok := b.fileDirty[p]; ok {
+				delete(writers, cgroupID)
+				if len(writers) == 0 {
+					delete(b.fileDirty, p)
+				}
+			}
+		}
+	}
+
+	agent.EpochOpen = false
+	if b.invalidateFn != nil && len(invalidatePaths) > 0 {
+		b.invalidateFn(invalidatePaths)
+	}
+	log.Printf("[backend] RollbackEpoch: agent=%q undid %d epoch entry(ies)", cgroupID, len(epochEntries))
 }
 
 // Rollback discards all overlay artefacts produced by the named agent and

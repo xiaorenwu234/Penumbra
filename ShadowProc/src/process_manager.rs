@@ -4,7 +4,7 @@ use nix::unistd::Pid;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::fs;
 
 use crate::bpf_loader::BpfManager;
@@ -261,19 +261,46 @@ impl ProcessManager {
     // COW Memory Tracking API
     // ═══════════════════════════════════════════════════════════════
 
-    /// Begin a versioning epoch for a frozen process.
-    /// The process must be in SIGSTOP state at the snapshot boundary.
+    /// Begin a versioning epoch for a frozen process WITHOUT holding the
+    /// ProcessManager lock across the multi-second ptrace clone injection.
+    ///
+    /// This is an associated function taking the shared `Arc<Mutex<Self>>`
+    /// rather than `&mut self`: a `&mut self` method is inherently called with
+    /// the lock already held by the caller and cannot release it mid-way (the
+    /// MutexGuard lives in the caller's scope). By taking the Arc<Mutex> it can
+    /// lock/unlock/relock internally and run the three-phase setup:
+    ///   reserve (locked) -> inject (unlocked) -> finish/abort (locked)
+    /// so concurrent socket clients and the event loop keep making progress
+    /// during the slow injection.
     ///
     /// The ORIGINAL becomes the frozen pristine baseline; a COW candidate is
     /// forked to run the epoch speculatively. Subsequent resume/commit/rollback
     /// on the caller's pid are transparently redirected to the candidate.
-    pub fn begin_speculative(&mut self, pid: u32) -> Result<u32> {
-        let pid = self.resolve_pid(pid);
-        let candidate = self.memory_tracker.begin_tracking(pid)?;
-        // The live/canonical handle for this epoch is the candidate; redirect
-        // the caller's (baseline) pid to it and register it as resumable.
-        self.register_candidate(pid, candidate);
-        Ok(candidate)
+    /// Returns the candidate pid (the live process for this epoch).
+    pub fn begin_speculative_unlocked(
+        pm: &Arc<Mutex<ProcessManager>>,
+        pid: u32,
+    ) -> Result<u32> {
+        // Phase 1 (locked): resolve to the canonical baseline and reserve it so
+        // no concurrent caller can start a second epoch for the same pid while
+        // the lock is released for injection. reserve_speculative resolves the
+        // pid internally.
+        let baseline = { pm.lock().unwrap().reserve_speculative(pid)? };
+
+        // Phase 2 (unlocked): the slow ptrace clone injection. Touches no
+        // ProcessManager state, so it is safe to run with the lock released.
+        let injected = ProcessManager::inject_speculative(baseline);
+
+        // Phase 3 (locked): record the injected candidate and redirect the
+        // baseline pid to it, or release the reservation if injection failed.
+        let mut guard = pm.lock().unwrap();
+        match injected {
+            Ok((candidate, regs)) => Ok(guard.finish_speculative(baseline, candidate, regs)),
+            Err(e) => {
+                guard.abort_speculative(baseline);
+                Err(e)
+            }
+        }
     }
 
     /// Lock-free epoch setup, phase 1 (call under the PM lock): resolve the
@@ -356,24 +383,6 @@ impl ProcessManager {
             c.tgid = candidate;
             self.frozen.insert(candidate, c);
         }
-    }
-
-    /// Begin a versioning epoch for all frozen processes in a cgroup.
-    pub fn begin_speculative_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
-        let pids: Vec<u32> = self.frozen.values()
-            .filter(|p| p.cgroup_path == cgroup_path)
-            .map(|p| p.tgid)
-            .collect();
-        let mut tracked = Vec::new();
-        for pid in pids {
-            if let Ok(candidate) = self.memory_tracker.begin_tracking(pid) {
-                // Redirect the baseline pid to its speculative candidate and
-                // register the candidate as resumable.
-                self.register_candidate(pid, candidate);
-                tracked.push(pid);
-            }
-        }
-        Ok(tracked)
     }
 
     /// Roll back a speculative epoch via the Frozen-Baseline model: discard the

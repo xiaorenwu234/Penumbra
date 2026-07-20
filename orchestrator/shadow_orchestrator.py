@@ -33,6 +33,8 @@ import signal
 import tempfile
 from typing import Optional, List, Dict, Any
 
+from session_proxy import SessionProxy
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s %(message)s",
@@ -127,6 +129,17 @@ class ShadowOrchestrator:
         # (see _try_release_pending).
         self._pending_release: set = set()
         self._pending_lock = threading.Lock()
+
+        # ── Speculative bash-session support ──
+        # A SessionProxy drives long-lived bash sessions and their ShadowProc
+        # baseline/candidate epochs (process layer). The orchestrator layers
+        # ShadowFS epoch commit/rollback on top so a session's file changes and
+        # process state for one epoch are committed/rolled back together.
+        # Created lazily (needs root + cgroup_exec) on first session_open.
+        self._shadowproc_sock = shadowproc_sock
+        self._proxy: Optional[SessionProxy] = None
+        self._sessions: Dict[str, str] = {}  # session_id → cgroup_id
+        self._sessions_lock = threading.Lock()
 
     def close(self):
         """Close connections to all services."""
@@ -464,6 +477,145 @@ class ShadowOrchestrator:
         return resp.get("frozen", [])
 
     # ──────────────────────────────────────────────────────────────────────
+    # Speculative bash sessions (ShadowProc process epoch + ShadowFS file epoch)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _get_proxy(self) -> SessionProxy:
+        """Lazily construct the SessionProxy (needs root + cgroup_exec)."""
+        if self._proxy is None:
+            self._proxy = SessionProxy(self._shadowproc_sock, verbose=True)
+        return self._proxy
+
+    def session_open(self, cgroup_name: Optional[str] = None) -> dict:
+        """
+        Open a long-lived bash session inside a fresh monitored cgroup.
+
+        The session is a stable handle: speculative epochs swap the underlying
+        pid between a frozen baseline and a running candidate, but the caller
+        only ever sees the session_id. File writes the session makes into the
+        ShadowFS mount are attributed to its cgroup_id, so ShadowFS epoch
+        commit/rollback lines up with the process-layer epoch.
+        """
+        proxy = self._get_proxy()
+        sid = proxy.open_session(cgroup_name)
+        cgroup_id = proxy.sessions[sid].cgroup_id
+        with self._sessions_lock:
+            self._sessions[sid] = cgroup_id
+        log.info("SESSION_OPEN sid=%s cgroup=%s", sid, cgroup_id)
+        return {"status": "ok", "session_id": sid, "cgroup_id": cgroup_id}
+
+    def session_run(self, session_id: str, command: str) -> dict:
+        """Feed one command to the session's current live shell; return stdout."""
+        proxy = self._get_proxy()
+        try:
+            out = proxy.run(session_id, command)
+        except KeyError:
+            return {"status": "error", "message": f"unknown session {session_id}"}
+        return {"status": "ok", "output": out}
+
+    def _session_cgroup(self, session_id: str) -> Optional[str]:
+        with self._sessions_lock:
+            return self._sessions.get(session_id)
+
+    def session_begin_epoch(self, session_id: str) -> dict:
+        """
+        Open a unified speculative epoch for the session.
+
+        Order matters: mark the ShadowFS epoch boundary FIRST (so every file
+        write the candidate makes carries a seq past the marker), THEN fork the
+        ShadowProc candidate and resume it as the live shell.
+        """
+        cgroup_id = self._session_cgroup(session_id)
+        if not cgroup_id:
+            return {"status": "error", "message": f"unknown session {session_id}"}
+        log.info("SESSION_BEGIN_EPOCH sid=%s cgroup=%s", session_id, cgroup_id)
+        # Step 1: ShadowFS epoch marker.
+        fs_resp = self.fs_client.request({
+            "action": "begin_epoch",
+            "cgroup_id": cgroup_id,
+        })
+        if fs_resp.get("status") != "ok":
+            log.error("  ShadowFS begin_epoch failed: %s", fs_resp.get("message"))
+            return fs_resp
+        # Step 2: ShadowProc baseline/candidate fork.
+        try:
+            self._get_proxy().begin_epoch(session_id)
+        except Exception as e:  # noqa: BLE001
+            # Best-effort unwind of the FS marker so the agent is not left
+            # with a dangling open epoch.
+            self.fs_client.request({"action": "rollback_epoch",
+                                    "cgroup_id": cgroup_id})
+            log.error("  begin_epoch (process layer) failed: %s", e)
+            return {"status": "error", "message": str(e)}
+        return {"status": "ok", "cgroup_id": cgroup_id}
+
+    def session_commit_epoch(self, session_id: str) -> dict:
+        """
+        Accept the current epoch: keep the candidate as canonical (ShadowProc)
+        AND accept the epoch's file changes (ShadowFS). The session lives on.
+        """
+        cgroup_id = self._session_cgroup(session_id)
+        if not cgroup_id:
+            return {"status": "error", "message": f"unknown session {session_id}"}
+        log.info("SESSION_COMMIT_EPOCH sid=%s cgroup=%s", session_id, cgroup_id)
+        proxy = self._get_proxy()
+        try:
+            proxy.commit(session_id)
+        except Exception as e:  # noqa: BLE001
+            log.error("  commit_epoch (process layer) failed: %s", e)
+            return {"status": "error", "message": str(e)}
+        fs_resp = self.fs_client.request({
+            "action": "commit_epoch",
+            "cgroup_id": cgroup_id,
+        })
+        if fs_resp.get("status") != "ok":
+            log.error("  ShadowFS commit_epoch failed: %s", fs_resp.get("message"))
+            return fs_resp
+        return {"status": "ok", "output": proxy.get_output(session_id)}
+
+    def session_rollback_epoch(self, session_id: str) -> dict:
+        """
+        Roll back the current epoch losslessly: discard the candidate and
+        resume the pristine baseline (ShadowProc), AND undo the epoch's file
+        changes (ShadowFS). To the session it is as if the epoch never ran.
+        """
+        cgroup_id = self._session_cgroup(session_id)
+        if not cgroup_id:
+            return {"status": "error", "message": f"unknown session {session_id}"}
+        log.info("SESSION_ROLLBACK_EPOCH sid=%s cgroup=%s", session_id, cgroup_id)
+        proxy = self._get_proxy()
+        try:
+            proxy.reject(session_id)
+        except Exception as e:  # noqa: BLE001
+            log.error("  rollback_epoch (process layer) failed: %s", e)
+            return {"status": "error", "message": str(e)}
+        fs_resp = self.fs_client.request({
+            "action": "rollback_epoch",
+            "cgroup_id": cgroup_id,
+        })
+        if fs_resp.get("status") != "ok":
+            log.error("  ShadowFS rollback_epoch failed: %s", fs_resp.get("message"))
+            return fs_resp
+        return {"status": "ok"}
+
+    def session_get_output(self, session_id: str) -> dict:
+        """Return the session's committed (commit-gated) transcript."""
+        proxy = self._get_proxy()
+        try:
+            return {"status": "ok", "output": proxy.get_output(session_id)}
+        except KeyError:
+            return {"status": "error", "message": f"unknown session {session_id}"}
+
+    def session_close(self, session_id: str) -> dict:
+        """Tear down the session (kills its cgroup, releases the FIFO/cgroup)."""
+        proxy = self._get_proxy()
+        proxy.close_session(session_id)
+        with self._sessions_lock:
+            self._sessions.pop(session_id, None)
+        log.info("SESSION_CLOSE sid=%s", session_id)
+        return {"status": "ok"}
+
+    # ──────────────────────────────────────────────────────────────────────
     # ShadowObserve integration
     # ──────────────────────────────────────────────────────────────────────
 
@@ -789,7 +941,9 @@ class OrchestratorServer:
 
     Supported actions:
         commit, rollback, add_cgroup, list_agents, list_frozen, get_affected,
-        start_observe, stop_observe, submit_policy
+        start_observe, stop_observe, submit_policy,
+        session_open, session_run, session_begin_epoch, session_commit_epoch,
+        session_rollback_epoch, session_get_output, session_close
     """
 
     def __init__(self, orchestrator: ShadowOrchestrator, listen_path: str):
@@ -922,6 +1076,49 @@ class OrchestratorServer:
                 if not allowed_ops:
                     return {"status": "error", "message": "allowed_ops required"}
                 return self.orch.submit_policy(cgroup_id, allowed_ops)
+
+            elif action == "session_open":
+                cgroup_name = req.get("cgroup_name") or None
+                return self.orch.session_open(cgroup_name)
+
+            elif action == "session_run":
+                session_id = req.get("session_id", "")
+                command = req.get("command", "")
+                if not session_id:
+                    return {"status": "error", "message": "session_id required"}
+                if not command:
+                    return {"status": "error", "message": "command required"}
+                return self.orch.session_run(session_id, command)
+
+            elif action == "session_begin_epoch":
+                session_id = req.get("session_id", "")
+                if not session_id:
+                    return {"status": "error", "message": "session_id required"}
+                return self.orch.session_begin_epoch(session_id)
+
+            elif action == "session_commit_epoch":
+                session_id = req.get("session_id", "")
+                if not session_id:
+                    return {"status": "error", "message": "session_id required"}
+                return self.orch.session_commit_epoch(session_id)
+
+            elif action == "session_rollback_epoch":
+                session_id = req.get("session_id", "")
+                if not session_id:
+                    return {"status": "error", "message": "session_id required"}
+                return self.orch.session_rollback_epoch(session_id)
+
+            elif action == "session_get_output":
+                session_id = req.get("session_id", "")
+                if not session_id:
+                    return {"status": "error", "message": "session_id required"}
+                return self.orch.session_get_output(session_id)
+
+            elif action == "session_close":
+                session_id = req.get("session_id", "")
+                if not session_id:
+                    return {"status": "error", "message": "session_id required"}
+                return self.orch.session_close(session_id)
 
             else:
                 return {"status": "error", "message": f"unknown action: {action}"}

@@ -23,10 +23,12 @@ type PersistState struct {
 
 // PersistAgent is the per-agent state serialized to disk.
 type PersistAgent struct {
-	CgroupID   string              `json:"cgroup_id"`
-	UndoLog    []SerializableEntry `json:"undo_log"`
-	DirtyFiles []string            `json:"dirty_files"`
-	Committed  bool                `json:"committed"`
+	CgroupID      string              `json:"cgroup_id"`
+	UndoLog       []SerializableEntry `json:"undo_log"`
+	DirtyFiles    []string            `json:"dirty_files"`
+	Committed     bool                `json:"committed"`
+	EpochOpen     bool                `json:"epoch_open,omitempty"`
+	EpochStartSeq int64               `json:"epoch_start_seq,omitempty"`
 }
 
 // snapshot creates a deep copy of the backend state for serialization.
@@ -42,10 +44,12 @@ func (b *Backend) snapshot() *PersistState {
 
 	for id, agent := range b.agents {
 		pa := &PersistAgent{
-			CgroupID:   agent.CgroupID,
-			UndoLog:    make([]SerializableEntry, 0, len(agent.UndoLog)),
-			DirtyFiles: make([]string, 0, len(agent.DirtyFiles)),
-			Committed:  agent.Committed,
+			CgroupID:      agent.CgroupID,
+			UndoLog:       make([]SerializableEntry, 0, len(agent.UndoLog)),
+			DirtyFiles:    make([]string, 0, len(agent.DirtyFiles)),
+			Committed:     agent.Committed,
+			EpochOpen:     agent.EpochOpen,
+			EpochStartSeq: agent.EpochStartSeq,
 		}
 		for _, entry := range agent.UndoLog {
 			pa.UndoLog = append(pa.UndoLog, MarshalEntry(entry))
@@ -88,10 +92,12 @@ func (b *Backend) loadState(state *PersistState) {
 	b.agents = make(map[string]*AgentState, len(state.Agents))
 	for id, pa := range state.Agents {
 		agent := &AgentState{
-			CgroupID:   pa.CgroupID,
-			UndoLog:    make([]LogEntry, 0, len(pa.UndoLog)),
-			DirtyFiles: make(map[string]struct{}, len(pa.DirtyFiles)),
-			Committed:  pa.Committed,
+			CgroupID:      pa.CgroupID,
+			UndoLog:       make([]LogEntry, 0, len(pa.UndoLog)),
+			DirtyFiles:    make(map[string]struct{}, len(pa.DirtyFiles)),
+			Committed:     pa.Committed,
+			EpochOpen:     pa.EpochOpen,
+			EpochStartSeq: pa.EpochStartSeq,
 		}
 		for _, se := range pa.UndoLog {
 			if entry := UnmarshalEntry(se); entry != nil {
@@ -213,7 +219,8 @@ func fsyncDir(dir string) error {
 //
 // ControlOp marks the record as a state-management op rather than a
 // mutation. Empty means "normal mutation". Recognised values: "commit",
-// "rollback", "rollback_last".
+// "rollback", "rollback_last", "begin_epoch", "commit_epoch",
+// "rollback_epoch", "read_dep".
 type WALRecord struct {
 	CgroupID          string            `json:"cgroup_id"`
 	SeqNum            int64             `json:"seq"`

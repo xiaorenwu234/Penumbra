@@ -479,46 +479,25 @@ impl SocketServer {
                         pids: Some(candidates),
                     }
                 } else if let Some(pid) = req.pid {
-                    let baseline = {
-                        let mut pm = process_manager.lock().unwrap();
-                        pm.reserve_speculative(pid)
-                    };
-                    let baseline = match baseline {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return Response {
-                                status: "error".into(),
-                                message: Some(e.to_string()),
-                                frozen: None,
-                                pids: None,
-                            }
-                        }
-                    };
-                    // Slow injection, lock released.
-                    let injected = ProcessManager::inject_speculative(baseline);
-                    let mut pm = process_manager.lock().unwrap();
-                    match injected {
-                        Ok((candidate, regs)) => {
-                            pm.finish_speculative(baseline, candidate, regs);
-                            Response {
-                                status: "ok".into(),
-                                message: Some(format!(
-                                    "Epoch started for pid {}: froze it as pristine baseline, forked speculative candidate pid {} (the live process for this epoch)",
-                                    baseline, candidate
-                                )),
-                                frozen: None,
-                                pids: Some(vec![candidate]),
-                            }
-                        }
-                        Err(e) => {
-                            pm.abort_speculative(baseline);
-                            Response {
-                                status: "error".into(),
-                                message: Some(e.to_string()),
-                                frozen: None,
-                                pids: None,
-                            }
-                        }
+                    // begin_speculative_unlocked runs reserve -> inject ->
+                    // finish/abort internally, keeping the lock released during
+                    // the slow ptrace clone injection.
+                    match ProcessManager::begin_speculative_unlocked(process_manager, pid) {
+                        Ok(candidate) => Response {
+                            status: "ok".into(),
+                            message: Some(format!(
+                                "Epoch started for pid {}: froze it as pristine baseline, forked speculative candidate pid {} (the live process for this epoch)",
+                                pid, candidate
+                            )),
+                            frozen: None,
+                            pids: Some(vec![candidate]),
+                        },
+                        Err(e) => Response {
+                            status: "error".into(),
+                            message: Some(e.to_string()),
+                            frozen: None,
+                            pids: None,
+                        },
                     }
                 } else {
                     Response {
