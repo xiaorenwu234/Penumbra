@@ -87,8 +87,9 @@ impl ProcessManager {
         self.frozen.values().collect()
     }
 
-    /// Continue a frozen process:
-    /// 1. Clear stopped_pids map entry (so hook will allow the restarted syscall)
+    /// Continue a frozen process to completion:
+    /// 1. Fully release in allowed_pids (value 2, so even the exit-hold sentinel
+    ///    passes and the process can actually exit)
     /// 2. Send SIGCONT (kernel auto-restarts the syscall via -ERESTARTSYS)
     pub fn continue_process(&mut self, pid: u32) -> Result<()> {
         let pid = self.resolve_pid(pid);
@@ -97,8 +98,11 @@ impl ProcessManager {
         }
 
         // MUST clear the map entry BEFORE sending SIGCONT
-        // Otherwise the restarted syscall will be intercepted again
-        self.bpf_manager.clear_stopped(pid)?;
+        // Otherwise the restarted syscall will be intercepted again.
+        // clear_stopped_full grants a FULL release (value 2): unlike resume's
+        // normal allow (value 1), this also lets the exit-hold sentinel pass so
+        // the process runs to completion and exits.
+        self.bpf_manager.clear_stopped_full(pid)?;
 
         signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT)
             .with_context(|| format!("Failed to send SIGCONT to pid {}", pid))?;
@@ -116,12 +120,70 @@ impl ProcessManager {
             anyhow::bail!("Process {} is not in frozen list", pid);
         }
 
-        // Use clear_stopped_only which temporarily allows, then re-enables
-        self.bpf_manager.clear_stopped_only(pid)?;
+        // Use clear_stopped which permanently allows the candidate to run the
+        // whole epoch uninterrupted (per-epoch granularity). Interception is
+        // re-armed at the next epoch boundary (finish_speculative).
+        self.bpf_manager.clear_stopped(pid)?;
 
         signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT)
             .with_context(|| format!("Failed to send SIGCONT to pid {}", pid))?;
 
+        self.frozen.remove(&pid);
+        Ok(())
+    }
+
+    /// Freeze a SINGLE process by SIGSTOP and register it as frozen, waiting
+    /// briefly for it to actually reach the stopped state.
+    ///
+    /// Used by the one-shot `spec_fork` path to snapshot a running process at a
+    /// boundary WITHOUT going through eBPF interception. Registering it in the
+    /// frozen map is required so `register_candidate` can build the candidate's
+    /// frozen record (it clones the baseline's). Idempotent: a pid already in
+    /// the frozen map is left as-is.
+    pub fn freeze_pid(&mut self, pid: u32) -> Result<()> {
+        let pid = self.resolve_pid(pid);
+        if self.frozen.contains_key(&pid) {
+            return Ok(());
+        }
+        signal::kill(Pid::from_raw(pid as i32), Signal::SIGSTOP)
+            .with_context(|| format!("Failed to SIGSTOP pid {}", pid))?;
+        // Wait for the SIGSTOP to land so the subsequent ptrace injection sees a
+        // cleanly group-stopped task (best-effort; injection's SEIZE+INTERRUPT
+        // can still stop it if this times out).
+        wait_task_stopped(pid, 1000);
+
+        let cgroup_path = read_process_cgroup(pid).unwrap_or_else(|| format!("pid-{}", pid));
+        let comm = fs::read_to_string(format!("/proc/{}/comm", pid))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        self.frozen.insert(
+            pid,
+            FrozenProcess {
+                pid,
+                tgid: pid,
+                comm,
+                event: InterceptEvent::dummy_freeze(pid),
+                checkpoint_path: None,
+                cgroup_path,
+            },
+        );
+        Ok(())
+    }
+
+    /// Resume a candidate with a plain SIGCONT, touching NO eBPF map.
+    ///
+    /// The candidate is a freshly cloned tgid (not in any allow map, so armed
+    /// by default) frozen at a NON-intercepted boundary (e.g. read()), so it
+    /// needs no allow-pass to proceed — it just needs to be woken. Its later
+    /// intercepted syscalls (connect/write/...) are caught normally. Used by
+    /// the `spec_fork` path; deliberately does NOT call clear_stopped /
+    /// rearm_intercept so the injection stays independent of the enforcement
+    /// allow logic.
+    pub fn resume_candidate_raw(&mut self, pid: u32) -> Result<()> {
+        let pid = self.resolve_pid(pid);
+        signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT)
+            .with_context(|| format!("Failed to SIGCONT candidate {}", pid))?;
         self.frozen.remove(&pid);
         Ok(())
     }
@@ -351,6 +413,11 @@ impl ProcessManager {
         self.memory_tracker
             .finish_tracking(baseline, candidate, orig_regs);
         self.register_candidate(baseline, candidate);
+        // Re-arm interception at this epoch boundary: revoke any PERMANENT allow
+        // the baseline carried from a prior epoch's resume/commit, so if it is
+        // later resumed (on reject) it is guarded again. The freshly cloned
+        // candidate has a new tgid and is armed by default until it is resumed.
+        let _ = self.bpf_manager.rearm_intercept(baseline);
         candidate
     }
 
@@ -427,10 +494,11 @@ impl ProcessManager {
         self.frozen.remove(&live);
 
         // The baseline was rewound onto its interrupted boundary syscall by
-        // memory_tracker::reject_to_checkpoint and left group-stopped. Clear its
-        // eBPF stopped mark and SIGCONT it so it re-executes that syscall and
-        // continues as the canonical process, re-guarded on future boundaries.
-        let _ = self.bpf_manager.clear_stopped_only(baseline);
+        // memory_tracker::reject_to_checkpoint and left group-stopped. Permit it
+        // (clear_stopped: permanent allow) and SIGCONT it so it re-executes that
+        // syscall and continues as the canonical process. Interception is
+        // re-armed at the next epoch boundary (finish_speculative).
+        let _ = self.bpf_manager.clear_stopped(baseline);
         let _ = signal::kill(Pid::from_raw(baseline as i32), Signal::SIGCONT);
 
         // The baseline is live again under its own pid: drop the promotion that
@@ -852,4 +920,28 @@ fn process_starttime(pid: u32) -> Option<u64> {
     // parens, so we anchor on the LAST ')').
     let after = &stat[stat.rfind(')')? + 1..];
     after.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Poll /proc/<pid>/stat until the task reaches a stopped state ('T' or 't'),
+/// up to `timeout_ms`. Returns true if it stopped, false on timeout / gone.
+/// Best-effort helper for freeze_pid: gives a SIGSTOP time to land before the
+/// ptrace injection runs.
+fn wait_task_stopped(pid: u32, timeout_ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        let stat = match fs::read_to_string(format!("/proc/{}/stat", pid)) {
+            Ok(s) => s,
+            Err(_) => return false, // gone
+        };
+        if let Some(idx) = stat.rfind(')') {
+            let state = stat[idx + 1..].trim_start().chars().next();
+            if matches!(state, Some('T') | Some('t')) {
+                return true;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }

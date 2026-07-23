@@ -872,7 +872,7 @@ scenario_exit_hold() {
 
     # Step 3: Resume with resume_pid (NOT continue - so exit-hold will fire)
     echo ""
-    step "Step 3: Resuming with resume_pid (temporary allow - exit-hold will fire later)..."
+    step "Step 3: Resuming with resume_pid (permanent allow until next epoch boundary)..."
     local resume_resp
     resume_resp=$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$REAL_PID}")
     show_json "$resume_resp"
@@ -1268,26 +1268,24 @@ scenario_bash_env_rollback() {
         sleep 0.3
         info "parent bash: SHADOW_VAR=$(read_bash parent_val) (bash itself is never intercepted)"
 
-        # Step 2: Freeze bash at its idle-in-read() boundary, then begin_speculative:
-        # it freezes the ORIGINAL as the pristine baseline and forks a COW candidate
-        # (the returned pid). resume_pid(candidate) makes the candidate the live shell.
+        # Step 2: One-shot spec_fork — freeze the ORIGINAL bash as the pristine
+        # baseline, inject a COW candidate, and resume the candidate, all in a
+        # single call. spec_fork wakes the candidate with a plain SIGCONT and
+        # does NOT touch the eBPF allow maps, so the candidate (a fresh tgid) is
+        # armed by default and its connect() below is intercepted normally.
         echo ""
-        step "Step 2: Freeze bash + begin_speculative (freeze baseline, fork speculative candidate)..."
-        show_json "$(shadowproc_cmd "{\"action\":\"freeze_by_cgroup\",\"cgroup_id\":\"$CGROUP_ID\"}")"
-        wait_state_T "$BASH_PID" || warn "bash never reached state=T"
-        sleep 0.2
+        step "Step 2: spec_fork (freeze baseline + fork candidate + resume, one call)..."
         local begin_resp SPEC_PID
-        begin_resp=$(shadowproc_cmd "{\"action\":\"begin_speculative\",\"pid\":$BASH_PID}")
+        begin_resp=$(shadowproc_cmd "{\"action\":\"spec_fork\",\"pid\":$BASH_PID}")
         show_json "$begin_resp"
         SPEC_PID=$(echo "$begin_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('pids') or [0])[0])" 2>/dev/null || echo 0)
         if [[ -z "$SPEC_PID" || "$SPEC_PID" == "0" ]]; then
-            warn "begin_speculative returned no candidate — retrying"
+            warn "spec_fork returned no candidate — retrying"
             kill -9 "$BASH_PID" 2>/dev/null || true
             exec 9>&-; wait "$BASH_PID" 2>/dev/null || true; purge_cgroup_c
             continue
         fi
         info "baseline (frozen pristine) pid: $BASH_PID; candidate (speculative) pid: $SPEC_PID"
-        show_json "$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$SPEC_PID}")"
         sleep 0.4
 
         # Step 3: drive the CANDIDATE: observe ORIGINAL, mutate to MODIFIED_BY_AGENT,
@@ -1573,36 +1571,47 @@ scenario_cow_commit() {
     echo ""
 
     local MARKER_FILE="/tmp/shadow-demo-cow-commit-marker"
-    rm -f "$MARKER_FILE"
+    local MM_FIFO="/tmp/shadow-demo-cow-commit.fifo"
+    rm -f "$MARKER_FILE" "$MM_FIFO"
+    mkfifo "$MM_FIFO"
+    # Hold the FIFO open read-write on fd 8 so the writer never blocks and the
+    # reader (mem_modifier, and its COW candidate) never sees EOF.
+    exec 8<>"$MM_FIFO"
 
-    step "Step 1: Starting mem_modifier in cgroup..."
-    run_in_cgroup "$MEM_MODIFIER" "$MARKER_FILE" &
+    step "Step 1: Starting mem_modifier in cgroup (stdin ← FIFO)..."
+    run_in_cgroup "$MEM_MODIFIER" "$MARKER_FILE" <"$MM_FIFO" &
     local AGENT_PID=$!
-    step "Step 2: Waiting for first freeze (before modification)..."
-    if wait_for_frozen "$AGENT_PID" 10; then
-        info "Process FROZEN (before modification)"
-    else
-        warn "Process did not freeze"; return
+    step "Step 2: Waiting for mem_modifier to reach its first pause (blocked on read)..."
+    # mem_modifier writes the marker file, then blocks on read(stdin) — a
+    # NON-intercepted boundary. The marker file appearing tells us it is parked
+    # at that read, ready for spec_fork (no eBPF freeze at this first pause).
+    local mwait=0
+    while [[ ! -s "$MARKER_FILE" && $mwait -lt 40 ]]; do sleep 0.25; mwait=$((mwait + 1)); done
+    if [[ ! -s "$MARKER_FILE" ]]; then
+        warn "mem_modifier did not reach first pause (no marker)"; exec 8>&-; rm -f "$MM_FIFO"; return
     fi
-    sleep 0.5
-    if [[ ! -f "$MARKER_FILE" ]]; then warn "Marker file missing"; return; fi
+    info "Process parked at read (pre-modification)"
     local REAL_PID COUNTER_ADDR MESSAGE_ADDR
     REAL_PID=$(grep '^pid=' "$MARKER_FILE" | cut -d= -f2)
     COUNTER_ADDR=$(grep '^counter_addr=' "$MARKER_FILE" | cut -d= -f2)
     MESSAGE_ADDR=$(grep '^message_addr=' "$MARKER_FILE" | cut -d= -f2)
     info "Marker: pid=$REAL_PID counter_addr=$COUNTER_ADDR"
 
-    step "Step 3: begin_speculative (freeze $REAL_PID as pristine baseline, fork speculative candidate)..."
+    # Step 3: One-shot spec_fork — freeze the ORIGINAL mem_modifier as the
+    # pristine baseline, inject a COW candidate, and resume the candidate with a
+    # plain SIGCONT (no eBPF allow). The candidate is a fresh tgid and armed, so
+    # its Phase 3 connect() below is intercepted normally (the second freeze).
+    step "Step 3: spec_fork (freeze $REAL_PID as pristine baseline + fork candidate + resume, one call)..."
     local begin_resp SPEC_PID
-    begin_resp=$(shadowproc_cmd "{\"action\":\"begin_speculative\",\"pid\":$REAL_PID}")
+    begin_resp=$(shadowproc_cmd "{\"action\":\"spec_fork\",\"pid\":$REAL_PID}")
     show_json "$begin_resp"
     SPEC_PID=$(echo "$begin_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('pids') or [0])[0])" 2>/dev/null || echo 0)
     if [[ -z "$SPEC_PID" || "$SPEC_PID" == "0" ]]; then
-        warn "begin_speculative returned no candidate pid"; return
+        warn "spec_fork returned no candidate pid"; exec 8>&-; rm -f "$MM_FIFO"; return
     fi
     info "Speculative candidate = pid $SPEC_PID (baseline $REAL_PID stays frozen & pristine)"
-    step "Step 4: resume_pid — the CANDIDATE ($SPEC_PID) runs and modifies memory..."
-    show_json "$(shadowproc_cmd "{\"action\":\"resume_pid\",\"pid\":$SPEC_PID}")"
+    step "Step 4: Feed one byte → release the CANDIDATE past its read; it modifies memory then connect()s..."
+    printf 'x\n' >&8
 
     step "Step 5: Waiting for second freeze of the candidate (after modification)..."
     local elapsed=0 frozen_ok=false
@@ -1674,7 +1683,7 @@ scenario_cow_commit() {
         echo -e "  ${RED}  counter=$counter_val (exp 9999), message=$msg_val (exp MODIFIED_BY_SPECULATIVE)${NC}"
         echo -e "  ${RED}  completed=$completed (exp 1), final_counter=$final_counter (exp 9999), exited=$exited (exp true)${NC}"
     fi
-    rm -f "$MARKER_FILE"
+    exec 8>&-; rm -f "$MARKER_FILE" "$MM_FIFO"
 }
 
 # ──────────────────────────── Main ─────────────────────────────────────────────

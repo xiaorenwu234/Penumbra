@@ -50,6 +50,12 @@ ExternalProject_Add(bpftool_ext
 set(BPF_SRC ${CMAKE_CURRENT_SOURCE_DIR}/bpf/observ.bpf.c)
 set(BPF_OBJ ${CMAKE_CURRENT_BINARY_DIR}/observ.bpf.o)
 
+# Shared BPF headers; edits must retrigger both skeleton builds.
+set(BPF_HDRS
+    ${CMAKE_CURRENT_SOURCE_DIR}/bpf/cri.bpf.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/bpf/observ_common.h
+)
+
 add_custom_command(
     OUTPUT  ${BPF_OBJ}
     COMMAND clang -O2 -g -target bpf
@@ -57,7 +63,7 @@ add_custom_command(
             -I ${THIRD_PARTY}/vmlinux.h/include/x86
             -I ${LIBBPF_INC}
             -c ${BPF_SRC} -o ${BPF_OBJ}
-    DEPENDS ${BPF_SRC} ${VMLINUX_H}
+    DEPENDS ${BPF_SRC} ${BPF_HDRS} ${VMLINUX_H}
     COMMENT "Compiling BPF: observ.bpf.o"
 )
 
@@ -71,7 +77,7 @@ add_custom_command(
             -I ${THIRD_PARTY}/vmlinux.h/include/x86
             -I ${LIBBPF_INC}
             -c ${ENFORCE_BPF_SRC} -o ${ENFORCE_BPF_OBJ}
-    DEPENDS ${ENFORCE_BPF_SRC} ${VMLINUX_H}
+    DEPENDS ${ENFORCE_BPF_SRC} ${BPF_HDRS} ${VMLINUX_H}
     COMMENT "Compiling BPF: enforce.bpf.o"
 )
 add_custom_target(bpf_progs ALL DEPENDS ${BPF_OBJ} ${ENFORCE_BPF_OBJ})

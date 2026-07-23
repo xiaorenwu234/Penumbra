@@ -150,9 +150,24 @@ static bool parse_json_line(const std::string &line, ObservEvent &evt) {
 
 bool AuditEngine::path_matches(const std::string &pattern,
                                const std::string &path) {
+    // Unified component-boundary prefix rule, identical to the BPF enforcer's
+    // cri_check_whitelist (bpf/cri.bpf.h): a pattern matches iff it is empty
+    // (any path), or equals the path, or is a directory prefix of it (path
+    // starts with pattern followed by '/'). This ensures a policy that passes
+    // this historical audit is enforced the same way at runtime -- e.g. "/tmp"
+    // matches "/tmp/a/b" but NOT "/tmpfoo".
     if (pattern.empty()) return true;
-    if (path.size() < pattern.size()) return false;
-    return path.compare(0, pattern.size(), pattern) == 0;
+
+    // Normalize away trailing slashes (keep a lone "/" as the root marker).
+    std::string p = pattern;
+    while (p.size() > 1 && p.back() == '/') p.pop_back();
+    if (p == "/") return true;            // root prefix matches every abs path
+    if (p.empty()) return true;
+
+    if (path.size() < p.size()) return false;
+    if (path.compare(0, p.size(), p) != 0) return false;
+    // Exact match, or the next char is a component boundary.
+    return path.size() == p.size() || path[p.size()] == '/';
 }
 
 /* ===================================================================== */

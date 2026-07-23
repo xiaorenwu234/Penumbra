@@ -14,6 +14,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include "cri.bpf.h"   /* canonical path + operation-class helpers */
 
 char LICENSE[] SEC("license") = "GPL";
 
@@ -71,248 +72,132 @@ get_data_loc_str(void *ctx, __u32 data_loc_field) {
 }
 
 /* ===================================================================== */
-/*  FILE-SYSTEM tracepoints                                              */
+/*  FILE-SYSTEM events - LSM hooks (semantically equivalent to enforce.bpf.c)*/
+/*                                                                       */
+/*  These hook the SAME LSM points as the enforcer and derive the path    */
+/*  with the SAME helper (cri_build_path), so the canonical path recorded  */
+/*  here is byte-identical to the one the enforcer checks. Only operations */
+/*  that pass prior LSM checks (ret == 0) are recorded, matching the       */
+/*  population the enforcer sees. All programs return 0 (never deny).      */
 /* ===================================================================== */
 
-SEC("tp/syscalls/sys_enter_openat")
-int tp_openat(struct trace_event_raw_sys_enter *ctx) {
+SEC("lsm/file_open")
+int BPF_PROG(observ_file_open, struct file *file, int ret) {
+    if (ret != 0) return 0;
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
-
-    __u32 flags;
-    char *filename_ptr;
-    bpf_probe_read(&filename_ptr, sizeof(filename_ptr), &ctx->args[1]);
-    bpf_probe_read(&flags,        sizeof(flags),        &ctx->args[2]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), filename_ptr);
-
+    unsigned int flags = BPF_CORE_READ(file, f_flags);
     evt->arg1 = flags;
-    evt->event_type = (flags & 0x40) ? FS_EVENT_CREATE : FS_EVENT_OPEN;
+    evt->event_type = (flags & O_CREAT) ? FS_EVENT_CREATE : FS_EVENT_OPEN;
+    cri_build_path(BPF_CORE_READ(file, f_path.dentry), evt->path);
     submit_event(evt);
     return 0;
 }
 
-SEC("tp/syscalls/sys_enter_unlinkat")
-int tp_unlinkat(struct trace_event_raw_sys_enter *ctx) {
+SEC("lsm/inode_create")
+int BPF_PROG(observ_inode_create, struct inode *dir, struct dentry *dentry,
+             umode_t mode, int ret) {
+    if (ret != 0) return 0;
+    struct observ_event *evt = reserve_event();
+    if (!evt) return 0;
+    evt->event_type = FS_EVENT_CREATE;
+    evt->arg1 = mode;
+    cri_build_path(dentry, evt->path);
+    submit_event(evt);
+    return 0;
+}
+
+SEC("lsm/inode_unlink")
+int BPF_PROG(observ_inode_unlink, struct inode *dir, struct dentry *dentry,
+             int ret) {
+    if (ret != 0) return 0;
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_DELETE;
-    char *pathname_ptr;
-    bpf_probe_read(&pathname_ptr, sizeof(pathname_ptr), &ctx->args[1]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), pathname_ptr);
+    cri_build_path(dentry, evt->path);
     submit_event(evt);
     return 0;
 }
 
-SEC("tp/syscalls/sys_enter_unlink")
-int tp_unlink(struct trace_event_raw_sys_enter *ctx) {
-    struct observ_event *evt = reserve_event();
-    if (!evt) return 0;
-    evt->event_type = FS_EVENT_DELETE;
-    char *pathname_ptr;
-    bpf_probe_read(&pathname_ptr, sizeof(pathname_ptr), &ctx->args[0]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), pathname_ptr);
-    submit_event(evt);
-    return 0;
-}
-
-SEC("tp/syscalls/sys_enter_renameat")
-int tp_renameat(struct trace_event_raw_sys_enter *ctx) {
+SEC("lsm/inode_rename")
+int BPF_PROG(observ_inode_rename, struct inode *old_dir,
+             struct dentry *old_dentry, struct inode *new_dir,
+             struct dentry *new_dentry, int ret) {
+    if (ret != 0) return 0;
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_RENAME;
-    char *oldname_ptr, *newname_ptr;
-    bpf_probe_read(&oldname_ptr, sizeof(oldname_ptr), &ctx->args[1]);
-    bpf_probe_read(&newname_ptr, sizeof(newname_ptr), &ctx->args[3]);
-    bpf_probe_read_user_str(&evt->path,     sizeof(evt->path),     oldname_ptr);
-    bpf_probe_read_user_str(&evt->new_path, sizeof(evt->new_path), newname_ptr);
+    cri_build_path(old_dentry, evt->path);       /* source (enforced) */
+    cri_build_path(new_dentry, evt->new_path);   /* destination */
     submit_event(evt);
     return 0;
 }
 
-SEC("tp/syscalls/sys_enter_renameat2")
-int tp_renameat2(struct trace_event_raw_sys_enter *ctx) {
-    struct observ_event *evt = reserve_event();
-    if (!evt) return 0;
-    evt->event_type = FS_EVENT_RENAME;
-    char *oldname_ptr, *newname_ptr;
-    bpf_probe_read(&oldname_ptr, sizeof(oldname_ptr), &ctx->args[1]);
-    bpf_probe_read(&newname_ptr, sizeof(newname_ptr), &ctx->args[3]);
-    bpf_probe_read_user_str(&evt->path,     sizeof(evt->path),     oldname_ptr);
-    bpf_probe_read_user_str(&evt->new_path, sizeof(evt->new_path), newname_ptr);
-    submit_event(evt);
-    return 0;
-}
-
-SEC("tp/syscalls/sys_enter_rename")
-int tp_rename(struct trace_event_raw_sys_enter *ctx) {
-    struct observ_event *evt = reserve_event();
-    if (!evt) return 0;
-    evt->event_type = FS_EVENT_RENAME;
-    char *oldname_ptr, *newname_ptr;
-    bpf_probe_read(&oldname_ptr, sizeof(oldname_ptr), &ctx->args[0]);
-    bpf_probe_read(&newname_ptr, sizeof(newname_ptr), &ctx->args[1]);
-    bpf_probe_read_user_str(&evt->path,     sizeof(evt->path),     oldname_ptr);
-    bpf_probe_read_user_str(&evt->new_path, sizeof(evt->new_path), newname_ptr);
-    submit_event(evt);
-    return 0;
-}
-
-SEC("tp/syscalls/sys_enter_fchmodat")
-int tp_fchmodat(struct trace_event_raw_sys_enter *ctx) {
-    struct observ_event *evt = reserve_event();
-    if (!evt) return 0;
-    evt->event_type = FS_EVENT_CHMOD;
-    char *filename_ptr; __u32 mode;
-    bpf_probe_read(&filename_ptr, sizeof(filename_ptr), &ctx->args[1]);
-    bpf_probe_read(&mode,         sizeof(mode),         &ctx->args[2]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), filename_ptr);
-    evt->arg1 = mode;
-    submit_event(evt);
-    return 0;
-}
-
-SEC("tp/syscalls/sys_enter_chmod")
-int tp_chmod(struct trace_event_raw_sys_enter *ctx) {
-    struct observ_event *evt = reserve_event();
-    if (!evt) return 0;
-    evt->event_type = FS_EVENT_CHMOD;
-    char *filename_ptr; __u32 mode;
-    bpf_probe_read(&filename_ptr, sizeof(filename_ptr), &ctx->args[0]);
-    bpf_probe_read(&mode,         sizeof(mode),         &ctx->args[1]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), filename_ptr);
-    evt->arg1 = mode;
-    submit_event(evt);
-    return 0;
-}
-
-SEC("tp/syscalls/sys_enter_fchownat")
-int tp_fchownat(struct trace_event_raw_sys_enter *ctx) {
-    struct observ_event *evt = reserve_event();
-    if (!evt) return 0;
-    evt->event_type = FS_EVENT_CHOWN;
-    char *filename_ptr;
-    bpf_probe_read(&filename_ptr, sizeof(filename_ptr), &ctx->args[1]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), filename_ptr);
-    submit_event(evt);
-    return 0;
-}
-
-SEC("tp/syscalls/sys_enter_chown")
-int tp_chown(struct trace_event_raw_sys_enter *ctx) {
-    struct observ_event *evt = reserve_event();
-    if (!evt) return 0;
-    evt->event_type = FS_EVENT_CHOWN;
-    char *filename_ptr;
-    bpf_probe_read(&filename_ptr, sizeof(filename_ptr), &ctx->args[0]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), filename_ptr);
-    submit_event(evt);
-    return 0;
-}
-
-SEC("tp/syscalls/sys_enter_mkdirat")
-int tp_mkdirat(struct trace_event_raw_sys_enter *ctx) {
+SEC("lsm/inode_mkdir")
+int BPF_PROG(observ_inode_mkdir, struct inode *dir, struct dentry *dentry,
+             umode_t mode, int ret) {
+    if (ret != 0) return 0;
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_MKDIR;
-    char *pathname_ptr; __u32 mode;
-    bpf_probe_read(&pathname_ptr, sizeof(pathname_ptr), &ctx->args[1]);
-    bpf_probe_read(&mode,         sizeof(mode),         &ctx->args[2]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), pathname_ptr);
     evt->arg1 = mode;
+    cri_build_path(dentry, evt->path);
     submit_event(evt);
     return 0;
 }
 
-SEC("tp/syscalls/sys_enter_mkdir")
-int tp_mkdir(struct trace_event_raw_sys_enter *ctx) {
-    struct observ_event *evt = reserve_event();
-    if (!evt) return 0;
-    evt->event_type = FS_EVENT_MKDIR;
-    char *pathname_ptr; __u32 mode;
-    bpf_probe_read(&pathname_ptr, sizeof(pathname_ptr), &ctx->args[0]);
-    bpf_probe_read(&mode,         sizeof(mode),         &ctx->args[1]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), pathname_ptr);
-    evt->arg1 = mode;
-    submit_event(evt);
-    return 0;
-}
-
-SEC("tp/syscalls/sys_enter_rmdir")
-int tp_rmdir(struct trace_event_raw_sys_enter *ctx) {
+SEC("lsm/inode_rmdir")
+int BPF_PROG(observ_inode_rmdir, struct inode *dir, struct dentry *dentry,
+             int ret) {
+    if (ret != 0) return 0;
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_RMDIR;
-    char *pathname_ptr;
-    bpf_probe_read(&pathname_ptr, sizeof(pathname_ptr), &ctx->args[0]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), pathname_ptr);
+    cri_build_path(dentry, evt->path);
     submit_event(evt);
     return 0;
 }
 
-SEC("tp/syscalls/sys_enter_linkat")
-int tp_linkat(struct trace_event_raw_sys_enter *ctx) {
+SEC("lsm/inode_link")
+int BPF_PROG(observ_inode_link, struct dentry *old_dentry, struct inode *dir,
+             struct dentry *new_dentry, int ret) {
+    if (ret != 0) return 0;
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_LINK;
-    char *oldname_ptr, *newname_ptr;
-    bpf_probe_read(&oldname_ptr, sizeof(oldname_ptr), &ctx->args[1]);
-    bpf_probe_read(&newname_ptr, sizeof(newname_ptr), &ctx->args[3]);
-    bpf_probe_read_user_str(&evt->path,     sizeof(evt->path),     oldname_ptr);
-    bpf_probe_read_user_str(&evt->new_path, sizeof(evt->new_path), newname_ptr);
+    cri_build_path(new_dentry, evt->path);       /* created link (enforced) */
+    cri_build_path(old_dentry, evt->new_path);   /* existing target */
     submit_event(evt);
     return 0;
 }
 
-SEC("tp/syscalls/sys_enter_link")
-int tp_link(struct trace_event_raw_sys_enter *ctx) {
-    struct observ_event *evt = reserve_event();
-    if (!evt) return 0;
-    evt->event_type = FS_EVENT_LINK;
-    char *oldname_ptr, *newname_ptr;
-    bpf_probe_read(&oldname_ptr, sizeof(oldname_ptr), &ctx->args[0]);
-    bpf_probe_read(&newname_ptr, sizeof(newname_ptr), &ctx->args[1]);
-    bpf_probe_read_user_str(&evt->path,     sizeof(evt->path),     oldname_ptr);
-    bpf_probe_read_user_str(&evt->new_path, sizeof(evt->new_path), newname_ptr);
-    submit_event(evt);
-    return 0;
-}
-
-SEC("tp/syscalls/sys_enter_symlinkat")
-int tp_symlinkat(struct trace_event_raw_sys_enter *ctx) {
+SEC("lsm/inode_symlink")
+int BPF_PROG(observ_inode_symlink, struct inode *dir, struct dentry *dentry,
+             const char *old_name, int ret) {
+    if (ret != 0) return 0;
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_SYMLINK;
-    char *target_ptr, *linkpath_ptr;
-    bpf_probe_read(&target_ptr,   sizeof(target_ptr),   &ctx->args[0]);
-    bpf_probe_read(&linkpath_ptr, sizeof(linkpath_ptr), &ctx->args[2]);
-    bpf_probe_read_user_str(&evt->path,     sizeof(evt->path),     linkpath_ptr);
-    bpf_probe_read_user_str(&evt->new_path, sizeof(evt->new_path), target_ptr);
+    cri_build_path(dentry, evt->path);           /* created symlink (enforced) */
+    bpf_probe_read_kernel_str(&evt->new_path, sizeof(evt->new_path), old_name);
     submit_event(evt);
     return 0;
 }
 
-SEC("tp/syscalls/sys_enter_symlink")
-int tp_symlink(struct trace_event_raw_sys_enter *ctx) {
+/* CHMOD / CHOWN / TRUNCATE via inode_setattr. The leading mnt_idmap arg
+ * matches the target kernel (6.x). Classified identically to the enforcer. */
+SEC("lsm/inode_setattr")
+int BPF_PROG(observ_inode_setattr, struct mnt_idmap *idmap,
+             struct dentry *dentry, struct iattr *attr, int ret) {
+    if (ret != 0) return 0;
+    unsigned int ia_valid = BPF_CORE_READ(attr, ia_valid);
+    __u16 event_type = cri_setattr_event(ia_valid);
+    if (event_type == 0) return 0;
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
-    evt->event_type = FS_EVENT_SYMLINK;
-    char *target_ptr, *linkpath_ptr;
-    bpf_probe_read(&target_ptr,   sizeof(target_ptr),   &ctx->args[0]);
-    bpf_probe_read(&linkpath_ptr, sizeof(linkpath_ptr), &ctx->args[1]);
-    bpf_probe_read_user_str(&evt->path,     sizeof(evt->path),     linkpath_ptr);
-    bpf_probe_read_user_str(&evt->new_path, sizeof(evt->new_path), target_ptr);
-    submit_event(evt);
-    return 0;
-}
-
-SEC("tp/syscalls/sys_enter_truncate")
-int tp_truncate(struct trace_event_raw_sys_enter *ctx) {
-    struct observ_event *evt = reserve_event();
-    if (!evt) return 0;
-    evt->event_type = FS_EVENT_TRUNCATE;
-    char *path_ptr;
-    bpf_probe_read(&path_ptr, sizeof(path_ptr), &ctx->args[0]);
-    bpf_probe_read_user_str(&evt->path, sizeof(evt->path), path_ptr);
+    evt->event_type = event_type;
+    evt->arg1 = ia_valid;
+    cri_build_path(dentry, evt->path);
     submit_event(evt);
     return 0;
 }

@@ -75,7 +75,7 @@ struct {
 // Key: tgid, Value: 1 = stopped
 // Userspace MUST delete the entry before sending SIGCONT
 //
-// SIZING (applies to stopped_pids / allowed_pids / allow_once below): 4096
+// SIZING (applies to stopped_pids / allowed_pids below): 4096
 // entries, keyed by tgid. Entries are reclaimed by the sched_process_exit hook
 // when a tracked process dies, so steady-state occupancy tracks the number of
 // live monitored tgids, not cumulative history. This bounds normal use well;
@@ -90,28 +90,19 @@ struct {
     __type(value, __u32);
 } stopped_pids SEC(".maps");
 
-// Tracks which tgids are allowed to pass (after user chose "continue")
-// Key: tgid, Value: 1 = allowed
-// Once in this map, the process will never be intercepted again
+// Tracks which tgids are allowed to pass normal interception.
+// Key: tgid. Value encodes HOW fully the process is released:
+//   1 = normal permanent allow: normal syscalls pass, but the exit-hold
+//       sentinel (192.0.2.255:65535) is STILL intercepted. Granted by resume.
+//   2 = full release: even the exit-hold sentinel passes, so the process can
+//       run to completion and exit. Granted by continue/commit.
+// Interception is re-armed at the next epoch boundary by deleting the entry.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
     __type(key, __u32);
     __type(value, __u32);
 } allowed_pids SEC(".maps");
-
-// Tracks tgids allowed to pass exactly ONE interceptable syscall, then re-arm.
-// Used by speculative/multi-cycle resume: the restarted boundary syscall passes
-// through, and should_intercept() CONSUMES (deletes) the entry so any later
-// external syscall is intercepted again. This is a deterministic replacement
-// for the old userspace 100ms allow-window timer, which had a TOCTOU race.
-// Key: tgid, Value: 1 = allow next interceptable syscall
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
-    __type(key, __u32);
-    __type(value, __u32);
-} allow_once SEC(".maps");
 
 // Tracks which cgroups have COW auto-tracking enabled
 // Key: 0, Value: 1 = enabled (all monitored cgroups auto-track forks)
@@ -161,25 +152,57 @@ static __always_inline int should_intercept(void)
 
     __u32 tgid = bpf_get_current_pid_tgid() >> 32;
 
-    // If process is in allowed list, always let it pass
+    // If process is in allowed list, always let it pass. This is a PERMANENT
+    // pass granted at resume/commit time: the process runs the whole epoch
+    // (and beyond) uninterrupted. Interception is re-armed at the next epoch
+    // boundary by deleting this entry (see rearm_intercept in bpf_loader.rs),
+    // giving per-epoch (not per-syscall) enforcement granularity.
     __u32 *allowed = bpf_map_lookup_elem(&allowed_pids, &tgid);
     if (allowed)
         return 0;
 
-    // Allow-once: let exactly one interceptable syscall pass (the restarted
-    // boundary syscall), then consume the entry so interception re-arms for any
-    // subsequent external syscall. Deterministic, no timer race.
-    __u32 *once = bpf_map_lookup_elem(&allow_once, &tgid);
-    if (once) {
-        bpf_map_delete_elem(&allow_once, &tgid);
-        return 0;
-    }
+    // NOTE: we deliberately do NOT pass merely because stopped_pids is set.
+    // A set mark means a group-directed SIGSTOP is already in flight for this
+    // tgid, but its sibling threads keep running until the stop actually lands.
+    // If such a sibling reaches an external syscall in that window and we
+    // returned 0 (pass) here, its irreversible effect would ESCAPE the freeze.
+    // Instead we still report "intercept": the hook proceeds to do_intercept(),
+    // which recognises the in-flight stop, SKIPS the duplicate event/SIGSTOP,
+    // and lets the caller return -ERESTARTSYS so the sibling's syscall is
+    // BLOCKED and auto-restarted after resume. (The resume path sets
+    // allowed_pids above, so a resumed process is passed there, not caught
+    // here.)
+    return 1;
+}
 
-    // If already stopped, don't intercept again
-    __u32 *val = bpf_map_lookup_elem(&stopped_pids, &tgid);
-    if (val)
+// Like should_intercept(), but for the exit-hold sentinel connect. The sentinel
+// is a cooperative "hold me at exit" marker, so it must fire even for a process
+// that already holds a NORMAL permanent allow (allowed_pids == 1) from an
+// earlier resume. Only a FULL release (allowed_pids == 2, granted by
+// continue/commit) lets the sentinel pass so the process can finally exit.
+// Still respects the enabled flag, cgroup membership, and the stopped mark
+// (so an already-held process is not re-stopped on the syscall auto-restart).
+static __always_inline int should_intercept_sentinel(void)
+{
+    if (!is_enabled())
+        return 0;
+    if (!check_cgroup())
         return 0;
 
+    __u32 tgid = bpf_get_current_pid_tgid() >> 32;
+
+    // Fully released (post continue/commit) -> let the sentinel pass.
+    __u32 *allowed = bpf_map_lookup_elem(&allowed_pids, &tgid);
+    if (allowed && *allowed == 2)
+        return 0;
+
+    // Like should_intercept(): do NOT pass merely because a stop is already in
+    // flight. Returning 1 routes the sentinel through do_intercept(), which
+    // dedups the in-flight stop (no second event/SIGSTOP) while the hook still
+    // returns -ERESTARTSYS — keeping the process HELD at its exit boundary
+    // instead of letting the sentinel slip past during the stop-propagation
+    // window. Only a FULL release (allowed_pids == 2, checked above) lets the
+    // sentinel through so the process can finally exit.
     return 1;
 }
 
@@ -192,12 +215,23 @@ static __always_inline int do_intercept(__u32 syscall_nr, __u32 event_type)
     __u32 tgid = pid_tgid >> 32;
     __u32 one = 1;
 
-    // Mark as stopped FIRST to prevent re-entry on signal delivery.
-    // Trade-off: a sibling thread in the same tgid that reaches an external
-    // syscall inside the tiny window between this update and the SIGSTOP taking
-    // effect will see the stopped mark and be let through (should_intercept
-    // returns false when stopped). The window is a few instructions wide and
-    // the whole tgid is about to stop anyway; accepted as negligible.
+    // If the tgid is ALREADY marked stopped, a group-directed SIGSTOP is
+    // already in flight (or in effect) for it. This call is therefore either a
+    // SIBLING thread that reached an external syscall during the
+    // stop-propagation window, or the initiating thread's own syscall being
+    // re-entered before the (asynchronous, irq_work-delivered) SIGSTOP landed.
+    // We must NOT emit a duplicate event or queue a second SIGSTOP (that would
+    // storm userspace and the signal path), but we MUST still block it: the
+    // caller returns -ERESTARTSYS unconditionally, so the syscall does not
+    // execute and is restarted once the process is resumed. This is what closes
+    // the window where a sibling's external syscall used to slip through while
+    // the stop was still propagating.
+    __u32 *already = bpf_map_lookup_elem(&stopped_pids, &tgid);
+    if (already)
+        return 0;
+
+    // First hook to catch this tgid: mark it stopped BEFORE notifying/stopping
+    // so any concurrent sibling hook takes the dedup path above.
     bpf_map_update_elem(&stopped_pids, &tgid, &one, BPF_ANY);
 
     // Emit event to userspace
@@ -331,11 +365,12 @@ SEC("lsm/socket_connect")
 int BPF_PROG(shadow_socket_connect, struct socket *sock,
              struct sockaddr *address, int addrlen)
 {
-    if (!should_intercept())
-        return 0;
-
-    // Check for exit-hold sentinel address: 192.0.2.255:65535
-    // This is used by libexithold.so (LD_PRELOAD) to signal process completion
+    // Check for exit-hold sentinel address FIRST: 192.0.2.255:65535.
+    // This is a cooperative marker from libexithold.so (LD_PRELOAD) signalling
+    // process completion. It is checked BEFORE should_intercept() so that it
+    // fires even for a process holding a normal permanent allow (allowed_pids
+    // == 1); only a full release (allowed_pids == 2) lets it pass. See
+    // should_intercept_sentinel().
     if (addrlen >= 16) { // sizeof(struct sockaddr_in)
         __u16 family = 0;
         __u16 port = 0;
@@ -345,12 +380,19 @@ int BPF_PROG(shadow_socket_connect, struct socket *sock,
         bpf_probe_read_kernel(&ip, 4, (void *)address + 4);
         // AF_INET=2, port=65535 (0xFFFF in network order), ip=192.0.2.255 (0xFF0200C0 on LE)
         if (family == 2 && port == 0xFFFF && ip == 0xFF0200C0) {
-            do_intercept(231, EVENT_EXIT_HOLD);
-            return -ERESTARTSYS;
+            if (should_intercept_sentinel()) {
+                do_intercept(231, EVENT_EXIT_HOLD);
+                return -ERESTARTSYS;
+            }
+            return 0;
         }
     }
 
-    // General case: classify by address family + AF_UNIX whitelist.
+    // General (non-sentinel) case: normal per-epoch enforcement.
+    if (!should_intercept())
+        return 0;
+
+    // Classify by address family + AF_UNIX whitelist.
     if (net_addr_should_block(address, addrlen)) {
         do_intercept(42, EVENT_NETWORK);
         return -ERESTARTSYS;
@@ -943,10 +985,10 @@ int BPF_PROG(shadow_sched_fork, struct task_struct *parent, struct task_struct *
 // ═══════════════════════════════════════════════════════════════
 // Process-exit cleanup - drop all per-tgid state when a process leaves.
 //
-// stopped_pids / allowed_pids / allow_once are keyed by tgid. Without cleanup,
-// a stale "allowed" (or "allow-once") flag would survive process death, and a
-// later pid-reuse inside a monitored cgroup could inherit it and be silently
-// exempt from interception. Fires on thread-group-leader exit only.
+// stopped_pids / allowed_pids are keyed by tgid. Without cleanup, a stale
+// "allowed" flag would survive process death, and a later pid-reuse inside a
+// monitored cgroup could inherit it and be silently exempt from interception.
+// Fires on thread-group-leader exit only.
 // ═══════════════════════════════════════════════════════════════
 SEC("tp_btf/sched_process_exit")
 int BPF_PROG(shadow_sched_exit, struct task_struct *task)
@@ -958,6 +1000,5 @@ int BPF_PROG(shadow_sched_exit, struct task_struct *task)
         return 0;
     bpf_map_delete_elem(&allowed_pids, &tgid);
     bpf_map_delete_elem(&stopped_pids, &tgid);
-    bpf_map_delete_elem(&allow_once, &tgid);
     return 0;
 }

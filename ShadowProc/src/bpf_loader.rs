@@ -105,8 +105,6 @@ pub struct BpfManager {
     cgroup_count_fd: i32,
     /// Raw fd of cow_enabled map
     cow_enabled_fd: i32,
-    /// Raw fd of allow_once map (deterministic single-syscall pass for resume)
-    allow_once_fd: i32,
     /// cgroup_map slot bookkeeping (add/remove with index recycling).
     cgroup_slots: Mutex<CgroupSlots>,
 }
@@ -125,7 +123,6 @@ impl BpfManager {
         let cgroup_map_fd = skel.maps().cgroup_map().as_fd().as_raw_fd();
         let cgroup_count_fd = skel.maps().cgroup_count().as_fd().as_raw_fd();
         let cow_enabled_fd = skel.maps().cow_enabled().as_fd().as_raw_fd();
-        let allow_once_fd = skel.maps().allow_once().as_fd().as_raw_fd();
 
         // Enable the interceptor
         let key: u32 = 0;
@@ -183,7 +180,6 @@ impl BpfManager {
             cgroup_map_fd,
             cgroup_count_fd,
             cow_enabled_fd,
-            allow_once_fd,
             cgroup_slots: Mutex::new(CgroupSlots {
                 used: HashMap::new(),
                 by_path: HashMap::new(),
@@ -328,36 +324,46 @@ impl BpfManager {
         Ok(())
     }
 
-    /// Resume a process (clear stopped state) WITHOUT permanently allowing it.
-    /// The process can be intercepted again on future syscalls.
-    /// Used for speculative execution where we need multiple freeze/resume cycles.
-    ///
-    /// Strategy: mark the tgid in `allow_once` so the kernel lets EXACTLY the
-    /// restarted boundary syscall pass, then consumes the flag in
-    /// should_intercept() — so the very next external syscall is intercepted
-    /// again. This is deterministic: it replaces the old "add to allowed_pids,
-    /// sleep 100ms, remove" timer, which was racy (the restart could miss the
-    /// window, or a different syscall could slip through inside it).
-    /// Flow: add to allow_once -> delete from stopped_pids -> caller SIGCONTs.
-    pub fn clear_stopped_only(&self, tgid: u32) -> Result<()> {
+    /// Fully release a tgid: like `clear_stopped`, but marks allowed_pids with
+    /// value 2 instead of 1. Value 2 means EVEN the exit-hold sentinel
+    /// (192.0.2.255:65535) is let through, so the process can run to completion
+    /// and actually exit. A normal `clear_stopped` (value 1) still stops the
+    /// process at its exit-hold sentinel. Used by continue/commit paths.
+    /// Flow: set allowed_pids=2 → delete from stopped_pids → caller SIGCONTs.
+    pub fn clear_stopped_full(&self, tgid: u32) -> Result<()> {
         let key_bytes = tgid.to_ne_bytes();
-        let val: u32 = 1;
+        let val: u32 = 2;
         let val_bytes = val.to_ne_bytes();
 
         unsafe {
-            // Step 1: Allow exactly one interceptable (the restarted) syscall to
-            // pass. The kernel deletes this entry the first time it is honored.
             libc_bpf_map_update_elem(
-                self.allow_once_fd,
+                self.allowed_pids_fd,
                 key_bytes.as_ptr() as *const _,
                 val_bytes.as_ptr() as *const _,
             );
-
-            // Step 2: Clear the stopped mark so the restart isn't short-circuited
-            // by the stopped_pids check.
+        }
+        unsafe {
             libc_bpf_map_delete_elem(self.stopped_pids_fd, key_bytes.as_ptr() as *const _);
         }
 
+        Ok(())
+    }
+
+    /// Re-arm interception for a tgid at an epoch boundary by removing its
+    /// PERMANENT allow_pids entry. After this, the tgid's next interceptable
+    /// syscall is caught again.
+    ///
+    /// This is the counterpart of `clear_stopped`'s permanent allow: resume /
+    /// commit grant a permanent pass so the process runs the whole epoch
+    /// uninterrupted (per-epoch, not per-syscall, granularity); this call, made
+    /// when a NEW epoch begins, revokes that pass so the process is guarded
+    /// again. A freshly cloned candidate has a new tgid and is armed by default,
+    /// so re-arming mainly matters for a pid reused as a new epoch's baseline.
+    pub fn rearm_intercept(&self, tgid: u32) -> Result<()> {
+        let key_bytes = tgid.to_ne_bytes();
+        unsafe {
+            libc_bpf_map_delete_elem(self.allowed_pids_fd, key_bytes.as_ptr() as *const _);
+        }
         Ok(())
     }
 

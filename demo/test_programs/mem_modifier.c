@@ -5,9 +5,10 @@
  *
  * Flow:
  *   Phase 1: Write a marker file with the address of global variables
- *            (for external verification), then trigger stdout write
- *            to get frozen by ShadowProc (allows orchestrator to call
- *            begin_speculative before the program modifies memory).
+ *            (for external verification), then block on read() from stdin
+ *            (a NON-intercepted boundary) so the orchestrator can spec_fork
+ *            a pristine baseline + COW candidate before any memory is
+ *            modified, then feed one byte to release the candidate.
  *
  *   Phase 2: After being resumed, modify global variables in memory.
  *
@@ -68,20 +69,20 @@ int main(int argc, char *argv[]) {
     write(mfd, info, len);
     close(mfd);
 
-    /* ---- Trigger first freeze: connect() to a non-local address ---- */
-    /* ShadowProc no longer intercepts write() to stdout/stderr; the
-     * process is frozen at network IPC instead. The orchestrator should
-     * call begin_speculative at this point, then resume us with resume_pid. */
+    /* ---- First pause point: block on read() from stdin ---- */
+    /* The first pause MUST NOT be an intercepted syscall (e.g. connect): a
+     * speculative candidate resumed with a plain SIGCONT here would just
+     * re-trigger the interception and freeze again before it could modify
+     * memory. read() is NOT intercepted, so instead we park here. The
+     * orchestrator freezes us (SIGSTOP) to spec_fork a pristine baseline + COW
+     * candidate, resumes the candidate with a plain SIGCONT, then feeds one
+     * byte so the candidate's read() returns and it runs straight into Phase 2.
+     * The candidate's own connect() in Phase 3 is the boundary that then gets
+     * intercepted (the second freeze). */
     {
-        int sock0 = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-        if (sock0 >= 0) {
-            struct sockaddr_in addr0;
-            memset(&addr0, 0, sizeof(addr0));
-            addr0.sin_family = AF_INET;
-            addr0.sin_port = htons(12345);
-            inet_pton(AF_INET, "192.0.2.2", &addr0.sin_addr);
-            connect(sock0, (struct sockaddr *)&addr0, sizeof(addr0));
-            close(sock0);
+        char c;
+        if (read(0, &c, 1) < 0) {
+            /* stdin closed unexpectedly — proceed anyway */
         }
     }
 

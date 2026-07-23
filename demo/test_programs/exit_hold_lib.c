@@ -52,8 +52,14 @@ static void __shadow_exit_hold(void) {
     }
 
     /*
-     * Step 2: Sleep 200ms to ensure any temporary BPF allow
-     * (from resume_pid's 100ms window) has expired.
+     * Step 2: Small settle delay.
+     *
+     * The connect() below goes to the exit-hold sentinel (192.0.2.255:65535),
+     * which ShadowProc's BPF intercepts SPECIALLY: the sentinel fires even when
+     * the process already holds a normal permanent allow (allowed_pids == 1)
+     * from an earlier resume. Only a FULL release (allowed_pids == 2, granted
+     * by continue/commit) lets it pass. So this always stops the process at
+     * exit until the orchestrator explicitly decides to let it exit.
      */
     usleep(200000);
 

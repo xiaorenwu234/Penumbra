@@ -509,6 +509,75 @@ impl SocketServer {
                 }
             }
 
+            // One-shot speculative fork: freeze the target, inject a COW clone,
+            // and wake the candidate with a plain SIGCONT — all in a single
+            // call. Deliberately does NOT touch the eBPF allow maps: the
+            // candidate is a fresh tgid armed by default and frozen at a
+            // non-intercepted boundary, so it needs no allow-pass; its later
+            // intercepted syscalls are caught normally. The baseline stays
+            // frozen as the pristine rollback copy. Collapses the old
+            // freeze_by_cgroup -> begin_speculative -> resume_pid sequence.
+            "spec_fork" => {
+                let Some(pid) = req.pid else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("pid required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                // Phase 1 (locked): SIGSTOP + register the target as frozen so
+                // the injection has a stopped boundary and register_candidate
+                // can build the candidate's frozen record.
+                if let Err(e) = { process_manager.lock().unwrap().freeze_pid(pid) } {
+                    return Response {
+                        status: "error".into(),
+                        message: Some(format!("spec_fork freeze failed: {}", e)),
+                        frozen: None,
+                        pids: None,
+                    };
+                }
+                // Phase 2 (self-locking): the slow ptrace clone injection.
+                match ProcessManager::begin_speculative_unlocked(process_manager, pid) {
+                    Ok(candidate) => {
+                        // Phase 3 (locked): wake the candidate with a raw
+                        // SIGCONT, no eBPF allow maps touched.
+                        let mut pm = process_manager.lock().unwrap();
+                        match pm.resume_candidate_raw(candidate) {
+                            Ok(()) => Response {
+                                status: "ok".into(),
+                                message: Some(format!(
+                                    "spec_fork: froze baseline pid {}, forked candidate pid {} and resumed it (no eBPF allow)",
+                                    pid, candidate
+                                )),
+                                frozen: None,
+                                pids: Some(vec![candidate]),
+                            },
+                            Err(e) => Response {
+                                status: "error".into(),
+                                message: Some(format!(
+                                    "spec_fork: candidate {} forked but resume failed: {}",
+                                    candidate, e
+                                )),
+                                frozen: None,
+                                pids: Some(vec![candidate]),
+                            },
+                        }
+                    }
+                    Err(e) => {
+                        // Injection failed: unfreeze the baseline we stopped, so
+                        // this one-shot command leaves no stuck frozen process.
+                        let _ = process_manager.lock().unwrap().resume_candidate_raw(pid);
+                        Response {
+                            status: "error".into(),
+                            message: Some(format!("spec_fork inject failed: {}", e)),
+                            frozen: None,
+                            pids: None,
+                        }
+                    }
+                }
+            }
+
             "commit_by_cgroup" => {
                 let Some(cgroup_id) = &req.cgroup_id else {
                     return Response {

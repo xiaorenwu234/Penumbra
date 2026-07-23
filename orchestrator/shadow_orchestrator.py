@@ -383,6 +383,75 @@ class ShadowOrchestrator:
 
         return {"resumed": resumed, "killed": killed}
 
+    def _fail_closed(self, cgroup_id: str, state, reason: str,
+                     total_events: int = 0, stop_observe: bool = False) -> dict:
+        """Abort an in-flight commit and drive the workload into a CONTAINED state.
+
+        Called when a security-critical commit step fails (freeze, whitelist
+        install, or ShadowFS commit). Rather than releasing processes against an
+        un-frozen / un-enforced / un-committed state (fail OPEN), we discard the
+        speculative work and keep the workload contained (fail CLOSED): stop
+        observation (if still running), roll back the filesystem, roll back /
+        kill the process layer for every affected cgroup, discard buffered
+        stdout, and drop any deferred releases.
+
+        Returns an error dict with decision="fail_closed".
+        """
+        log.error("  FAIL-CLOSED: %s (cgroup=%s) - containing workload",
+                  reason, cgroup_id)
+
+        # Stop observation if it is still running (the freeze-failure path aborts
+        # before Step 2 has stopped it).
+        if stop_observe and state is not None:
+            try:
+                self.observe_client.request({
+                    "action": "stop_observe",
+                    "cgroup_id": state["cgroup_inode"],
+                })
+            except Exception as e:  # noqa: BLE001 - best-effort containment
+                log.warning("  fail-closed: stop_observe failed: %s", e)
+
+        # Roll back the filesystem (discard speculative changes).
+        fs_resp = self.fs_client.request({
+            "action": "rollback",
+            "cgroup_id": cgroup_id,
+        })
+        affected = []
+        if fs_resp.get("status") == "ok":
+            affected = fs_resp.get("affected", []) or []
+            log.info("  fail-closed: ShadowFS rollback ok, affected: %s", affected)
+        else:
+            log.error("  fail-closed: ShadowFS rollback FAILED: %s",
+                      fs_resp.get("message"))
+
+        # Roll back / kill the process layer for all affected cgroups.
+        total_killed: List[int] = []
+        total_resumed: List[int] = []
+        kill_cgroups = affected if affected else [cgroup_id]
+        for cg in kill_cgroups:
+            res = self._rollback_proc(cg)
+            total_resumed.extend(res["resumed"])
+            total_killed.extend(res["killed"])
+
+        # Discard buffered stdout + drop deferred releases for the undone cgroups.
+        for cg in kill_cgroups:
+            self._discard_output(cg)
+        with self._pending_lock:
+            for cg in kill_cgroups:
+                self._pending_release.discard(cg)
+
+        # Cleanup observation state.
+        self._observe_state.pop(cgroup_id, None)
+
+        return {
+            "status": "error",
+            "decision": "fail_closed",
+            "reason": reason,
+            "total_events": total_events,
+            "killed_pids": total_killed,
+            "resumed_pids": total_resumed,
+        }
+
     def rollback(self, cgroup_id: str) -> dict:
         """
         Rollback changes for a cgroup (with cascade).
@@ -720,11 +789,17 @@ class ShadowOrchestrator:
             "cgroup_id": cgroup_id,
         })
         if freeze_resp.get("status") != "ok":
-            log.warning("  Freeze returned: %s (continuing anyway)",
-                       freeze_resp.get("message"))
-        else:
-            frozen_pids = freeze_resp.get("pids", [])
-            log.info("  Froze %d processes: %s", len(frozen_pids), frozen_pids)
+            # FAIL CLOSED: without a successful freeze there is no quiescent
+            # snapshot to audit, and letting the workload keep running (then
+            # committing/releasing it) would let unaudited, irreversible effects
+            # escape. Abort and contain instead of continuing.
+            return self._fail_closed(
+                cgroup_id, state,
+                f"freeze_by_cgroup failed: {freeze_resp.get('message')}",
+                stop_observe=True,
+            )
+        frozen_pids = freeze_resp.get("pids", [])
+        log.info("  Froze %d processes: %s", len(frozen_pids), frozen_pids)
 
         # ── Step 2: Stop observation (ensures log is complete) ──
         log.info("  Step 2: Stopping observation...")
@@ -769,8 +844,15 @@ class ShadowOrchestrator:
                 log.info("  Whitelist installed: %s rules",
                          wl_resp.get("rules_added"))
             else:
-                log.warning("  Whitelist install failed: %s",
-                           wl_resp.get("message"))
+                # FAIL CLOSED: the whitelist is the enforcement filter that
+                # governs the process once released. Releasing it without the
+                # filter installed would run the workload unconstrained, so
+                # abort the commit and contain instead of only warning.
+                return self._fail_closed(
+                    cgroup_id, state,
+                    f"whitelist install failed: {wl_resp.get('message')}",
+                    total_events=total_events,
+                )
 
             # Commit filesystem changes
             buffered = ""
@@ -778,10 +860,17 @@ class ShadowOrchestrator:
                 "action": "commit",
                 "cgroup_id": cgroup_id,
             })
-            if fs_resp.get("status") == "ok":
-                log.info("  ShadowFS commit successful")
-            else:
-                log.error("  ShadowFS commit failed: %s", fs_resp.get("message"))
+            if fs_resp.get("status") != "ok":
+                # FAIL CLOSED: if the filesystem changes did not commit, the
+                # on-disk state is not the audited state. Releasing the frozen
+                # processes to run against it would be fail-open, so abort and
+                # contain: roll back the filesystem and the process layer.
+                return self._fail_closed(
+                    cgroup_id, state,
+                    f"ShadowFS commit failed: {fs_resp.get('message')}",
+                    total_events=total_events,
+                )
+            log.info("  ShadowFS commit successful")
 
             # Release frozen processes only when all upstream dependencies
             # are committed; otherwise defer until a later upstream commit
@@ -870,6 +959,26 @@ class ShadowOrchestrator:
             }
 
     @staticmethod
+    def _normalize_fs_prefix(pattern: str) -> str:
+        """Normalize a policy path prefix to the canonical form used by both the
+        audit engine and the BPF enforcer.
+
+        The enforcer probes prefixes of the resolved absolute path at '/'
+        boundaries (see bpf/cri.bpf.h), so an installed key / audit pattern must
+        match those candidates byte-for-byte. We strip trailing slashes (a lone
+        "/" is left as the root marker) so "/tmp/" and "/tmp" both become
+        "/tmp". Empty patterns (match-any) are preserved. Relative patterns are
+        left unchanged; since canonical paths are absolute they simply will not
+        match (fail-closed).
+        """
+        if not pattern:
+            return ""
+        p = pattern
+        while len(p) > 1 and p.endswith("/"):
+            p = p[:-1]
+        return p
+
+    @staticmethod
     def _convert_policy_to_audit_rules(allowed_ops: List[Dict]) -> List[Dict]:
         """
         Convert user-facing policy format to ShadowObserve audit rules.
@@ -895,7 +1004,8 @@ class ShadowOrchestrator:
             rules.append({
                 "event_type": event_num,
                 "action": op.get("action", "allow"),
-                "path_pattern": op.get("path_pattern", ""),
+                "path_pattern": ShadowOrchestrator._normalize_fs_prefix(
+                    op.get("path_pattern", "")),
             })
         return rules
 
@@ -924,7 +1034,8 @@ class ShadowOrchestrator:
             event_num = EVENT_TYPE_MAP.get(event_str, 0xFFFF)
             whitelist.append({
                 "event_type": event_num,
-                "path_prefix": op.get("path_pattern", ""),
+                "path_prefix": ShadowOrchestrator._normalize_fs_prefix(
+                    op.get("path_pattern", "")),
             })
         return whitelist
 
