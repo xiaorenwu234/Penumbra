@@ -1859,12 +1859,40 @@ func (b *Backend) RollbackLastEntry(cgroupID string) {
 	b.rollbackLastInternal(cgroupID)
 }
 
+// rollbackBlockedBy returns the first agent id in `ids` whose promotion has
+// STARTED (State >= Finalizing) and is therefore no longer safely rollable:
+// some of its writes may already be published to the real workspace with their
+// undo-log entries removed, so undoing would leave a torn, unrecoverable
+// state. Returns "" if none. Must be called with b.mu held.
+//
+// This is the AUTHORITATIVE rollback gate. It lives inside the *Internal
+// executors (rollbackInternal / rollbackEpochInternal / rollbackLastInternal)
+// so that BOTH live apply AND WAL replay enforce the identical rule. In
+// particular it closes the race where a lower-seq commit is ordered before a
+// rollback: the commit applies first and moves an agent into Finalizing, and
+// the later rollback record — already durable — is then refused / no-op'd here
+// rather than corrupting the published state.
+func (b *Backend) rollbackBlockedBy(ids map[string]struct{}) string {
+	for id := range ids {
+		if a := b.agents[id]; a != nil && a.State >= Finalizing {
+			return id
+		}
+	}
+	return ""
+}
+
 // rollbackLastInternal performs the in-memory + disk effects of
 // RollbackLastEntry without touching the WAL. Must be called with b.mu
 // held. Used both by RollbackLastEntry and by replayWAL.
 func (b *Backend) rollbackLastInternal(cgroupID string) {
 	agent, ok := b.agents[cgroupID]
 	if !ok || len(agent.UndoLog) == 0 {
+		return
+	}
+	// Authoritative guard: once promotion has started this agent cannot be
+	// rolled back. Safe no-op (this executor is void and shared with replay).
+	if agent.State >= Finalizing {
+		log.Printf("[backend] RollbackLastEntry refused: agent=%q is %s (promotion started)", cgroupID, agent.State)
 		return
 	}
 	last := agent.UndoLog[len(agent.UndoLog)-1]
@@ -2031,6 +2059,12 @@ func (b *Backend) rollbackEpochInternal(cgroupID string) {
 	if !ok {
 		return
 	}
+	// Authoritative guard: once promotion has started this agent cannot be
+	// rolled back. Safe no-op (this executor is void and shared with replay).
+	if agent.State >= Finalizing {
+		log.Printf("[backend] RollbackEpoch refused: agent=%q is %s (promotion started)", cgroupID, agent.State)
+		return
+	}
 	mark := agent.EpochStartSeq
 	// Partition the undo log: keep pre-epoch entries, collect epoch entries
 	// (Seq > mark) to undo.
@@ -2110,21 +2144,15 @@ func (b *Backend) RollbackWithAffected(cgroupID string) ([]string, error) {
 		log.Printf("[backend] Rollback: agent %q not found, no-op", cgroupID)
 		return nil, nil
 	}
-	// Refuse rollback once promotion has STARTED for the target or for any
-	// agent its rollback would cascade into. Beyond AuthorizedPending (i.e.
-	// Finalizing/Finalized) some of the agent's writes may already be published
-	// to the real workspace, with their undo-log entries removed, so a rollback
-	// could no longer restore the pre-epoch state -- it would leave the
-	// workspace in a torn, unrecoverable state. The caller must instead drive
-	// the epoch to completion via retry_finalize. (An AuthorizedPending agent
-	// has promoted nothing yet -- its undo log is intact -- so it stays safely
-	// rollable.)
-	for id := range b.reachableFrom(cgroupID) {
-		if a := b.agents[id]; a != nil && a.State >= Finalizing {
-			st := a.State
-			b.mu.Unlock()
-			return nil, fmt.Errorf("rollback refused: agent %q is %s (promotion started; published state cannot be undone)", id, st)
-		}
+	// Fast-path pre-check (before allocating a seq / writing WAL): refuse an
+	// obviously-blocked rollback early. This is only an optimization -- the
+	// AUTHORITATIVE gate is inside rollbackInternal, which also catches the
+	// race where a lower-seq commit moves an agent to Finalizing after this
+	// check but before apply.
+	if blk := b.rollbackBlockedBy(b.reachableFrom(cgroupID)); blk != "" {
+		st := b.agents[blk].State
+		b.mu.Unlock()
+		return nil, fmt.Errorf("rollback refused: agent %q is %s (promotion started; published state cannot be undone)", blk, st)
 	}
 	seqNum := b.nextSeq()
 	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "rollback"}
@@ -2189,6 +2217,16 @@ func (b *Backend) rollbackInternal(cgroupID string) error {
 		return nil
 	}
 	affected := b.reachableFrom(cgroupID)
+	// Authoritative guard (shared by live apply AND WAL replay): refuse if the
+	// target or ANY agent this rollback would cascade into has entered
+	// Finalizing/Finalized. On the live path this returns an error; on replay
+	// the return is ignored, so a durable rollback record that raced a
+	// lower-seq commit becomes a safe no-op instead of corrupting the
+	// already-published state.
+	if blk := b.rollbackBlockedBy(affected); blk != "" {
+		log.Printf("[backend] Rollback refused: agent=%q is %s (promotion started; published state cannot be undone)", blk, b.agents[blk].State)
+		return fmt.Errorf("rollback refused: agent %q is %s (promotion started; published state cannot be undone)", blk, b.agents[blk].State)
+	}
 	memberList := make([]string, 0, len(affected))
 	for id := range affected {
 		memberList = append(memberList, id)

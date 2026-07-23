@@ -2090,3 +2090,47 @@ func TestPromotionDeferredUntilUpstreamFinalized(t *testing.T) {
 		t.Error("B should finalize once upstream A is finalized")
 	}
 }
+
+// TestRollbackInternalAuthoritativeGuard exercises the guard where it is
+// AUTHORITATIVE -- inside rollbackInternal, the executor shared by live apply
+// and WAL replay. A Finalizing agent (promotion started) must be refused
+// in-place, so a durable rollback record that raced a commit becomes a safe
+// no-op on replay rather than corrupting published state. Skipped as root.
+func TestRollbackInternalAuthoritativeGuard(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	sub, fail, heal := roDir(t, trackedDir, "sub")
+	defer heal()
+	f := filepath.Join(sub, "f.txt")
+	writeOverlay(t, b, agentA, f, []byte("v"))
+
+	fail()
+	if _, err := b.Commit(agentA); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	b.mu.Lock()
+	if st := b.agents[agentA].State; st != Finalizing {
+		b.mu.Unlock()
+		t.Fatalf("expected Finalizing, got %v", st)
+	}
+	// Invoke the authoritative executor exactly as replayWAL would.
+	err := b.rollbackInternal(agentA)
+	b.mu.Unlock()
+	if err == nil {
+		t.Fatal("rollbackInternal must refuse a Finalizing agent (authoritative guard)")
+	}
+	if b.AgentLen(agentA) == 0 {
+		t.Error("recovery state must be preserved after the refused rollback")
+	}
+	heal()
+	if _, err := b.RetryFinalize(agentA); err != nil {
+		t.Fatalf("RetryFinalize: %v", err)
+	}
+	if !b.CanRelease(agentA) {
+		t.Error("agent should finalize after fault cleared")
+	}
+}
