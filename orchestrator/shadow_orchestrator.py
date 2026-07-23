@@ -32,7 +32,7 @@ import threading
 import signal
 import tempfile
 import time
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from session_proxy import SessionProxy
 
@@ -203,24 +203,37 @@ class ShadowOrchestrator:
                  cgroup_id, output_file)
         return {"status": "ok", "output_file": output_file}
 
-    def _flush_output(self, cgroup_id: str) -> str:
-        """Read and remove the buffered stdout for a cgroup. Returns the content."""
-        output_file = self._output_buffers.pop(cgroup_id, None)
+    def _flush_output(self, cgroup_id: str) -> Tuple[bool, str]:
+        """Read and remove the buffered stdout for a cgroup.
+
+        Returns (ok, content). On a genuine read error (OSError) the buffer
+        record is PRESERVED (not removed) and ok=False, so the caller can skip
+        acking the release and retry later. A missing buffer (never registered
+        or file already gone) is treated as success with empty content. The
+        record and on-disk file are only removed after a SUCCESSFUL read.
+        """
+        output_file = self._output_buffers.get(cgroup_id)
         if not output_file:
-            return ""
+            return True, ""
         try:
             with open(output_file, "r", errors="replace") as f:
                 content = f.read()
         except FileNotFoundError:
-            return ""
+            # Nothing to release; drop the stale record.
+            self._output_buffers.pop(cgroup_id, None)
+            return True, ""
         except OSError as e:
-            log.warning("Failed to read buffered stdout %s: %s", output_file, e)
-            return ""
+            # Transient read failure: keep the record so a retry can flush it.
+            log.warning("Failed to read buffered stdout %s: %s -- preserving "
+                        "buffer for retry", output_file, e)
+            return False, ""
+        # Read succeeded: now it is safe to remove the record and unlink.
+        self._output_buffers.pop(cgroup_id, None)
         try:
             os.unlink(output_file)
         except OSError:
             pass
-        return content
+        return True, content
 
     def _discard_output(self, cgroup_id: str) -> None:
         """Discard the buffered stdout for a cgroup (used on rollback)."""
@@ -321,11 +334,15 @@ class ShadowOrchestrator:
                     if self._fs_can_release(cg):
                         log.info("  finalize-retry: cgroup=%s reached Finalized "
                                  "-- releasing", cg)
-                        self._release_proc(cg)
-                        with self._pending_lock:
-                            self._pending_release.discard(cg)
+                        ok, _ = self._release_proc(cg)
+                        if ok:
+                            with self._pending_lock:
+                                self._pending_release.discard(cg)
+                        else:
+                            log.warning("  finalize-retry: release of cgroup=%s "
+                                        "failed -- keeping pending for retry", cg)
 
-    def _release_proc(self, cgroup_id: str) -> str:
+    def _release_proc(self, cgroup_id: str) -> Tuple[bool, str]:
         """
         Resume ShadowProc's frozen processes for a cgroup (letting their
         held IPC / network / exit operations proceed), flush the cgroup's
@@ -333,34 +350,70 @@ class ShadowOrchestrator:
         so it can drop the finalized agent's terminal record.
 
         MUST only be called for a cgroup ShadowFS has confirmed Finalized
-        (see _fs_can_release). Returns the flushed stdout content.
+        (see _fs_can_release).
+
+        Returns (ok, stdout). FAIL CLOSED: if ShadowProc cannot be queried or
+        resumed, or the buffered stdout cannot be read, this returns
+        (False, "") WITHOUT acking the release, WITHOUT consuming the output
+        buffer, and WITHOUT removing pending state -- so the caller keeps the
+        cgroup fenced and parked for retry. ack_release is sent ONLY when both
+        the process resume AND the output flush succeed. This prevents the
+        state where processes are still frozen but ShadowFS has already dropped
+        the Finalized terminal record.
         """
-        frozen_resp = self.proc_client.request({
-            "action": "list_frozen",
-            "cgroup_id": cgroup_id,
-        })
-        if frozen_resp.get("status") == "ok" and frozen_resp.get("frozen"):
-            frozen_count = len(frozen_resp["frozen"])
-            log.info("  Releasing %d frozen process(es) for cgroup=%s",
-                     frozen_count, cgroup_id)
-            resume_resp = self.proc_client.request({
-                "action": "continue_by_cgroup",
+        # Step 1: query frozen processes. A failed/unreachable query means we
+        # cannot know the process state -- do not proceed.
+        try:
+            frozen_resp = self.proc_client.request({
+                "action": "list_frozen",
                 "cgroup_id": cgroup_id,
             })
-            if resume_resp.get("status") == "ok":
-                log.info("  Resumed PIDs: %s", resume_resp.get("pids", []))
-            else:
-                log.warning("  Resume failed: %s", resume_resp.get("message"))
+        except Exception as e:  # noqa: BLE001 - fail closed
+            log.error("  list_frozen(%s) unreachable: %s -- NOT releasing/acking",
+                      cgroup_id, e)
+            return False, ""
+        if not isinstance(frozen_resp, dict) or frozen_resp.get("status") != "ok":
+            log.error("  list_frozen(%s) failed: %r -- NOT releasing/acking",
+                      cgroup_id, frozen_resp)
+            return False, ""
 
-        buffered = self._flush_output(cgroup_id)
+        # Step 2: resume the frozen processes (if any). A resume failure leaves
+        # them frozen, so we must NOT ack the release.
+        frozen = frozen_resp.get("frozen") or []
+        if frozen:
+            log.info("  Releasing %d frozen process(es) for cgroup=%s",
+                     len(frozen), cgroup_id)
+            try:
+                resume_resp = self.proc_client.request({
+                    "action": "continue_by_cgroup",
+                    "cgroup_id": cgroup_id,
+                })
+            except Exception as e:  # noqa: BLE001 - fail closed
+                log.error("  Resume(%s) unreachable: %s -- NOT acking "
+                          "(processes stay frozen; will retry)", cgroup_id, e)
+                return False, ""
+            if not isinstance(resume_resp, dict) or resume_resp.get("status") != "ok":
+                log.error("  Resume failed for cgroup=%s: %r -- NOT acking "
+                          "(processes stay frozen; will retry)",
+                          cgroup_id, resume_resp)
+                return False, ""
+            log.info("  Resumed PIDs: %s", resume_resp.get("pids", []))
+
+        # Step 3: flush buffered stdout. A read failure preserves the buffer
+        # (see _flush_output) and blocks the ack so nothing is lost.
+        ok, buffered = self._flush_output(cgroup_id)
+        if not ok:
+            log.error("  Output flush failed for cgroup=%s -- NOT acking "
+                      "(buffer preserved; will retry)", cgroup_id)
+            return False, ""
         if buffered:
             log.info("  Releasing %d bytes of buffered stdout for cgroup=%s",
                      len(buffered), cgroup_id)
 
-        # Processes resumed and output flushed: the external effects are now
-        # out, so tell ShadowFS it may clean up the finalized terminal record.
+        # Processes resumed AND output read: the external effects are now out,
+        # so it is finally safe to tell ShadowFS to drop the terminal record.
         self._fs_ack_release(cgroup_id)
-        return buffered
+        return True, buffered
 
     def _try_release_pending(self) -> None:
         """
@@ -379,9 +432,13 @@ class ShadowOrchestrator:
                 if self._fs_can_release(cg):
                     log.info("  Upstream now finalized \u2014 releasing deferred "
                              "cgroup=%s", cg)
-                    self._release_proc(cg)
-                    with self._pending_lock:
-                        self._pending_release.discard(cg)
+                    ok, _ = self._release_proc(cg)
+                    if ok:
+                        with self._pending_lock:
+                            self._pending_release.discard(cg)
+                    else:
+                        log.warning("  Release of deferred cgroup=%s failed -- "
+                                    "keeping pending for retry", cg)
 
     def commit(self, cgroup_id: str) -> dict:
         """
@@ -430,11 +487,27 @@ class ShadowOrchestrator:
             # Step 2: Release ONLY if the agent reached Finalized. The gate is
             # re-queried (fail-closed) rather than trusting the commit echo.
             if self._fs_can_release(cgroup_id):
-                fs_resp["decision"] = "finalized"
-                fs_resp["stdout"] = self._release_proc(cgroup_id)
-                fs_resp["released"] = True
-                with self._pending_lock:
-                    self._pending_release.discard(cgroup_id)
+                released_ok, stdout = self._release_proc(cgroup_id)
+                if released_ok:
+                    fs_resp["decision"] = "finalized"
+                    fs_resp["stdout"] = stdout
+                    fs_resp["released"] = True
+                    with self._pending_lock:
+                        self._pending_release.discard(cgroup_id)
+                else:
+                    # ShadowFS finalized the agent, but ShadowProc could not be
+                    # queried/resumed or the output could not be read. Nothing
+                    # was acked and the output buffer is intact; keep the cgroup
+                    # fenced and parked so the retry loop finishes the release.
+                    with self._pending_lock:
+                        self._pending_release.add(cgroup_id)
+                    log.warning("  cgroup=%s finalized but process/output release "
+                                "failed -- keeping fenced, deferred for retry",
+                                cgroup_id)
+                    fs_resp["decision"] = "authorized_pending"
+                    fs_resp["stdout"] = ""
+                    fs_resp["released"] = False
+                    fs_resp["deferred"] = True
             else:
                 with self._pending_lock:
                     self._pending_release.add(cgroup_id)
@@ -1011,8 +1084,17 @@ class ShadowOrchestrator:
             # unblocks this cgroup (keeps IPC / stdout held).
             released = False
             if self._fs_can_release(cgroup_id):
-                buffered = self._release_proc(cgroup_id)
-                released = True
+                released, buffered = self._release_proc(cgroup_id)
+                if not released:
+                    # Finalized in ShadowFS but ShadowProc query/resume or the
+                    # output read failed: nothing acked, buffer preserved. Keep
+                    # the cgroup fenced and parked so the retry loop finishes.
+                    buffered = ""
+                    with self._pending_lock:
+                        self._pending_release.add(cgroup_id)
+                    log.warning("  cgroup=%s finalized but process/output release "
+                                "failed -- keeping fenced, deferred for retry",
+                                cgroup_id)
             else:
                 with self._pending_lock:
                     self._pending_release.add(cgroup_id)
