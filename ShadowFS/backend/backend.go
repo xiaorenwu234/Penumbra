@@ -292,7 +292,7 @@ func (b *Backend) replayWAL(records []WALRecord) {
 			case "commit_epoch":
 				b.commitEpochInternal(rec.CgroupID)
 			case "rollback_epoch":
-				b.rollbackEpochInternal(rec.CgroupID)
+				_ = b.rollbackEpochInternal(rec.CgroupID)
 			case "read_dep":
 				b.replayReadDep(rec.CgroupID, rec.Entry.OrigPath)
 			case "release_ack":
@@ -2019,9 +2019,13 @@ func (b *Backend) commitEpochInternal(cgroupID string) {
 // current epoch (Seq > EpochStartSeq), in reverse seq order, then clears the
 // epoch marker. Pre-epoch state is left intact. Unlike the whole-agent
 // Rollback, this is SINGLE-AGENT scoped: it does NOT cascade to dependent
-// agents (an epoch is a private speculative batch of one session). No-op if
-// no epoch is open.
-func (b *Backend) RollbackEpoch(cgroupID string) {
+// agents (an epoch is a private speculative batch of one session).
+//
+// Returns nil on success (including the no-open-epoch no-op). Returns an error
+// if the epoch's promotion has already started (State >= Finalizing): the
+// published file state can no longer be undone, so the caller (orchestrator)
+// MUST NOT roll back the corresponding process/network state either.
+func (b *Backend) RollbackEpoch(cgroupID string) error {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
@@ -2030,7 +2034,16 @@ func (b *Backend) RollbackEpoch(cgroupID string) {
 	if !ok || !agent.EpochOpen {
 		b.mu.Unlock()
 		log.Printf("[backend] RollbackEpoch: agent %q has no open epoch, no-op", cgroupID)
-		return
+		return nil
+	}
+	// Fast-path pre-check: refuse an obviously-blocked rollback before writing
+	// a WAL record. The authoritative gate is in rollbackEpochInternal, which
+	// also catches the race where a lower-seq commit finalizes after this
+	// check but before apply.
+	if agent.State >= Finalizing {
+		st := agent.State
+		b.mu.Unlock()
+		return fmt.Errorf("rollback_epoch refused: agent %q is %s (promotion started; published state cannot be undone)", cgroupID, st)
 	}
 	seqNum := b.nextSeq()
 	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "rollback_epoch"}
@@ -2039,7 +2052,7 @@ func (b *Backend) RollbackEpoch(cgroupID string) {
 	if err := <-b.submitWAL(rec); err != nil {
 		log.Printf("[backend] RollbackEpoch WAL: %v", err)
 		b.applyTurnAbort(seqNum)
-		return
+		return err
 	}
 
 	b.mu.Lock()
@@ -2048,22 +2061,24 @@ func (b *Backend) RollbackEpoch(cgroupID string) {
 		b.applyTurnDone(seqNum)
 		b.mu.Unlock()
 	}()
-	b.rollbackEpochInternal(cgroupID)
+	return b.rollbackEpochInternal(cgroupID)
 }
 
 // rollbackEpochInternal performs the in-memory + disk effects of
 // RollbackEpoch without touching the WAL. Must be called with b.mu held.
-// Used both by RollbackEpoch and by replayWAL.
-func (b *Backend) rollbackEpochInternal(cgroupID string) {
+// Used both by RollbackEpoch and by replayWAL. Returns an error (without
+// mutating anything) when the authoritative guard refuses the rollback; on
+// replay the caller ignores the return so the durable record is a safe no-op.
+func (b *Backend) rollbackEpochInternal(cgroupID string) error {
 	agent, ok := b.agents[cgroupID]
 	if !ok {
-		return
+		return nil
 	}
 	// Authoritative guard: once promotion has started this agent cannot be
-	// rolled back. Safe no-op (this executor is void and shared with replay).
+	// rolled back. Refuse in-place (shared by live apply and WAL replay).
 	if agent.State >= Finalizing {
 		log.Printf("[backend] RollbackEpoch refused: agent=%q is %s (promotion started)", cgroupID, agent.State)
-		return
+		return fmt.Errorf("rollback_epoch refused: agent %q is %s (promotion started; published state cannot be undone)", cgroupID, agent.State)
 	}
 	mark := agent.EpochStartSeq
 	// Partition the undo log: keep pre-epoch entries, collect epoch entries
@@ -2122,6 +2137,7 @@ func (b *Backend) rollbackEpochInternal(cgroupID string) {
 		b.invalidateFn(invalidatePaths)
 	}
 	log.Printf("[backend] RollbackEpoch: agent=%q undid %d epoch entry(ies)", cgroupID, len(epochEntries))
+	return nil
 }
 
 // Rollback discards all overlay artefacts produced by the named agent and

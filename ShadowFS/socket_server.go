@@ -199,7 +199,11 @@ func (s *SocketServer) handleRequest(req Request) Response {
 			return Response{Status: "error", Message: "cgroup_id required"}
 		}
 		log.Printf("[socket] rollback_epoch agent=%q", req.CgroupID)
-		shadowBackend.RollbackEpoch(req.CgroupID)
+		if err := shadowBackend.RollbackEpoch(req.CgroupID); err != nil {
+			// Refused (e.g. promotion already started): surface the error so
+			// the orchestrator does NOT roll back the process/network layer.
+			return Response{Status: "error", Message: err.Error()}
+		}
 		return Response{Status: "ok"}
 
 	default:

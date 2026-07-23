@@ -2134,3 +2134,57 @@ func TestRollbackInternalAuthoritativeGuard(t *testing.T) {
 		t.Error("agent should finalize after fault cleared")
 	}
 }
+
+// TestRollbackEpochRefusedWhenFinalizing verifies the control-plane fix:
+// RollbackEpoch now returns an error when the epoch's promotion has already
+// started (State >= Finalizing), so the socket layer reports status=error and
+// the orchestrator (which rolls ShadowFS back FIRST) will NOT roll back the
+// process/network version. The epoch's undo state must be preserved. Skipped
+// as root.
+func TestRollbackEpochRefusedWhenFinalizing(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	sub, fail, heal := roDir(t, trackedDir, "sub")
+	defer heal()
+	f := filepath.Join(sub, "f.txt")
+
+	b.BeginEpoch(agentA)
+	writeOverlay(t, b, agentA, f, []byte("v"))
+
+	fail()
+	if _, err := b.Commit(agentA); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	b.mu.Lock()
+	st := b.agents[agentA].State
+	open := b.agents[agentA].EpochOpen
+	b.mu.Unlock()
+	if st != Finalizing {
+		t.Fatalf("expected Finalizing after a failed promotion, got %v", st)
+	}
+	if !open {
+		t.Fatal("epoch should still be open (commit does not clear the epoch marker)")
+	}
+
+	// RollbackEpoch must be REFUSED with an error (not a silent ok).
+	if err := b.RollbackEpoch(agentA); err == nil {
+		t.Fatal("RollbackEpoch must return an error once the epoch's promotion has started")
+	}
+	// The epoch's recovery state must be intact (nothing undone), so a later
+	// retry can still finalize.
+	if b.AgentLen(agentA) == 0 {
+		t.Error("epoch undo entries must be preserved after a refused rollback_epoch")
+	}
+
+	heal()
+	if _, err := b.RetryFinalize(agentA); err != nil {
+		t.Fatalf("RetryFinalize: %v", err)
+	}
+	if !b.CanRelease(agentA) {
+		t.Error("agent should finalize after fault cleared")
+	}
+}

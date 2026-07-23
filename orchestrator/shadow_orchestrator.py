@@ -760,27 +760,45 @@ class ShadowOrchestrator:
 
     def session_rollback_epoch(self, session_id: str) -> dict:
         """
-        Roll back the current epoch losslessly: discard the candidate and
-        resume the pristine baseline (ShadowProc), AND undo the epoch's file
-        changes (ShadowFS). To the session it is as if the epoch never ran.
+        Roll back the current epoch losslessly: undo the epoch's file changes
+        (ShadowFS), then discard the candidate and resume the pristine baseline
+        (ShadowProc). To the session it is as if the epoch never ran.
+
+        ORDER MATTERS: ShadowFS is rolled back FIRST. If ShadowFS refuses (e.g.
+        the epoch's promotion has already started, so its published files can
+        no longer be undone), we must NOT roll back the process/network layer
+        either -- otherwise the process version would be reverted while the
+        file state stayed published, leaving the two layers inconsistent.
         """
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
             return {"status": "error", "message": f"unknown session {session_id}"}
         log.info("SESSION_ROLLBACK_EPOCH sid=%s cgroup=%s", session_id, cgroup_id)
+
+        # Step 1: roll back the file layer FIRST and gate on its success.
+        try:
+            fs_resp = self.fs_client.request({
+                "action": "rollback_epoch",
+                "cgroup_id": cgroup_id,
+            })
+        except Exception as e:  # noqa: BLE001 - fail closed: do not touch procs
+            log.error("  ShadowFS rollback_epoch unreachable: %s -- "
+                      "NOT rolling back the process layer", e)
+            return {"status": "error", "message": str(e)}
+        if fs_resp.get("status") != "ok":
+            # Refused/failed: the file state cannot be undone, so leave the
+            # process/network layer as-is (still fenced) and surface the error.
+            log.error("  ShadowFS rollback_epoch refused/failed: %s -- "
+                      "NOT rolling back the process layer", fs_resp.get("message"))
+            return fs_resp
+
+        # Step 2: file layer undone -> now roll back the process layer.
         proxy = self._get_proxy()
         try:
             proxy.reject(session_id)
         except Exception as e:  # noqa: BLE001
-            log.error("  rollback_epoch (process layer) failed: %s", e)
+            log.error("  rollback_epoch (process layer) failed after FS undo: %s", e)
             return {"status": "error", "message": str(e)}
-        fs_resp = self.fs_client.request({
-            "action": "rollback_epoch",
-            "cgroup_id": cgroup_id,
-        })
-        if fs_resp.get("status") != "ok":
-            log.error("  ShadowFS rollback_epoch failed: %s", fs_resp.get("message"))
-            return fs_resp
         return {"status": "ok"}
 
     def session_get_output(self, session_id: str) -> dict:
