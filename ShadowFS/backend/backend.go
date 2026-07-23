@@ -15,17 +15,60 @@ import (
 	"time"
 )
 
+// AgentLifecycle is the explicit finalization state of an agent's session.
+// It replaces the old single `Committed bool` so callers can distinguish
+// "policy approved but not yet safe to release" from "file state durably
+// promoted and safe to release". External side effects (fs promotion,
+// ShadowProc release, network un-fencing, stdout/tool output) may ONLY be
+// released once the agent reaches Finalized.
+type AgentLifecycle int32
+
+const (
+	// Speculative: running/observed, policy not yet approved. Nothing may
+	// escape the sandbox.
+	Speculative AgentLifecycle = iota
+	// AuthorizedPending: policy approved, but promotions and/or upstream
+	// dependencies are not all finalized yet. STILL fully fenced.
+	AuthorizedPending
+	// Finalizing: promotion has started for this agent. Only completion or
+	// retry is allowed from here; a normal rollback must NOT run.
+	Finalizing
+	// Finalized: every promotion succeeded and every upstream is Finalized.
+	// This is the ONLY state in which CanRelease returns true. The agent is
+	// retained (not deleted) until the orchestrator calls AckRelease.
+	Finalized
+)
+
+func (s AgentLifecycle) String() string {
+	switch s {
+	case Speculative:
+		return "speculative"
+	case AuthorizedPending:
+		return "authorized_pending"
+	case Finalizing:
+		return "finalizing"
+	case Finalized:
+		return "finalized"
+	default:
+		return "unknown"
+	}
+}
+
 // AgentState holds the undo log and dirty file set for a single agent.
 type AgentState struct {
 	CgroupID   string
 	UndoLog    []LogEntry
 	DirtyFiles map[string]struct{} // logical orig paths touched by this agent
-	// Committed indicates the user committed the agent's session. While
-	// Committed=true the agent is retained until (a) all its upstream deps
-	// are also committed/finalized and (b) every dirty file has had all of
-	// its writers committed. An upstream rollback still cascades and undoes
-	// this agent's already-committed changes.
-	Committed bool
+	// State is the explicit lifecycle position (see AgentLifecycle). It
+	// supersedes the old `Committed bool`: `approved()` (>= AuthorizedPending)
+	// is the predicate the promotion/finalization logic uses where it used to
+	// read `Committed`. An upstream rollback still cascades and undoes this
+	// agent's changes UNLESS it has reached Finalizing/Finalized (durable).
+	State AgentLifecycle
+	// FinalizeErr records the most recent promotion failure (path/op/error)
+	// so retry_finalize / get_lifecycle can report why an agent is stuck in
+	// Finalizing instead of Finalized. Cleared on a fully successful finalize.
+	FinalizeErr string
 	// EpochOpen indicates a speculative epoch is currently active for this
 	// agent (see BeginEpoch/CommitEpoch/RollbackEpoch). While open, every
 	// undo entry whose Seq() > EpochStartSeq belongs to the epoch and can be
@@ -37,6 +80,12 @@ type AgentState struct {
 	// which is how RollbackEpoch distinguishes epoch work from prior state.
 	EpochStartSeq int64
 }
+
+// approved reports whether the agent's policy has been approved, i.e. it has
+// reached AuthorizedPending or beyond. This is the exact predicate the old
+// code expressed as `agent.Committed`, so promotion/finalization/release logic
+// reads it in place of the removed bool.
+func (a *AgentState) approved() bool { return a.State >= AuthorizedPending }
 
 // WAL tuning parameters.
 const (
@@ -177,16 +226,23 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 	} else if len(records) > 0 {
 		b.replayWAL(records)
 	}
-	// Auto-commit pure-read agents after WAL replay: they have no writes
+	// Auto-authorize pure-read agents after WAL replay: they have no writes
 	// to promote and no dirty files, so they must not block other agents'
-	// finalization. During normal operation tryPromoteAll handles this,
-	// but during replay we must restore this transient state explicitly
-	// since the auto-commit was never persisted to the WAL.
+	// finalization. During normal operation tryPromoteAll handles this, but
+	// during replay we restore this transient state explicitly since the
+	// auto-authorize was never persisted to the WAL.
 	for _, agent := range b.agents {
-		if !agent.Committed && len(agent.UndoLog) == 0 && len(agent.DirtyFiles) == 0 {
-			agent.Committed = true
+		if !agent.approved() && len(agent.UndoLog) == 0 && len(agent.DirtyFiles) == 0 {
+			agent.State = AuthorizedPending
 		}
 	}
+	// Re-derive Finalized states after recovery. Every Promote() is
+	// idempotent, so this is safe to run and reconstructs the durable
+	// finalized set from the authorized agents. Crucially, an agent is only
+	// (re-)marked Finalized if its promotions ACTUALLY succeed now, so a
+	// crash mid-promotion recovers as AuthorizedPending/Finalizing (fenced,
+	// retryable) — pending is never mistaken for finalized.
+	_ = b.tryPromoteAll()
 	b.nextApply = b.seq + 1
 
 	go b.walWorker()
@@ -236,6 +292,11 @@ func (b *Backend) replayWAL(records []WALRecord) {
 				b.rollbackEpochInternal(rec.CgroupID)
 			case "read_dep":
 				b.replayReadDep(rec.CgroupID, rec.Entry.OrigPath)
+			case "release_ack":
+				// The orchestrator acked release of a finalized agent before
+				// the crash. Drop its terminal record (idempotent; only acts
+				// if the agent is currently Finalized).
+				b.ackReleaseInternal(rec.CgroupID)
 			default:
 				log.Printf("[backend] WAL: unknown control op %q", rec.ControlOp)
 			}
@@ -1967,20 +2028,48 @@ func (b *Backend) cleanupAgents(affected map[string]struct{}) {
 // while it has uncommitted upstream dependencies; per-file promotion runs
 // for every dirty path whose writers are all committed and whose writers
 // have all-finalized upstreams.
-func (b *Backend) Commit(cgroupID string) {
+// PromoteFailure records why a single path's promotion failed, so the caller
+// (and get_lifecycle) can see exactly what is keeping an agent fenced.
+type PromoteFailure struct {
+	Path string `json:"path"`
+	Op   string `json:"op"`
+	Err  string `json:"err"`
+}
+
+// CommitResult is returned by Commit / RetryFinalize. It reports the agent's
+// resulting lifecycle state, whether it is now safe to release, which agents
+// became Finalized as a side effect, and any promotion failures that must be
+// retried before release. A non-nil error is reserved for infrastructure
+// failures (WAL); promotion failures are surfaced via Failures + a non-
+// Finalized State so the orchestrator keeps the workload fenced and retries.
+type CommitResult struct {
+	State      AgentLifecycle   `json:"state"`
+	CanRelease bool             `json:"can_release"`
+	Finalized  []string         `json:"finalized,omitempty"`
+	Failures   []PromoteFailure `json:"failures,omitempty"`
+}
+
+// Commit AUTHORIZES the agent's session (policy approved) and then attempts to
+// drive it to Finalized. Authorization alone does NOT permit release: the
+// agent only becomes releasable once every dirty path has been durably
+// promoted and every upstream dependency is Finalized. Promotion failures do
+// not abort the commit; they leave the agent in AuthorizedPending/Finalizing
+// (CanRelease=false) so the caller can retry via RetryFinalize.
+//
+// An unknown cgroup is REGISTERED here (a no-file-op agent) and immediately
+// driven to Finalized, so the release path never has to treat "not tracked"
+// as "safe" (fail-closed).
+func (b *Backend) Commit(cgroupID string) (CommitResult, error) {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
 	b.mu.Lock()
-	agent, ok := b.agents[cgroupID]
-	if !ok {
+	agent := b.agents[cgroupID]
+	if agent != nil && agent.State >= Finalized {
+		// Idempotent: already finalized.
+		res := b.lifecycleResultLocked(cgroupID)
 		b.mu.Unlock()
-		log.Printf("[backend] Commit: agent %q not found, no-op", cgroupID)
-		return
-	}
-	if agent.Committed {
-		b.mu.Unlock()
-		return
+		return res, nil
 	}
 	seqNum := b.nextSeq()
 	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "commit"}
@@ -1989,7 +2078,7 @@ func (b *Backend) Commit(cgroupID string) {
 	if err := <-b.submitWAL(rec); err != nil {
 		log.Printf("[backend] Commit WAL: %v", err)
 		b.applyTurnAbort(seqNum)
-		return
+		return CommitResult{}, fmt.Errorf("commit WAL: %w", err)
 	}
 
 	b.mu.Lock()
@@ -1999,27 +2088,149 @@ func (b *Backend) Commit(cgroupID string) {
 		b.mu.Unlock()
 	}()
 	b.commitInternal(cgroupID)
+	return b.lifecycleResultLocked(cgroupID), nil
 }
 
-// commitInternal performs the in-memory commit + promotion work without
-// touching the WAL. Must be called with b.mu held. Used both by Commit
-// and by replayWAL.
+// commitInternal AUTHORIZES the agent (Speculative -> AuthorizedPending),
+// registering it first if it never touched the shadowed filesystem, then runs
+// the promotion/finalization pass. Must be called with b.mu held. Used both by
+// Commit and by replayWAL; idempotent and re-runnable.
 func (b *Backend) commitInternal(cgroupID string) {
 	agent, ok := b.agents[cgroupID]
-	if !ok || agent.Committed {
+	if !ok {
+		// Register a no-file-op agent so release gating never has to treat an
+		// unknown cgroup as safe. With no undo entries it finalizes at once.
+		agent = b.ensureAgent(cgroupID)
+	}
+	if agent.State < AuthorizedPending {
+		agent.State = AuthorizedPending
+		log.Printf("[backend] Commit: agent=%q authorized (pending finalization)", cgroupID)
+	}
+	_ = b.tryPromoteAll()
+}
+
+// RetryFinalize re-runs the promotion/finalization pass for a stuck agent
+// (one left in AuthorizedPending/Finalizing by an earlier promotion failure,
+// e.g. a transient I/O error). It is safe to call repeatedly: every Promote()
+// is idempotent, so already-promoted entries are no-ops. Returns the agent's
+// resulting lifecycle. A no-op WAL "commit" record is NOT re-appended; the
+// original authorization record already drives re-promotion on replay.
+func (b *Backend) RetryFinalize(cgroupID string) (CommitResult, error) {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	agent, ok := b.agents[cgroupID]
+	if !ok {
+		return CommitResult{}, fmt.Errorf("retry_finalize: agent %q not found", cgroupID)
+	}
+	if agent.State < AuthorizedPending {
+		return CommitResult{}, fmt.Errorf("retry_finalize: agent %q not authorized (state=%s)", cgroupID, agent.State)
+	}
+	_ = b.tryPromoteAll()
+	return b.lifecycleResultLocked(cgroupID), nil
+}
+
+// lifecycleResultLocked builds a CommitResult snapshot for cgroupID. Must be
+// called with b.mu held.
+func (b *Backend) lifecycleResultLocked(cgroupID string) CommitResult {
+	res := CommitResult{}
+	agent, ok := b.agents[cgroupID]
+	if !ok {
+		// Absent after finalize+ack is the only benign "gone" case, but a
+		// bare absence is NOT releasable here: callers use canReleaseLocked.
+		res.State = Speculative
+		res.CanRelease = false
+		return res
+	}
+	res.State = agent.State
+	res.CanRelease = agent.State == Finalized
+	if agent.FinalizeErr != "" {
+		res.Failures = append(res.Failures, PromoteFailure{
+			Path: "", Op: "promote", Err: agent.FinalizeErr,
+		})
+	}
+	return res
+}
+
+// GetLifecycle reports an agent's current lifecycle state and any pending
+// promotion failure, without mutating anything. An unknown cgroup reports
+// state "unknown" and CanRelease=false (fail-closed).
+func (b *Backend) GetLifecycle(cgroupID string) (state string, canRelease bool, finalizeErr string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	agent, ok := b.agents[cgroupID]
+	if !ok {
+		return "unknown", false, ""
+	}
+	return agent.State.String(), agent.State == Finalized, agent.FinalizeErr
+}
+
+// AckRelease is called by the orchestrator AFTER it has successfully released
+// a Finalized agent's external effects (processes resumed, network un-fenced,
+// stdout/tool output flushed). Only then is the terminal record cleaned up.
+// Refuses to drop an agent that has not reached Finalized (fail-closed), so a
+// premature ack can never discard state that is still needed for rollback.
+func (b *Backend) AckRelease(cgroupID string) error {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+
+	b.mu.Lock()
+	agent, ok := b.agents[cgroupID]
+	if !ok {
+		b.mu.Unlock()
+		return nil // already cleaned up: idempotent
+	}
+	if agent.State != Finalized {
+		state := agent.State
+		b.mu.Unlock()
+		return fmt.Errorf("ack_release: agent %q is %s, not finalized", cgroupID, state)
+	}
+	seqNum := b.nextSeq()
+	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "release_ack"}
+	b.mu.Unlock()
+
+	if err := <-b.submitWAL(rec); err != nil {
+		b.applyTurnAbort(seqNum)
+		return fmt.Errorf("ack_release WAL: %w", err)
+	}
+
+	b.mu.Lock()
+	b.applyTurnWait(seqNum)
+	defer func() {
+		b.applyTurnDone(seqNum)
+		b.mu.Unlock()
+	}()
+	b.ackReleaseInternal(cgroupID)
+	return nil
+}
+
+// ackReleaseInternal drops a Finalized agent's terminal record. Must be called
+// with b.mu held. Used by AckRelease and by replayWAL. Idempotent.
+func (b *Backend) ackReleaseInternal(cgroupID string) {
+	agent, ok := b.agents[cgroupID]
+	if !ok {
 		return
 	}
-	agent.Committed = true
-	log.Printf("[backend] Commit: agent=%q marked committed", cgroupID)
-	b.tryPromoteAll()
+	if agent.State != Finalized {
+		// Only a finalized agent may be acked. On replay this guards against
+		// a stale release_ack for an agent that (post-checkpoint) is not yet
+		// finalized: leave it in place to be re-finalized.
+		return
+	}
+	delete(b.agents, cgroupID)
+	log.Printf("[backend] release_ack: dropped finalized agent=%q", cgroupID)
 }
 
 // tryPromoteAll iterates over every dirty path and promotes those whose
-// writers are all committed (with all-finalized upstreams). Promotion of
+// writers are all authorized (with all-finalized upstreams). Promotion of
 // one path may finalize an agent which in turn unblocks downstream agents,
-// so the loop runs until no progress is made.
-func (b *Backend) tryPromoteAll() {
+// so the loop runs until no progress is made. Returns the joined error of any
+// promotion failures encountered this pass (nil if all promotions succeeded);
+// failed agents are left non-Finalized with FinalizeErr set for retry.
+func (b *Backend) tryPromoteAll() error {
 	for {
+		var errs []error
 		paths := make([]string, 0, len(b.fileDirty))
 		for p := range b.fileDirty {
 			paths = append(paths, p)
@@ -2042,8 +2253,12 @@ func (b *Backend) tryPromoteAll() {
 		})
 		progress := false
 		for _, p := range paths {
-			if b.tryPromotePath(p) {
+			ran, err := b.tryPromotePath(p)
+			if ran {
 				progress = true
+			}
+			if err != nil {
+				errs = append(errs, err)
 			}
 		}
 		ids := make([]string, 0, len(b.agents))
@@ -2051,48 +2266,61 @@ func (b *Backend) tryPromoteAll() {
 			ids = append(ids, id)
 		}
 		for _, id := range ids {
-			// Auto-commit read-only agents: they have no writes to
-			// promote and no dirty files, so they must not block
-			// other agents' finalization.
+			// Auto-authorize read-only agents: they have no writes to
+			// promote and no dirty files, so they must not block other
+			// agents' finalization.
 			agent := b.agents[id]
-			if agent != nil && !agent.Committed && len(agent.UndoLog) == 0 && len(agent.DirtyFiles) == 0 {
-				agent.Committed = true
-				progress = true
-			}
-			if b.tryFinalize(id) {
+			if agent != nil && !agent.approved() && len(agent.UndoLog) == 0 && len(agent.DirtyFiles) == 0 {
+				agent.State = AuthorizedPending
 				progress = true
 			}
 		}
+		// Finalize whole strongly-connected components at once so dependency
+		// cycles (A -> B -> A) resolve together, and never before every
+		// member's promotion has succeeded.
+		if b.tryFinalizeSCCs() {
+			progress = true
+		}
 		if !progress {
-			return
+			// No forward progress this pass: return any promotion errors so
+			// the caller keeps the workload fenced and schedules a retry.
+			// errors.Join(nil...) is nil, so a clean settle returns nil.
+			return errors.Join(errs...)
 		}
 	}
 }
 
 // tryPromotePath attempts to promote every entry that targets path. It
-// requires that every writer of path is committed AND that none of those
-// writers has an uncommitted upstream dependency. Returns true if
-// promotion ran.
-func (b *Backend) tryPromotePath(path string) bool {
+// requires that every writer of path is authorized AND that none of those
+// writers has an un-finalized upstream dependency.
+//
+// All-or-nothing per path: if ANY entry's Promote() fails, NOTHING is torn
+// down — the UndoLog entries, DirtyFiles, fileDirty tracking and overlay
+// recovery data are ALL preserved, the involved writers are left in
+// Finalizing with FinalizeErr set, and (false, err) is returned. Because
+// every Promote() is idempotent, a later RetryFinalize re-runs the whole set
+// and only tears down once they all succeed. Returns (true, nil) when the
+// path was fully promoted, (false, nil) when it is not yet eligible.
+func (b *Backend) tryPromotePath(path string) (bool, error) {
 	writers, ok := b.fileDirty[path]
 	if !ok || len(writers) == 0 {
-		return false
+		return false, nil
 	}
 	for w := range writers {
 		agent, ok := b.agents[w]
-		if !ok || !agent.Committed {
-			return false
+		if !ok || !agent.approved() {
+			return false, nil
 		}
 		for up := range b.dependsOn[w] {
 			upAgent, ok := b.agents[up]
-			if ok && !upAgent.Committed {
+			if ok && !upAgent.approved() {
 				// A pure-read upstream (no undo entries, no dirty
 				// files) cannot affect promotion — treat it as
-				// effectively committed so it does not block writers.
+				// effectively finalized so it does not block writers.
 				if len(upAgent.UndoLog) == 0 && len(upAgent.DirtyFiles) == 0 {
 					continue
 				}
-				return false
+				return false, nil
 			}
 		}
 	}
@@ -2113,27 +2341,40 @@ func (b *Backend) tryPromotePath(path string) bool {
 	}
 	sort.Slice(matched, func(i, j int) bool { return matched[i].entry.Seq() < matched[j].entry.Seq() })
 
-	// Note: previously a pre-check here returned false when any overlay
-	// path was missing, intending to enforce all-or-nothing promotion.
-	// That was incorrect: when an ancestor rmdir entry promotes first,
-	// it RemoveAll's the overlay subtree, deleting overlay copies that
-	// belong to other agents' writes on descendant paths. Those writes
-	// are then logically superseded by the rmdir, but the pre-check
-	// would block their promote forever — agents would never finalize
-	// and tryPromoteAll would lose progress on every retry.
-	//
-	// Each Promote() implementation is already idempotent against a
-	// missing OverlayPath (returns nil). Letting them run cleans up
-	// the UndoLog entries and unblocks finalize, while preserving
-	// correctness: a missing overlay copy means "already gone", which
-	// is the desired post-state for the rmdir-supersedes-write case.
-
-	for _, m := range matched {
-		if err := m.entry.Promote(); err != nil {
-			log.Printf("[backend] Promote: path=%q seq=%d failed: %v", path, m.entry.Seq(), err)
+	// Promotion has started for this path: move its (authorized) writers to
+	// Finalizing so a normal rollback is refused from here on.
+	for w := range writers {
+		if a := b.agents[w]; a != nil && a.State == AuthorizedPending {
+			a.State = Finalizing
 		}
 	}
 
+	// Each Promote() implementation is idempotent against a missing
+	// OverlayPath (returns nil), so an ancestor rmdir that already wiped a
+	// descendant overlay is a no-op rather than an error.
+	var promoteErr error
+	for _, m := range matched {
+		if err := m.entry.Promote(); err != nil {
+			log.Printf("[backend] Promote: path=%q seq=%d failed: %v", path, m.entry.Seq(), err)
+			promoteErr = err
+			break
+		}
+	}
+	if promoteErr != nil {
+		// FAIL CLOSED: preserve ALL recovery state (UndoLog, DirtyFiles,
+		// fileDirty, overlay copies) so the exact same promotion can be
+		// retried. Record why on every writer of this path so get_lifecycle
+		// can surface it. Do NOT removeOverlayState and do NOT drop entries.
+		msg := fmt.Sprintf("promote %q: %v", path, promoteErr)
+		for w := range writers {
+			if a := b.agents[w]; a != nil {
+				a.FinalizeErr = msg
+			}
+		}
+		return false, fmt.Errorf("%s", msg)
+	}
+
+	// All entries for this path promoted: now it is safe to tear down.
 	type rem struct {
 		writer string
 		idx    int
@@ -2150,7 +2391,10 @@ func (b *Backend) tryPromotePath(path string) bool {
 		}
 	}
 	for w := range writers {
-		delete(b.agents[w].DirtyFiles, path)
+		if a := b.agents[w]; a != nil {
+			delete(a.DirtyFiles, path)
+			a.FinalizeErr = "" // this path is clean now
+		}
 	}
 	delete(b.fileDirty, path)
 
@@ -2159,30 +2403,48 @@ func (b *Backend) tryPromotePath(path string) bool {
 	// UnlinkEntry.Promote() will clean up its own whiteout when it runs.
 	_ = removeOverlayState(b.stagingDir, b.trackedDir, path, false)
 	log.Printf("[backend] Promote: path=%q promoted (%d entries)", path, len(matched))
-	return true
+	return true, nil
 }
 
-// tryFinalize removes an agent if it is committed, has no remaining undo
-// entries, and no uncommitted upstream agents. Returns true if finalized.
+// tryFinalize transitions a SINGLE agent to Finalized when it is authorized,
+// has no remaining undo entries, and all its upstream dependencies are
+// finalized (a pure-read upstream does not block). Retained for the trivial
+// acyclic case and direct callers; the promotion loop uses tryFinalizeSCCs so
+// dependency CYCLES finalize as a unit. Returns true if it finalized.
 func (b *Backend) tryFinalize(cgroupID string) bool {
 	agent, ok := b.agents[cgroupID]
-	if !ok || !agent.Committed {
+	if !ok || !agent.approved() {
 		return false
+	}
+	if agent.State == Finalized {
+		return false // already finalized
 	}
 	if len(agent.UndoLog) > 0 {
 		return false
 	}
-	// (Above guard `!agent.Committed` already returned false; no
-	// further "read-only without commit" branch is needed here.)
 	for up := range b.dependsOn[cgroupID] {
 		upAgent, ok := b.agents[up]
-		if ok && !upAgent.Committed {
+		if ok && upAgent.State != Finalized {
 			// Pure-read upstreams do not block finalization.
 			if len(upAgent.UndoLog) == 0 && len(upAgent.DirtyFiles) == 0 {
 				continue
 			}
 			return false
 		}
+	}
+	b.finalizeAgent(cgroupID)
+	return true
+}
+
+// finalizeAgent performs the state mutation of finalizing one agent: drop its
+// dependency edges (a finalized agent's changes are durable and can no longer
+// cascade a rollback, so it must neither block nor be reached by the graph),
+// then set State=Finalized. The agent record itself is RETAINED until
+// AckRelease. Must be called with b.mu held; callers own the readiness checks.
+func (b *Backend) finalizeAgent(cgroupID string) {
+	agent, ok := b.agents[cgroupID]
+	if !ok {
+		return
 	}
 	log.Printf("[backend] finalize: agent=%q", cgroupID)
 	for src := range b.dependsOn[cgroupID] {
@@ -2203,26 +2465,188 @@ func (b *Backend) tryFinalize(cgroupID string) bool {
 		}
 	}
 	delete(b.dependents, cgroupID)
-	delete(b.agents, cgroupID)
+	agent.State = Finalized
+	agent.FinalizeErr = ""
+}
+
+// computeSCCs returns the strongly-connected components of the current
+// dependency graph (edges: dependent -> upstream, from b.dependsOn) using
+// Tarjan's algorithm. Every tracked agent appears in exactly one component;
+// an acyclic agent is a singleton. SCCs are the unit of finalization so a
+// dependency cycle (A -> B -> A) is finalized all-at-once or not at all. Must
+// be called with b.mu held.
+func (b *Backend) computeSCCs() [][]string {
+	const unvisited = -1
+	index := make(map[string]int, len(b.agents))
+	lowlink := make(map[string]int, len(b.agents))
+	onStack := make(map[string]bool, len(b.agents))
+	var stack []string
+	var sccs [][]string
+	next := 0
+
+	// Iterative Tarjan to avoid deep recursion on long dependency chains.
+	type frame struct {
+		node  string
+		succ  []string
+		i     int
+	}
+	successors := func(id string) []string {
+		out := make([]string, 0, len(b.dependsOn[id]))
+		for up := range b.dependsOn[id] {
+			if _, ok := b.agents[up]; ok {
+				out = append(out, up)
+			}
+		}
+		return out
+	}
+
+	for id := range b.agents {
+		if _, seen := index[id]; seen {
+			continue
+		}
+		var callStack []*frame
+		callStack = append(callStack, &frame{node: id, succ: successors(id)})
+		index[id] = next
+		lowlink[id] = next
+		next++
+		stack = append(stack, id)
+		onStack[id] = true
+
+		for len(callStack) > 0 {
+			fr := callStack[len(callStack)-1]
+			if fr.i < len(fr.succ) {
+				w := fr.succ[fr.i]
+				fr.i++
+				if _, seen := index[w]; !seen {
+					index[w] = next
+					lowlink[w] = next
+					next++
+					stack = append(stack, w)
+					onStack[w] = true
+					callStack = append(callStack, &frame{node: w, succ: successors(w)})
+				} else if onStack[w] {
+					if index[w] < lowlink[fr.node] {
+						lowlink[fr.node] = index[w]
+					}
+				}
+				continue
+			}
+			// Done exploring fr.node; if it's a root, pop an SCC.
+			if lowlink[fr.node] == index[fr.node] {
+				var comp []string
+				for {
+					n := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					onStack[n] = false
+					comp = append(comp, n)
+					if n == fr.node {
+						break
+					}
+				}
+				sccs = append(sccs, comp)
+			}
+			callStack = callStack[:len(callStack)-1]
+			if len(callStack) > 0 {
+				parent := callStack[len(callStack)-1].node
+				if lowlink[fr.node] < lowlink[parent] {
+					lowlink[parent] = lowlink[fr.node]
+				}
+			}
+		}
+	}
+	return sccs
+}
+
+// tryFinalizeSCCs finalizes every strongly-connected component that is READY,
+// treating each SCC as an atomic unit. An SCC becomes Finalized iff:
+//   (1) every member's policy is approved, AND
+//   (2) every member has no remaining undo entries (all its file promotions
+//       have succeeded — a failed/pending promotion leaves undo entries), AND
+//   (3) every upstream OUTSIDE the SCC is already Finalized (a pure-read
+//       upstream with no undo/dirty state does not block).
+// If any member fails (2), the WHOLE SCC stays fenced — this is what prevents a
+// cycle A -> B -> A from being released early or waiting forever. Returns true
+// if any SCC finalized. Must be called with b.mu held.
+func (b *Backend) tryFinalizeSCCs() bool {
+	progress := false
+	for _, scc := range b.computeSCCs() {
+		if b.finalizeSCCIfReady(scc) {
+			progress = true
+		}
+	}
+	return progress
+}
+
+func (b *Backend) finalizeSCCIfReady(scc []string) bool {
+	inSCC := make(map[string]bool, len(scc))
+	for _, id := range scc {
+		inSCC[id] = true
+	}
+	// (1)+(2): every member approved, none already finalized, and no member
+	// has pending/failed promotions (undo must be empty).
+	anyPending := false
+	for _, id := range scc {
+		a := b.agents[id]
+		if a == nil {
+			return false
+		}
+		if a.State == Finalized {
+			return false // component already finalized; nothing to do
+		}
+		if !a.approved() {
+			return false
+		}
+		if len(a.UndoLog) > 0 {
+			anyPending = true
+		}
+	}
+	if anyPending {
+		return false // a member's promotion is not done: keep the whole SCC fenced
+	}
+	// (3): every external upstream must be Finalized (pure-read exempt).
+	for _, id := range scc {
+		for up := range b.dependsOn[id] {
+			if inSCC[up] {
+				continue // intra-SCC edge: satisfied by finalizing together
+			}
+			upA, ok := b.agents[up]
+			if !ok {
+				continue // gone => finalized and acked
+			}
+			if upA.State != Finalized {
+				if len(upA.UndoLog) == 0 && len(upA.DirtyFiles) == 0 {
+					continue // pure-read upstream cannot cascade
+				}
+				return false
+			}
+		}
+	}
+	// Ready: finalize the whole component atomically.
+	if len(scc) > 1 {
+		log.Printf("[backend] finalize SCC (cycle) as a unit: %v", scc)
+	}
+	for _, id := range scc {
+		b.finalizeAgent(id)
+	}
 	return true
 }
 
 // --- Release gating ---
 
 // CanRelease reports whether the external side effects of the given cgroup
-// (its processes are held frozen by ShadowProc) are safe to externalize.
+// (its processes are held frozen by ShadowProc, its network fenced, its
+// stdout/tool output buffered) are safe to externalize.
 //
-// It answers with the SAME predicate ShadowFS uses to promote an agent's
-// file changes to the real filesystem: the agent must be committed and
-// every upstream dependency it relies on must also be committed. This
-// keeps the process layer consistent with the filesystem layer — an
-// agent's IPC / network operations are only let out once no upstream
-// rollback can still cascade into this cgroup and undo them.
+// It is TRUE only when the agent has reached the Finalized lifecycle state:
+// every dirty path has been durably promoted to the real filesystem and every
+// upstream dependency is itself Finalized, so no rollback can ever cascade
+// into this cgroup. Any other state (Speculative, AuthorizedPending,
+// Finalizing) is NOT releasable.
 //
-// A cgroup that is not tracked is treated as releasable: it was either
-// already finalized (fully committed and promoted, so its dependency
-// edges are gone) or never touched the shadowed filesystem at all. In
-// both cases no cascade rollback can reach it.
+// FAIL CLOSED: an unknown / untracked cgroup is NOT releasable. Callers that
+// legitimately have no filesystem footprint must be registered and driven to
+// Finalized via Commit (which registers no-file-op agents), rather than
+// relying on "absent means safe".
 func (b *Backend) CanRelease(cgroupID string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -2230,27 +2654,12 @@ func (b *Backend) CanRelease(cgroupID string) bool {
 }
 
 // canReleaseLocked implements CanRelease. Must be called with b.mu held.
-// The upstream check mirrors tryFinalize / tryPromotePath: a pure-read
-// upstream (no undo entries, no dirty files) cannot cascade a rollback,
-// so it does not block release.
 func (b *Backend) canReleaseLocked(cgroupID string) bool {
 	agent, ok := b.agents[cgroupID]
 	if !ok {
-		return true
+		return false // fail closed: unknown cgroup is never releasable
 	}
-	if !agent.Committed {
-		return false
-	}
-	for up := range b.dependsOn[cgroupID] {
-		upAgent, ok := b.agents[up]
-		if ok && !upAgent.Committed {
-			if len(upAgent.UndoLog) == 0 && len(upAgent.DirtyFiles) == 0 {
-				continue
-			}
-			return false
-		}
-	}
-	return true
+	return agent.State == Finalized
 }
 
 // --- Inspection ---

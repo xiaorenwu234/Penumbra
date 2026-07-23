@@ -88,6 +88,22 @@ func (e *OverlayWriteEntry) Promote() error {
 	if err := moveFile(e.OverlayPath, e.OrigPath); err != nil {
 		return fmt.Errorf("promote overlay write %q -> %q: %w", e.OverlayPath, e.OrigPath, err)
 	}
+	// Crash-consistency barrier: the promoted file's data AND both affected
+	// directory entries (the destination orig dir where the file now appears,
+	// and the source staging dir where it was removed by rename) must reach
+	// stable storage BEFORE the owning agent may transition to Finalized and
+	// have its external effects released. A promotion is not "done" until it
+	// is durable; an fsync error is therefore a promotion failure (fail
+	// closed — the agent stays fenced and the promote is retried).
+	if err := fsyncFile(e.OrigPath); err != nil {
+		return fmt.Errorf("promote overlay write fsync file %q: %w", e.OrigPath, err)
+	}
+	if err := fsyncDir(filepath.Dir(e.OrigPath)); err != nil {
+		return fmt.Errorf("promote overlay write fsync dest dir %q: %w", filepath.Dir(e.OrigPath), err)
+	}
+	if err := fsyncDir(filepath.Dir(e.OverlayPath)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("promote overlay write fsync src dir %q: %w", filepath.Dir(e.OverlayPath), err)
+	}
 	return nil
 }
 
@@ -192,6 +208,11 @@ func (e *OverlayMkdirEntry) Promote() error {
 		}
 		return fmt.Errorf("promote mkdir %q: %w", e.OrigPath, err)
 	}
+	// Durability barrier: make the new directory entry durable in its parent
+	// before the agent may be Finalized (see OverlayWriteEntry.Promote).
+	if err := fsyncDir(filepath.Dir(e.OrigPath)); err != nil {
+		return fmt.Errorf("promote mkdir fsync parent %q: %w", filepath.Dir(e.OrigPath), err)
+	}
 	return nil
 }
 
@@ -225,6 +246,11 @@ func (e *OverlayUnlinkEntry) Promote() error {
 	if err := os.Remove(e.WhiteoutPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("promote unlink cleanup whiteout %q: %w", e.WhiteoutPath, err)
 	}
+	// Durability barrier: make the removal durable in the orig parent dir
+	// before the agent may be Finalized (see OverlayWriteEntry.Promote).
+	if err := fsyncDir(filepath.Dir(e.OrigPath)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("promote unlink fsync parent %q: %w", filepath.Dir(e.OrigPath), err)
+	}
 	return nil
 }
 
@@ -255,6 +281,11 @@ func (e *OverlayRmdirEntry) Promote() error {
 	}
 	if err := os.Remove(e.WhiteoutPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("promote rmdir cleanup whiteout %q: %w", e.WhiteoutPath, err)
+	}
+	// Durability barrier: make the directory removal durable in the orig
+	// parent dir before the agent may be Finalized (see write Promote).
+	if err := fsyncDir(filepath.Dir(e.OrigPath)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("promote rmdir fsync parent %q: %w", filepath.Dir(e.OrigPath), err)
 	}
 	return nil
 }

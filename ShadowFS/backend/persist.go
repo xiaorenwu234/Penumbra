@@ -23,12 +23,19 @@ type PersistState struct {
 
 // PersistAgent is the per-agent state serialized to disk.
 type PersistAgent struct {
-	CgroupID      string              `json:"cgroup_id"`
-	UndoLog       []SerializableEntry `json:"undo_log"`
-	DirtyFiles    []string            `json:"dirty_files"`
-	Committed     bool                `json:"committed"`
-	EpochOpen     bool                `json:"epoch_open,omitempty"`
-	EpochStartSeq int64               `json:"epoch_start_seq,omitempty"`
+	CgroupID   string              `json:"cgroup_id"`
+	UndoLog    []SerializableEntry `json:"undo_log"`
+	DirtyFiles []string            `json:"dirty_files"`
+	// State is the explicit lifecycle (see AgentLifecycle). Committed is the
+	// legacy field kept ONLY for reading checkpoints written before the
+	// lifecycle refactor: loadState maps a legacy Committed=true to
+	// AuthorizedPending and lets recovery re-derive Finalized. New checkpoints
+	// always write State and leave Committed at its zero value.
+	State       AgentLifecycle `json:"state"`
+	Committed   bool           `json:"committed,omitempty"`
+	FinalizeErr string         `json:"finalize_err,omitempty"`
+	EpochOpen     bool          `json:"epoch_open,omitempty"`
+	EpochStartSeq int64         `json:"epoch_start_seq,omitempty"`
 }
 
 // snapshot creates a deep copy of the backend state for serialization.
@@ -47,7 +54,8 @@ func (b *Backend) snapshot() *PersistState {
 			CgroupID:      agent.CgroupID,
 			UndoLog:       make([]SerializableEntry, 0, len(agent.UndoLog)),
 			DirtyFiles:    make([]string, 0, len(agent.DirtyFiles)),
-			Committed:     agent.Committed,
+			State:         agent.State,
+			FinalizeErr:   agent.FinalizeErr,
 			EpochOpen:     agent.EpochOpen,
 			EpochStartSeq: agent.EpochStartSeq,
 		}
@@ -95,9 +103,17 @@ func (b *Backend) loadState(state *PersistState) {
 			CgroupID:      pa.CgroupID,
 			UndoLog:       make([]LogEntry, 0, len(pa.UndoLog)),
 			DirtyFiles:    make(map[string]struct{}, len(pa.DirtyFiles)),
-			Committed:     pa.Committed,
+			State:         pa.State,
+			FinalizeErr:   pa.FinalizeErr,
 			EpochOpen:     pa.EpochOpen,
 			EpochStartSeq: pa.EpochStartSeq,
+		}
+		// Backward compatibility: a checkpoint written before the lifecycle
+		// refactor has State==Speculative(0) but may carry Committed=true.
+		// Map that to AuthorizedPending; recovery's tryPromoteAll re-derives
+		// Finalized where promotions succeed.
+		if agent.State == Speculative && pa.Committed {
+			agent.State = AuthorizedPending
 		}
 		for _, se := range pa.UndoLog {
 			if entry := UnmarshalEntry(se); entry != nil {

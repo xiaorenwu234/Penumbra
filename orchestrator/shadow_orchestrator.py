@@ -31,6 +31,7 @@ import logging
 import threading
 import signal
 import tempfile
+import time
 from typing import Optional, List, Dict, Any
 
 from session_proxy import SessionProxy
@@ -49,6 +50,11 @@ class SocketClient:
     def __init__(self, sock_path: str):
         self.sock_path = sock_path
         self._sock: Optional[socket.socket] = None
+        # Serializes request/response round-trips: the orchestrator now issues
+        # requests from multiple threads (e.g. the background finalize-retry
+        # loop and the main request handler), and a shared socket stream must
+        # not have two exchanges interleaved.
+        self._io_lock = threading.Lock()
 
     def connect(self):
         """Connect to the Unix socket."""
@@ -63,16 +69,17 @@ class SocketClient:
             self._sock = None
 
     def request(self, data: dict) -> dict:
-        """Send a JSON request and return the JSON response."""
-        if not self._sock:
-            self.connect()
-        line = json.dumps(data) + "\n"
-        self._file.write(line)
-        self._file.flush()
-        resp_line = self._file.readline()
-        if not resp_line:
-            raise ConnectionError(f"Connection to {self.sock_path} closed")
-        return json.loads(resp_line)
+        """Send a JSON request and return the JSON response (thread-safe)."""
+        with self._io_lock:
+            if not self._sock:
+                self.connect()
+            line = json.dumps(data) + "\n"
+            self._file.write(line)
+            self._file.flush()
+            resp_line = self._file.readline()
+            if not resp_line:
+                raise ConnectionError(f"Connection to {self.sock_path} closed")
+            return json.loads(resp_line)
 
     def __enter__(self):
         self.connect()
@@ -130,6 +137,22 @@ class ShadowOrchestrator:
         self._pending_release: set = set()
         self._pending_lock = threading.Lock()
 
+        # Serializes ALL multi-service release/finalize interactions (commit
+        # release path, _try_release_pending, and the background retry loop) so
+        # their requests over the shared fs/proc sockets never interleave.
+        self._release_lock = threading.RLock()
+
+        # Background finalize-retry loop. A promotion can fail on a transient
+        # I/O error, leaving an agent AuthorizedPending/Finalizing (fenced).
+        # This loop periodically asks ShadowFS to retry_finalize the pending
+        # cgroups and releases them once they reach Finalized, so a blip does
+        # not wedge an agent forever. Daemon thread; stops on close().
+        self._retry_stop = threading.Event()
+        self._retry_interval = 2.0
+        self._retry_thread = threading.Thread(
+            target=self._finalize_retry_loop, name="finalize-retry", daemon=True)
+        self._retry_thread.start()
+
         # ── Speculative bash-session support ──
         # A SessionProxy drives long-lived bash sessions and their ShadowProc
         # baseline/candidate epochs (process layer). The orchestrator layers
@@ -143,6 +166,7 @@ class ShadowOrchestrator:
 
     def close(self):
         """Close connections to all services."""
+        self._retry_stop.set()
         self.fs_client.close()
         self.proc_client.close()
         if self.observe_client:
@@ -223,31 +247,93 @@ class ShadowOrchestrator:
             return {"status": "error", "message": str(e)}
 
     def _fs_can_release(self, cgroup_id: str) -> bool:
-        """
-        Ask ShadowFS whether a cgroup's external side effects are safe to
-        release, i.e. all of its upstream dependencies are committed.
+        """Ask ShadowFS whether a cgroup's external side effects are safe to
+        release. Safe == the agent has reached the Finalized lifecycle state
+        (all file promotions durable, all upstreams finalized).
 
-        This is the SAME gate ShadowFS uses to promote the agent's file
-        changes, so ShadowProc's process layer stays consistent with the
-        filesystem layer.
+        FAIL CLOSED in every ambiguous case:
+          - request raised (ShadowFS down / timeout / disconnect) -> False
+          - response is not status==ok                            -> False
+          - response is missing the 'releasable' field            -> False
+          - unknown cgroup (ShadowFS reports not releasable)       -> False
+        Never defaults to True.
         """
-        resp = self.fs_client.request({
-            "action": "can_release",
-            "cgroup_id": cgroup_id,
-        })
-        if resp.get("status") != "ok":
-            # Unknown / not tracked by ShadowFS: no filesystem dependency
-            # can cascade a rollback into it, so it is safe to release.
-            return True
-        return bool(resp.get("releasable", True))
+        try:
+            resp = self.fs_client.request({
+                "action": "can_release",
+                "cgroup_id": cgroup_id,
+            })
+        except Exception as e:  # noqa: BLE001 - any socket/JSON error = fail closed
+            log.warning("  can_release(%s): ShadowFS unreachable (%s) -- "
+                        "NOT releasing (fail closed)", cgroup_id, e)
+            return False
+        if not isinstance(resp, dict) or resp.get("status") != "ok":
+            log.warning("  can_release(%s): ShadowFS error/malformed response "
+                        "(%r) -- NOT releasing (fail closed)", cgroup_id, resp)
+            return False
+        if "releasable" not in resp:
+            log.warning("  can_release(%s): response missing 'releasable' -- "
+                        "NOT releasing (fail closed)", cgroup_id)
+            return False
+        return bool(resp.get("releasable"))
+
+    def _fs_retry_finalize(self, cgroup_id: str) -> dict:
+        """Ask ShadowFS to re-run promotion/finalization for a stuck agent.
+        Returns the response dict (or an error dict on failure). Idempotent.
+        """
+        try:
+            return self.fs_client.request({
+                "action": "retry_finalize",
+                "cgroup_id": cgroup_id,
+            })
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": str(e)}
+
+    def _fs_ack_release(self, cgroup_id: str) -> None:
+        """Tell ShadowFS the external effects for a Finalized agent have been
+        released, so it may drop the terminal record. Best-effort: ShadowFS
+        refuses to drop a non-finalized agent, so a spurious ack is harmless.
+        """
+        try:
+            resp = self.fs_client.request({
+                "action": "ack_release",
+                "cgroup_id": cgroup_id,
+            })
+            if resp.get("status") != "ok":
+                log.debug("  ack_release(%s): %s", cgroup_id, resp.get("message"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("  ack_release(%s) failed: %s", cgroup_id, e)
+
+    def _finalize_retry_loop(self) -> None:
+        """Background loop: periodically retry finalization for deferred
+        cgroups and release them once ShadowFS reports Finalized. This turns a
+        transient promotion failure into a self-healing wait instead of a
+        permanent stall, while never releasing before Finalized.
+        """
+        while not self._retry_stop.wait(self._retry_interval):
+            with self._pending_lock:
+                pending = list(self._pending_release)
+            if not pending:
+                continue
+            with self._release_lock:
+                for cg in pending:
+                    self._fs_retry_finalize(cg)
+                    if self._fs_can_release(cg):
+                        log.info("  finalize-retry: cgroup=%s reached Finalized "
+                                 "-- releasing", cg)
+                        self._release_proc(cg)
+                        with self._pending_lock:
+                            self._pending_release.discard(cg)
 
     def _release_proc(self, cgroup_id: str) -> str:
         """
         Resume ShadowProc's frozen processes for a cgroup (letting their
-        held IPC / network / exit operations proceed) and flush the
-        cgroup's buffered stdout to the caller.
+        held IPC / network / exit operations proceed), flush the cgroup's
+        buffered stdout to the caller, and finally ACK the release to ShadowFS
+        so it can drop the finalized agent's terminal record.
 
-        Returns the flushed stdout content.
+        MUST only be called for a cgroup ShadowFS has confirmed Finalized
+        (see _fs_can_release). Returns the flushed stdout content.
         """
         frozen_resp = self.proc_client.request({
             "action": "list_frozen",
@@ -270,68 +356,98 @@ class ShadowOrchestrator:
         if buffered:
             log.info("  Releasing %d bytes of buffered stdout for cgroup=%s",
                      len(buffered), cgroup_id)
+
+        # Processes resumed and output flushed: the external effects are now
+        # out, so tell ShadowFS it may clean up the finalized terminal record.
+        self._fs_ack_release(cgroup_id)
         return buffered
 
     def _try_release_pending(self) -> None:
         """
-        Re-evaluate every deferred cgroup and release those whose upstream
-        dependencies have since been committed. Committing one cgroup can
-        unblock previously-deferred downstream cgroups, so this is called
-        after every commit.
+        Re-evaluate every deferred cgroup and release those that have since
+        reached Finalized. Committing/finalizing one cgroup can unblock
+        previously-deferred downstream cgroups, so this is called after every
+        commit (and periodically by the background retry loop). It first asks
+        ShadowFS to retry_finalize each pending cgroup so a transient promotion
+        failure does not wedge it, then releases only those now Finalized.
         """
-        with self._pending_lock:
-            pending = list(self._pending_release)
-        for cg in pending:
-            if self._fs_can_release(cg):
-                log.info("  Upstream now committed — releasing deferred "
-                         "cgroup=%s", cg)
-                self._release_proc(cg)
-                with self._pending_lock:
-                    self._pending_release.discard(cg)
+        with self._release_lock:
+            with self._pending_lock:
+                pending = list(self._pending_release)
+            for cg in pending:
+                self._fs_retry_finalize(cg)
+                if self._fs_can_release(cg):
+                    log.info("  Upstream now finalized \u2014 releasing deferred "
+                             "cgroup=%s", cg)
+                    self._release_proc(cg)
+                    with self._pending_lock:
+                        self._pending_release.discard(cg)
 
     def commit(self, cgroup_id: str) -> dict:
         """
-        Commit changes for a cgroup.
+        Commit (authorize) a cgroup's session and release it iff it finalizes.
 
-        Flow:
-        1. Commit filesystem changes in ShadowFS FIRST, so the dependency
-           graph reflects this commit before any release decision.
-        2. Release the cgroup's frozen processes ONLY if all of its
-           upstream dependencies are committed. Otherwise defer the
-           release (keep the processes frozen and stdout buffered) until a
-           later upstream commit unblocks it.
-        3. Re-evaluate previously-deferred cgroups this commit may unblock.
+        Result semantics (fs_resp["decision"]):
+          - "finalized":         ShadowFS promoted all file state and every
+                                 upstream is finalized. Processes resumed,
+                                 network un-fenced, stdout flushed, release
+                                 acked. fs_resp["released"]=True.
+          - "authorized_pending": policy approved but promotion and/or upstream
+                                 finalization is not complete (or a promotion
+                                 failed). The cgroup stays FENCED: processes
+                                 frozen, network fenced, stdout buffered. It is
+                                 parked for the background finalize-retry loop.
+                                 fs_resp["released"]=False, "deferred"=True.
 
-        Args:
-            cgroup_id: The cgroup identifier (path from /proc/<pid>/cgroup)
+        NOTE: this NEVER runs a rollback. A commit whose promotion partially
+        failed must not be rolled back (some paths may already be promoted);
+        the safe action is to stay fenced and retry finalization.
         """
         log.info("COMMIT cgroup=%s", cgroup_id)
 
-        # Step 1: Commit in ShadowFS first.
-        fs_resp = self.fs_client.request({
-            "action": "commit",
-            "cgroup_id": cgroup_id,
-        })
-        if fs_resp["status"] != "ok":
-            log.error("  ShadowFS commit failed: %s", fs_resp.get("message"))
-            return fs_resp
-        log.info("  ShadowFS commit successful")
+        with self._release_lock:
+            # Step 1: Authorize + attempt finalization in ShadowFS.
+            try:
+                fs_resp = self.fs_client.request({
+                    "action": "commit",
+                    "cgroup_id": cgroup_id,
+                })
+            except Exception as e:  # noqa: BLE001 - fail closed: keep fenced
+                log.error("  ShadowFS commit unreachable: %s -- keeping fenced", e)
+                with self._pending_lock:
+                    self._pending_release.add(cgroup_id)
+                return {"status": "error", "decision": "authorized_pending",
+                        "released": False, "deferred": True,
+                        "message": str(e), "stdout": ""}
+            if fs_resp.get("status") != "ok":
+                log.error("  ShadowFS commit failed: %s", fs_resp.get("message"))
+                return fs_resp
+            log.info("  ShadowFS commit: state=%s releasable=%s%s",
+                     fs_resp.get("state"), fs_resp.get("releasable"),
+                     (" finalize_err=" + fs_resp["finalize_err"])
+                     if fs_resp.get("finalize_err") else "")
 
-        # Step 2: Gate the process-layer release on upstream commit status.
-        if self._fs_can_release(cgroup_id):
-            fs_resp["stdout"] = self._release_proc(cgroup_id)
-            fs_resp["released"] = True
-        else:
-            with self._pending_lock:
-                self._pending_release.add(cgroup_id)
-            log.info("  Deferring release of cgroup=%s: upstream "
-                     "dependencies not fully committed yet", cgroup_id)
-            fs_resp["stdout"] = ""
-            fs_resp["released"] = False
-            fs_resp["deferred"] = True
+            # Step 2: Release ONLY if the agent reached Finalized. The gate is
+            # re-queried (fail-closed) rather than trusting the commit echo.
+            if self._fs_can_release(cgroup_id):
+                fs_resp["decision"] = "finalized"
+                fs_resp["stdout"] = self._release_proc(cgroup_id)
+                fs_resp["released"] = True
+                with self._pending_lock:
+                    self._pending_release.discard(cgroup_id)
+            else:
+                with self._pending_lock:
+                    self._pending_release.add(cgroup_id)
+                log.info("  cgroup=%s authorized but NOT finalized -- keeping "
+                         "processes frozen, network fenced, stdout buffered "
+                         "(background retry will finalize)", cgroup_id)
+                fs_resp["decision"] = "authorized_pending"
+                fs_resp["stdout"] = ""
+                fs_resp["released"] = False
+                fs_resp["deferred"] = True
 
-        # Step 3: This commit may have unblocked deferred downstream cgroups.
-        self._try_release_pending()
+            # Step 3: This commit may have unblocked deferred downstream cgroups.
+            self._try_release_pending()
 
         return fs_resp
 

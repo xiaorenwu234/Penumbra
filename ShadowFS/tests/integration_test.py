@@ -2308,6 +2308,65 @@ class TestUnlinkRollbackDoesNotResurrectInUnaffected(unittest.TestCase):
 
 
 # ===========================================================================
+# Orchestrator release gating (fail-closed) - pure unit tests, no FUSE/root.
+# Run standalone with:
+#   python3 -m unittest ShadowFS.tests.integration_test.TestOrchestratorReleaseFailClosed
+# ===========================================================================
+class TestOrchestratorReleaseFailClosed(unittest.TestCase):
+    """The orchestrator must NEVER release external effects unless ShadowFS
+    POSITIVELY confirms the agent is Finalized (releasable). Any ambiguity --
+    ShadowFS down, error status, missing field, malformed body -- must fail
+    closed. Built without real sockets by bypassing __init__."""
+
+    @staticmethod
+    def _orch(fs_behavior):
+        orch_dir = PROJECT_ROOT.parent / "orchestrator"
+        if str(orch_dir) not in sys.path:
+            sys.path.insert(0, str(orch_dir))
+        import shadow_orchestrator as so
+        orch = so.ShadowOrchestrator.__new__(so.ShadowOrchestrator)
+
+        class _FakeClient:
+            def request(self, data):
+                return fs_behavior()
+
+        orch.fs_client = _FakeClient()
+        return orch
+
+    def test_releasable_true_only_when_positively_confirmed(self):
+        orch = self._orch(lambda: {"status": "ok", "releasable": True})
+        self.assertTrue(orch._fs_can_release("cg"))
+
+    def test_releasable_false(self):
+        orch = self._orch(lambda: {"status": "ok", "releasable": False})
+        self.assertFalse(orch._fs_can_release("cg"))
+
+    def test_status_error_fail_closed(self):
+        orch = self._orch(lambda: {"status": "error", "message": "boom"})
+        self.assertFalse(orch._fs_can_release("cg"))
+
+    def test_missing_releasable_field_fail_closed(self):
+        orch = self._orch(lambda: {"status": "ok"})  # no 'releasable'
+        self.assertFalse(orch._fs_can_release("cg"))
+
+    def test_connection_exception_fail_closed(self):
+        def boom():
+            raise ConnectionError("ShadowFS disconnected")
+        orch = self._orch(boom)
+        self.assertFalse(orch._fs_can_release("cg"))
+
+    def test_timeout_exception_fail_closed(self):
+        def boom():
+            raise TimeoutError("ShadowFS timed out")
+        orch = self._orch(boom)
+        self.assertFalse(orch._fs_can_release("cg"))
+
+    def test_malformed_nondict_response_fail_closed(self):
+        orch = self._orch(lambda: ["not", "a", "dict"])
+        self.assertFalse(orch._fs_can_release("cg"))
+
+
+# ===========================================================================
 # Runner
 # ===========================================================================
 if __name__ == "__main__":

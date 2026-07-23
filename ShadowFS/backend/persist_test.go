@@ -272,3 +272,133 @@ func TestCloseProducesValidStateFile(t *testing.T) {
 		t.Errorf("type = %q, want mkdir", agent.UndoLog[0].Type)
 	}
 }
+
+// mkTmpDirs is a small helper: two temp dirs + cleanup, for crash-recovery
+// tests that must reopen the SAME staging/tracked dirs.
+func mkTmpDirs(t *testing.T) (tracked, staging string, cleanup func()) {
+	t.Helper()
+	tracked, err := os.MkdirTemp("", "recov_tracked_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging, err = os.MkdirTemp("", "recov_staging_")
+	if err != nil {
+		os.RemoveAll(tracked)
+		t.Fatal(err)
+	}
+	return tracked, staging, func() {
+		os.RemoveAll(tracked)
+		os.RemoveAll(staging)
+	}
+}
+
+// TestRecoveryFinalizedStaysReleasable: an agent that Finalized before a crash
+// must recover as Finalized (releasable) and remain RETAINED until AckRelease.
+func TestRecoveryFinalizedStaysReleasable(t *testing.T) {
+	tracked, staging, cleanup := mkTmpDirs(t)
+	defer cleanup()
+
+	b1, err := NewBackend(staging, tracked)
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	f := filepath.Join(tracked, "f.txt")
+	op, err := b1.PrepareWrite("agent-x", f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(op, []byte("v"), 0o644)
+	if _, err := b1.Commit("agent-x"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if !b1.CanRelease("agent-x") {
+		t.Fatal("precondition: agent should be releasable after commit")
+	}
+	b1.Close()
+
+	// Simulate restart.
+	b2, err := NewBackend(staging, tracked)
+	if err != nil {
+		t.Fatalf("NewBackend recovery: %v", err)
+	}
+	defer b2.Close()
+	if !b2.CanRelease("agent-x") {
+		t.Error("recovered agent must still be Finalized/releasable")
+	}
+	if got, _ := os.ReadFile(f); string(got) != "v" {
+		t.Errorf("promoted file after recovery = %q, want \"v\"", got)
+	}
+	if err := b2.AckRelease("agent-x"); err != nil {
+		t.Fatalf("AckRelease: %v", err)
+	}
+	if b2.CanRelease("agent-x") {
+		t.Error("after ack, agent is gone and must be fail-closed (not releasable)")
+	}
+}
+
+// TestRecoveryPromoteFailureStaysFenced: if a promotion was failing at crash
+// time and the fault PERSISTS across restart, recovery re-runs the idempotent
+// promotion, it fails again, and the agent stays fenced (NOT releasable) with
+// its recovery state intact. Pending is never mistaken for finalized. Once the
+// fault clears, retry finalizes. Skipped as root (root bypasses dir perms).
+func TestRecoveryPromoteFailureStaysFenced(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	tracked, staging, cleanup := mkTmpDirs(t)
+	defer cleanup()
+
+	sub := filepath.Join(tracked, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(sub, "f.txt")
+
+	b1, err := NewBackend(staging, tracked)
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	op, err := b1.PrepareWrite("agent-x", f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(op, []byte("v"), 0o644)
+	if err := os.Chmod(sub, 0o555); err != nil { // inject the fault
+		t.Fatal(err)
+	}
+	defer os.Chmod(sub, 0o755)
+	if _, err := b1.Commit("agent-x"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if b1.CanRelease("agent-x") {
+		t.Fatal("must not be releasable with a failing promotion")
+	}
+	b1.Close()
+
+	// Restart with the fault STILL present: recovery must not finalize.
+	b2, err := NewBackend(staging, tracked)
+	if err != nil {
+		t.Fatalf("NewBackend recovery: %v", err)
+	}
+	defer b2.Close()
+	if b2.CanRelease("agent-x") {
+		t.Fatal("recovery must NOT mistake a still-failing promotion for finalized")
+	}
+	if b2.AgentLen("agent-x") == 0 {
+		t.Error("recovery must preserve the un-promoted undo entry")
+	}
+
+	// Clear the fault and retry: now it finalizes.
+	if err := os.Chmod(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b2.RetryFinalize("agent-x"); err != nil {
+		t.Fatalf("RetryFinalize: %v", err)
+	}
+	if !b2.CanRelease("agent-x") {
+		t.Error("agent should finalize after fault cleared")
+	}
+	if got, _ := os.ReadFile(f); string(got) != "v" {
+		t.Errorf("promoted file = %q, want \"v\"", got)
+	}
+}

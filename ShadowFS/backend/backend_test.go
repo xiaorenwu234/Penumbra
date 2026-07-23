@@ -681,9 +681,11 @@ func TestCanReleaseGatedByUpstreamCommit(t *testing.T) {
 		t.Fatal("precondition: B should depend on A")
 	}
 
-	// Untracked cgroup: nothing can cascade into it → releasable.
-	if !b.CanRelease("cgroup-unknown") {
-		t.Error("untracked cgroup should be releasable")
+	// Untracked cgroup: FAIL CLOSED. Since the release gate is now strictly
+	// "agent reached Finalized", an unknown cgroup is NOT releasable (it must
+	// be registered + finalized via Commit, not assumed safe).
+	if b.CanRelease("cgroup-unknown") {
+		t.Error("untracked cgroup must NOT be releasable (fail closed)")
 	}
 
 	// Nothing committed yet: neither is releasable.
@@ -1208,12 +1210,18 @@ func TestReadOnlyUpstreamDoesNotBlockWriterPromote(t *testing.T) {
 		t.Errorf("agentA should be finalized, AgentLen = %d", b.AgentLen(agentA))
 	}
 
-	// B should also be auto-finalized (read-only, no undo, no dirty).
+	// B should also be auto-finalized (read-only, no undo, no dirty). Under
+	// the lifecycle model a finalized agent is RETAINED with State=Finalized
+	// (until the orchestrator acks release), not deleted.
 	b.mu.Lock()
-	_, bExists := b.agents[agentB]
-	b.mu.Unlock()
+	bAgent, bExists := b.agents[agentB]
+	var bState AgentLifecycle = -1
 	if bExists {
-		t.Error("read-only agentB should be auto-finalized after upstream A is finalized")
+		bState = bAgent.State
+	}
+	b.mu.Unlock()
+	if !bExists || bState != Finalized {
+		t.Errorf("read-only agentB should be retained as Finalized after upstream A is finalized (exists=%v state=%v)", bExists, bState)
 	}
 }
 
@@ -1452,5 +1460,348 @@ func TestMkdirRollbackRemovesOverlayChildren(t *testing.T) {
 	// Overlay dir should be completely gone.
 	if _, err := os.Stat(op); !os.IsNotExist(err) {
 		t.Error("overlay dir should be removed after rollback")
+	}
+}
+
+// --- P0 lifecycle: finalize / retention / ack_release ---
+
+// TestLifecycleFinalizeThenAck verifies the retention contract: a committed
+// agent with no un-finalized upstream reaches Finalized and is RELEASABLE, but
+// its record is RETAINED until AckRelease is called (so the orchestrator can
+// release external effects first). AckRelease then drops it and is idempotent.
+func TestLifecycleFinalizeThenAck(t *testing.T) {
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	f := filepath.Join(trackedDir, "f.txt")
+	writeOverlay(t, b, agentA, f, []byte("a"))
+
+	res, err := b.Commit(agentA)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if res.State != Finalized || !res.CanRelease {
+		t.Fatalf("want Finalized+releasable, got state=%v canRelease=%v", res.State, res.CanRelease)
+	}
+	if !b.CanRelease(agentA) {
+		t.Error("agentA should be releasable after finalize")
+	}
+	// Retained (not deleted) until ack.
+	b.mu.Lock()
+	_, exists := b.agents[agentA]
+	b.mu.Unlock()
+	if !exists {
+		t.Error("finalized agent must be retained until AckRelease")
+	}
+	// The file must have been promoted to the real filesystem.
+	if got, _ := os.ReadFile(f); string(got) != "a" {
+		t.Errorf("promoted file = %q, want \"a\"", got)
+	}
+
+	if err := b.AckRelease(agentA); err != nil {
+		t.Fatalf("AckRelease: %v", err)
+	}
+	b.mu.Lock()
+	_, exists = b.agents[agentA]
+	b.mu.Unlock()
+	if exists {
+		t.Error("agent must be dropped after AckRelease")
+	}
+	// Idempotent.
+	if err := b.AckRelease(agentA); err != nil {
+		t.Errorf("AckRelease should be idempotent, got %v", err)
+	}
+}
+
+// TestCommitRegistersNoFileOpAgent verifies that committing a cgroup ShadowFS
+// never saw (no file operations) REGISTERS it and drives it straight to
+// Finalized, so release gating never has to treat "absent" as "safe".
+func TestCommitRegistersNoFileOpAgent(t *testing.T) {
+	b, _, _, cleanup := setup(t)
+	defer cleanup()
+
+	// Never touched by any Record*; fail-closed before commit.
+	if b.CanRelease("cgroup-noop") {
+		t.Fatal("unknown cgroup must not be releasable before commit")
+	}
+	res, err := b.Commit("cgroup-noop")
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if res.State != Finalized || !res.CanRelease {
+		t.Fatalf("no-file-op agent should finalize immediately, got state=%v", res.State)
+	}
+	if !b.CanRelease("cgroup-noop") {
+		t.Error("no-file-op agent should be releasable after commit")
+	}
+}
+
+// TestPromotionFailureKeepsFenced is the core P0 guarantee: when a promotion
+// fails (here: the destination directory is read-only), NOTHING is released
+// and NO recovery state is discarded — CanRelease stays false, the undo entry
+// and dirty tracking are preserved. After the fault is cleared, RetryFinalize
+// drives the agent to Finalized. Skipped as root (root ignores dir perms).
+func TestPromotionFailureKeepsFenced(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions; cannot inject rename EACCES")
+	}
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	sub := filepath.Join(trackedDir, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(sub, "f.txt")
+	writeOverlay(t, b, agentA, f, []byte("payload"))
+
+	// Inject the fault: make the promote destination directory read-only so
+	// the overlay->orig rename fails with EACCES.
+	if err := os.Chmod(sub, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(sub, 0o755) // ensure cleanup can remove it
+
+	res, err := b.Commit(agentA)
+	if err != nil {
+		t.Fatalf("Commit (infra) error: %v", err)
+	}
+	// Promotion failed => NOT finalized, NOT releasable.
+	if res.CanRelease || b.CanRelease(agentA) {
+		t.Fatal("agent must NOT be releasable when a promotion failed")
+	}
+	if res.State == Finalized {
+		t.Fatalf("state must not be Finalized after a promotion failure, got %v", res.State)
+	}
+	// Recovery state preserved: the undo entry and dirty tracking survive so
+	// the promotion can be retried.
+	if b.AgentLen(agentA) == 0 {
+		t.Error("undo entry must be preserved after a failed promotion")
+	}
+	b.mu.Lock()
+	_, stillDirty := b.fileDirty[f]
+	ferr := ""
+	if a := b.agents[agentA]; a != nil {
+		ferr = a.FinalizeErr
+	}
+	b.mu.Unlock()
+	if !stillDirty {
+		t.Error("fileDirty tracking must be preserved after a failed promotion")
+	}
+	if ferr == "" {
+		t.Error("FinalizeErr should record why promotion failed")
+	}
+
+	// Clear the fault and retry: now it must finalize and become releasable.
+	if err := os.Chmod(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err = b.RetryFinalize(agentA)
+	if err != nil {
+		t.Fatalf("RetryFinalize: %v", err)
+	}
+	if res.State != Finalized || !res.CanRelease || !b.CanRelease(agentA) {
+		t.Fatalf("after clearing the fault, retry must finalize: state=%v canRelease=%v", res.State, res.CanRelease)
+	}
+	if got, _ := os.ReadFile(f); string(got) != "payload" {
+		t.Errorf("promoted file = %q, want \"payload\"", got)
+	}
+}
+
+// roDirInject creates trackedDir/<name> (0755) and returns it plus a function
+// that makes it read-only (so an overlay->orig rename into it fails EACCES).
+// Tests using it must t.Skip when running as root (root bypasses perms).
+func roDir(t *testing.T, trackedDir, name string) (string, func(), func()) {
+	t.Helper()
+	dir := filepath.Join(trackedDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fail := func() {
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+	heal := func() { _ = os.Chmod(dir, 0o755) }
+	return dir, fail, heal
+}
+
+// TestMultiFilePartialPromoteFailureKeepsFenced: one agent writes two files;
+// promoting the second fails (read-only dir). The agent must NOT finalize or
+// release, the failed path's recovery state is preserved, yet the successful
+// path was promoted. After the fault clears, retry finalizes.
+func TestMultiFilePartialPromoteFailureKeepsFenced(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	good := filepath.Join(trackedDir, "good.txt")
+	writeOverlay(t, b, agentA, good, []byte("good"))
+	badDir, fail, heal := roDir(t, trackedDir, "bad")
+	defer heal()
+	bad := filepath.Join(badDir, "bad.txt")
+	writeOverlay(t, b, agentA, bad, []byte("bad"))
+
+	fail()
+	res, err := b.Commit(agentA)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if res.CanRelease || b.CanRelease(agentA) {
+		t.Fatal("agent must NOT release while one file's promotion failed")
+	}
+	if res.State == Finalized {
+		t.Fatalf("must not be Finalized, got %v", res.State)
+	}
+	if b.AgentLen(agentA) == 0 {
+		t.Error("failed path's undo entry must be preserved")
+	}
+	// The good file must already be on disk (partial promotion is allowed;
+	// only external-effect RELEASE is gated).
+	if got, _ := os.ReadFile(good); string(got) != "good" {
+		t.Errorf("good file should be promoted, got %q", got)
+	}
+
+	heal()
+	res, err = b.RetryFinalize(agentA)
+	if err != nil {
+		t.Fatalf("RetryFinalize: %v", err)
+	}
+	if res.State != Finalized || !b.CanRelease(agentA) {
+		t.Fatalf("retry should finalize, state=%v", res.State)
+	}
+	if got, _ := os.ReadFile(bad); string(got) != "bad" {
+		t.Errorf("bad file should be promoted after retry, got %q", got)
+	}
+}
+
+// TestUpstreamPromoteFailureBlocksDownstream: B depends on A. A's promotion
+// fails; B's own promotion succeeds and B is approved — but B must NOT be
+// releasable because its upstream A is not Finalized. Clearing A's fault and
+// retrying finalizes both.
+func TestUpstreamPromoteFailureBlocksDownstream(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	aDir, fail, heal := roDir(t, trackedDir, "a")
+	defer heal()
+	fa := filepath.Join(aDir, "fa.txt")
+	writeOverlay(t, b, agentA, fa, []byte("a"))
+
+	// B reads A's file (B depends on A) and writes its own file in a writable dir.
+	b.RecordReadOpen(agentB, fa)
+	gb := filepath.Join(trackedDir, "gb.txt")
+	writeOverlay(t, b, agentB, gb, []byte("b"))
+	if !b.DependsOn(agentB, agentA) {
+		t.Fatal("precondition: B must depend on A")
+	}
+
+	fail()
+	if _, err := b.Commit(agentA); err != nil {
+		t.Fatalf("Commit A: %v", err)
+	}
+	if _, err := b.Commit(agentB); err != nil {
+		t.Fatalf("Commit B: %v", err)
+	}
+	if b.CanRelease(agentB) {
+		t.Fatal("downstream B must NOT release while upstream A's promotion failed")
+	}
+	if b.CanRelease(agentA) {
+		t.Fatal("A must NOT release with a failed promotion")
+	}
+
+	heal()
+	if _, err := b.RetryFinalize(agentA); err != nil {
+		t.Fatalf("RetryFinalize A: %v", err)
+	}
+	if !b.CanRelease(agentA) {
+		t.Error("A should finalize after fault cleared")
+	}
+	if !b.CanRelease(agentB) {
+		t.Error("B should finalize once upstream A finalized")
+	}
+}
+
+// TestCycleFinalizesTogether: A <-> B mutual dependency. Once both commit and
+// both promotions succeed, the whole SCC finalizes and both become releasable.
+func TestCycleFinalizesTogether(t *testing.T) {
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	fa := filepath.Join(trackedDir, "fa.txt")
+	fb := filepath.Join(trackedDir, "fb.txt")
+	writeOverlay(t, b, agentA, fa, []byte("a"))
+	writeOverlay(t, b, agentB, fb, []byte("b"))
+	// Build the cycle: B reads fa (B->A), A reads fb (A->B).
+	b.RecordReadOpen(agentB, fa)
+	b.RecordReadOpen(agentA, fb)
+	if !b.DependsOn(agentB, agentA) || !b.DependsOn(agentA, agentB) {
+		t.Fatal("precondition: A and B must form a dependency cycle")
+	}
+
+	if _, err := b.Commit(agentA); err != nil {
+		t.Fatalf("Commit A: %v", err)
+	}
+	// Before B commits, A cannot finalize (its SCC partner B is unapproved).
+	if b.CanRelease(agentA) {
+		t.Fatal("A must not release before its cycle partner B is approved")
+	}
+	if _, err := b.Commit(agentB); err != nil {
+		t.Fatalf("Commit B: %v", err)
+	}
+	if !b.CanRelease(agentA) || !b.CanRelease(agentB) {
+		t.Fatal("the whole cycle should finalize once both are approved+promoted")
+	}
+	if got, _ := os.ReadFile(fa); string(got) != "a" {
+		t.Errorf("fa not promoted: %q", got)
+	}
+	if got, _ := os.ReadFile(fb); string(got) != "b" {
+		t.Errorf("fb not promoted: %q", got)
+	}
+}
+
+// TestCycleMemberPromoteFailureFencesAll: in an A <-> B cycle, if ONE member's
+// promotion fails the ENTIRE SCC stays fenced (no member releases), even the
+// member whose own promotion succeeded. Clearing the fault + retry finalizes
+// the whole cycle.
+func TestCycleMemberPromoteFailureFencesAll(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	aDir, fail, heal := roDir(t, trackedDir, "a")
+	defer heal()
+	fa := filepath.Join(aDir, "fa.txt") // A's promote will fail
+	fb := filepath.Join(trackedDir, "fb.txt") // B's promote will succeed
+	writeOverlay(t, b, agentA, fa, []byte("a"))
+	writeOverlay(t, b, agentB, fb, []byte("b"))
+	b.RecordReadOpen(agentB, fa)
+	b.RecordReadOpen(agentA, fb)
+
+	fail()
+	if _, err := b.Commit(agentA); err != nil {
+		t.Fatalf("Commit A: %v", err)
+	}
+	if _, err := b.Commit(agentB); err != nil {
+		t.Fatalf("Commit B: %v", err)
+	}
+	// A's promotion failed => the whole SCC must be fenced.
+	if b.CanRelease(agentA) || b.CanRelease(agentB) {
+		t.Fatal("no cycle member may release when one member's promotion failed")
+	}
+
+	heal()
+	if _, err := b.RetryFinalize(agentA); err != nil {
+		t.Fatalf("RetryFinalize: %v", err)
+	}
+	if !b.CanRelease(agentA) || !b.CanRelease(agentB) {
+		t.Fatal("the whole cycle should finalize after the fault clears")
 	}
 }
