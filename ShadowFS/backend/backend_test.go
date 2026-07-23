@@ -1042,11 +1042,12 @@ func TestHasWriteEntryAfterRmdir(t *testing.T) {
 // NOT prevent an upstream writer from being promoted when committed.
 //
 // Scenario:
-//   Agent A writes f.txt     → A is a writer
-//   Agent B reads f.txt      → B depends on A (read dependency)
-//   commit(B)                → B.Committed=true (but B has no writes)
-//   commit(A)                → should promote f.txt even though B has
-//                              no explicit write-level commit
+//
+//	Agent A writes f.txt     → A is a writer
+//	Agent B reads f.txt      → B depends on A (read dependency)
+//	commit(B)                → B.Committed=true (but B has no writes)
+//	commit(A)                → should promote f.txt even though B has
+//	                           no explicit write-level commit
 func TestReadOnlyAgentDoesNotBlockPromote(t *testing.T) {
 	b, trackedDir, _, cleanup := setup(t)
 	defer cleanup()
@@ -1090,10 +1091,11 @@ func TestReadOnlyAgentDoesNotBlockPromote(t *testing.T) {
 // not committed. R is read-only and cannot affect promotion.
 //
 // Scenario:
-//   Agent A writes f.txt      → A is a writer
-//   Agent B reads f.txt       → B depends on A
-//   commit(A)                 → A should promote + finalize immediately
-//                                (B is read-only, should not block)
+//
+//	Agent A writes f.txt      → A is a writer
+//	Agent B reads f.txt       → B depends on A
+//	commit(A)                 → A should promote + finalize immediately
+//	                             (B is read-only, should not block)
 func TestReadOnlyAgentDoesNotBlockUpstreamFinalize(t *testing.T) {
 	b, trackedDir, _, cleanup := setup(t)
 	defer cleanup()
@@ -1144,11 +1146,12 @@ func TestReadOnlyAgentDoesNotBlockUpstreamFinalize(t *testing.T) {
 // has a read-only upstream dependency that would previously block promote.
 //
 // Scenario:
-//   Agent A writes shared.txt
-//   Agent B reads shared.txt  → B depends on A
-//   Agent C writes shared.txt → C depends on A AND B
-//     (C depends on B because B read a file that C is also writing,
-//      via the isAncestor/exact-path dependency in RecordReadOpen)
+//
+//	Agent A writes shared.txt
+//	Agent B reads shared.txt  → B depends on A
+//	Agent C writes shared.txt → C depends on A AND B
+//	  (C depends on B because B read a file that C is also writing,
+//	   via the isAncestor/exact-path dependency in RecordReadOpen)
 //
 // Wait — actually C depends on B only if B also wrote the file. Let me
 // reconsider the dependency model.
@@ -1163,26 +1166,28 @@ func TestReadOnlyAgentDoesNotBlockUpstreamFinalize(t *testing.T) {
 // for the agent itself (B has Committed=false and tryFinalize requires it).
 //
 // The real fix scenario:
-//   Agent A writes f.txt → fileDirty[f] = {A}
-//   Agent B reads f.txt  → B depends on A
-//   commit(B)            → B.Committed=true, tryFinalize(B):
-//     dependsOn[B] = {A}, A not committed → B stays
-//   commit(A)            → A.Committed=true, tryPromoteAll:
-//     tryPromotePath(f): writers={A}, A committed ✓
-//       upstreams of A: none ✓ → promote!
-//     tryFinalize(A): UndoLog empty ✓, dependsOn[A] empty ✓ → finalize A
-//     tryFinalize(B): UndoLog empty ✓, Committed=true ✓,
-//       dependsOn[B]={A}, A was finalized (removed) → not in agents → skip
-//       → finalize B
+//
+//	Agent A writes f.txt → fileDirty[f] = {A}
+//	Agent B reads f.txt  → B depends on A
+//	commit(B)            → B.Committed=true, tryFinalize(B):
+//	  dependsOn[B] = {A}, A not committed → B stays
+//	commit(A)            → A.Committed=true, tryPromoteAll:
+//	  tryPromotePath(f): writers={A}, A committed ✓
+//	    upstreams of A: none ✓ → promote!
+//	  tryFinalize(A): UndoLog empty ✓, dependsOn[A] empty ✓ → finalize A
+//	  tryFinalize(B): UndoLog empty ✓, Committed=true ✓,
+//	    dependsOn[B]={A}, A was finalized (removed) → not in agents → skip
+//	    → finalize B
 //
 // This actually works correctly WITHOUT the fix because B IS committed.
 // The issue is when B is NOT committed:
-//   Agent A writes f.txt
-//   Agent B reads f.txt  → B depends on A
-//   commit(A) only       → promote f.txt, tryFinalize(A):
-//     UndoLog empty ✓, dependsOn[A] empty ✓ → finalize A
-//     tryFinalize(B): B.Committed=false → before fix: return false
-//     After fix: B is read-only (no undo, no dirty) → allowed
+//
+//	Agent A writes f.txt
+//	Agent B reads f.txt  → B depends on A
+//	commit(A) only       → promote f.txt, tryFinalize(A):
+//	  UndoLog empty ✓, dependsOn[A] empty ✓ → finalize A
+//	  tryFinalize(B): B.Committed=false → before fix: return false
+//	  After fix: B is read-only (no undo, no dirty) → allowed
 func TestReadOnlyUpstreamDoesNotBlockWriterPromote(t *testing.T) {
 	b, trackedDir, _, cleanup := setup(t)
 	defer cleanup()
@@ -1778,7 +1783,7 @@ func TestCycleMemberPromoteFailureFencesAll(t *testing.T) {
 
 	aDir, fail, heal := roDir(t, trackedDir, "a")
 	defer heal()
-	fa := filepath.Join(aDir, "fa.txt") // A's promote will fail
+	fa := filepath.Join(aDir, "fa.txt")       // A's promote will fail
 	fb := filepath.Join(trackedDir, "fb.txt") // B's promote will succeed
 	writeOverlay(t, b, agentA, fa, []byte("a"))
 	writeOverlay(t, b, agentB, fb, []byte("b"))
@@ -1803,5 +1808,158 @@ func TestCycleMemberPromoteFailureFencesAll(t *testing.T) {
 	}
 	if !b.CanRelease(agentA) || !b.CanRelease(agentB) {
 		t.Fatal("the whole cycle should finalize after the fault clears")
+	}
+}
+
+// --- Advanced FS features: hard links / special files / xattr ---
+
+// TestHardLinkPromotesRealLink: a hard link recorded speculatively becomes a
+// real hard link (same inode, nlink>=2) on the orig FS after commit.
+func TestHardLinkPromotesRealLink(t *testing.T) {
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	target := filepath.Join(trackedDir, "t.txt")
+	if err := os.WriteFile(target, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(trackedDir, "l.txt")
+	if err := b.RecordLink(agentA, target, link); err != nil {
+		t.Fatalf("RecordLink: %v", err)
+	}
+	if _, err := b.Commit(agentA); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	var st1, st2 syscall.Stat_t
+	if err := syscall.Stat(target, &st1); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Stat(link, &st2); err != nil {
+		t.Fatalf("orig hard link not promoted: %v", err)
+	}
+	if st1.Ino != st2.Ino {
+		t.Errorf("hard link inode mismatch: target=%d link=%d", st1.Ino, st2.Ino)
+	}
+	if st1.Nlink < 2 {
+		t.Errorf("target nlink=%d, want >=2", st1.Nlink)
+	}
+	if got, _ := os.ReadFile(link); string(got) != "data" {
+		t.Errorf("link content=%q", got)
+	}
+}
+
+// TestHardLinkRollback: rolling back discards the overlay link and never
+// creates the orig link.
+func TestHardLinkRollback(t *testing.T) {
+	b, trackedDir, stagingDir, cleanup := setup(t)
+	defer cleanup()
+
+	target := filepath.Join(trackedDir, "t.txt")
+	os.WriteFile(target, []byte("data"), 0o644)
+	link := filepath.Join(trackedDir, "l.txt")
+	if err := b.RecordLink(agentA, target, link); err != nil {
+		t.Fatalf("RecordLink: %v", err)
+	}
+	if err := b.Rollback(agentA); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Error("orig link must not exist after rollback")
+	}
+	if _, err := os.Lstat(filepath.Join(stagingDir, "l.txt")); !os.IsNotExist(err) {
+		t.Error("overlay link must be removed on rollback")
+	}
+}
+
+// TestMknodFifoCommitAndRollback: a FIFO special file is created in the
+// overlay, removed on rollback, and promoted to a real FIFO on commit.
+func TestMknodFifoCommitAndRollback(t *testing.T) {
+	b, trackedDir, stagingDir, cleanup := setup(t)
+	defer cleanup()
+
+	fifo := filepath.Join(trackedDir, "p.fifo")
+	overlay := filepath.Join(stagingDir, "p.fifo")
+
+	if err := b.RecordMknod(agentA, fifo, syscall.S_IFIFO|0o644, 0); err != nil {
+		t.Fatalf("RecordMknod: %v", err)
+	}
+	if _, err := os.Lstat(overlay); err != nil {
+		t.Fatalf("overlay fifo should exist: %v", err)
+	}
+	if err := b.Rollback(agentA); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if _, err := os.Lstat(overlay); !os.IsNotExist(err) {
+		t.Error("overlay fifo should be gone after rollback")
+	}
+	if _, err := os.Lstat(fifo); !os.IsNotExist(err) {
+		t.Error("orig fifo must not exist after rollback")
+	}
+
+	// Commit path.
+	if err := b.RecordMknod(agentA, fifo, syscall.S_IFIFO|0o644, 0); err != nil {
+		t.Fatalf("RecordMknod (2): %v", err)
+	}
+	if _, err := b.Commit(agentA); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Lstat(fifo, &st); err != nil {
+		t.Fatalf("orig fifo not promoted: %v", err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFIFO {
+		t.Errorf("promoted node is not a FIFO: mode=%#o", st.Mode)
+	}
+}
+
+// TestSetxattrRollbackAndCommit: a speculative xattr change lands on the
+// overlay copy; rollback leaves the orig's xattrs untouched, and commit
+// carries the new xattr onto orig while preserving pre-existing ones (ACLs
+// are xattrs, so this exercises the same path).
+func TestSetxattrRollbackAndCommit(t *testing.T) {
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	f := filepath.Join(trackedDir, "f.txt")
+	os.WriteFile(f, []byte("x"), 0o644)
+	if err := syscall.Setxattr(f, "user.orig", []byte("O"), 0); err != nil {
+		t.Skipf("xattr unsupported on this filesystem: %v", err)
+	}
+
+	op, err := b.RecordXattrWrite(agentA, f)
+	if err != nil {
+		t.Fatalf("RecordXattrWrite: %v", err)
+	}
+	if err := syscall.Setxattr(op, "user.agent", []byte("A"), 0); err != nil {
+		t.Fatalf("Setxattr overlay: %v", err)
+	}
+	if err := b.Rollback(agentA); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	buf := make([]byte, 64)
+	if _, err := syscall.Getxattr(f, "user.agent", buf); err == nil {
+		t.Error("orig must NOT carry the agent xattr after rollback")
+	}
+
+	op, err = b.RecordXattrWrite(agentA, f)
+	if err != nil {
+		t.Fatalf("RecordXattrWrite (2): %v", err)
+	}
+	if err := syscall.Setxattr(op, "user.agent", []byte("A"), 0); err != nil {
+		t.Fatalf("Setxattr overlay (2): %v", err)
+	}
+	if _, err := b.Commit(agentA); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	n, gerr := syscall.Getxattr(f, "user.agent", buf)
+	if gerr != nil {
+		t.Fatalf("orig missing agent xattr after commit: %v", gerr)
+	}
+	if string(buf[:n]) != "A" {
+		t.Errorf("agent xattr=%q, want A", buf[:n])
+	}
+	n2, gerr2 := syscall.Getxattr(f, "user.orig", buf)
+	if gerr2 != nil || string(buf[:n2]) != "O" {
+		t.Errorf("pre-existing xattr not preserved after commit: err=%v val=%q", gerr2, buf[:n2])
 	}
 }

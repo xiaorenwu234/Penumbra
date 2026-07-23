@@ -73,6 +73,12 @@ var (
 	_ fs.NodeRenamer    = (*OverlayNode)(nil)
 	_ fs.NodeSetattrer  = (*OverlayNode)(nil)
 	_ fs.NodeReadlinker = (*OverlayNode)(nil)
+	_ fs.NodeLinker       = (*OverlayNode)(nil)
+	_ fs.NodeMknoder      = (*OverlayNode)(nil)
+	_ fs.NodeGetxattrer   = (*OverlayNode)(nil)
+	_ fs.NodeSetxattrer   = (*OverlayNode)(nil)
+	_ fs.NodeRemovexattrer = (*OverlayNode)(nil)
+	_ fs.NodeListxattrer  = (*OverlayNode)(nil)
 )
 
 // --- Tracked file handle ---
@@ -96,6 +102,19 @@ type trackedHandle struct {
 }
 
 var _ fs.FileReleaser = (*trackedHandle)(nil)
+
+// Advisory file locks pass through to the underlying overlay/orig fd: the
+// embedded *fs.LoopbackFile already implements the lock operations, so these
+// assertions simply confirm trackedHandle exposes them. Both POSIX (fcntl)
+// and BSD (flock) locks arrive via Setlk/Setlkw (flock carries a LOCK_* flag),
+// so there is no separate Flock interface. Locks are ephemeral process state
+// (per the design): a rollback force-closes the agent's fds (CloseAgentFDs),
+// which releases any locks it held; no lock state is recorded in the undo log.
+var (
+	_ fs.FileGetlker  = (*trackedHandle)(nil)
+	_ fs.FileSetlker  = (*trackedHandle)(nil)
+	_ fs.FileSetlkwer = (*trackedHandle)(nil)
+)
 
 func (h *trackedHandle) Release(ctx context.Context) syscall.Errno {
 	// Unregister from backend so CloseAgentFDs won't double-close.
@@ -482,6 +501,14 @@ func (n *OverlayNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 	var openPath string
 	onOverlay := false
 	if isWrite {
+		// Copy-up on any writable open. A writable MAP_SHARED mapping requires
+		// an O_RDWR fd, so its page writeback flows through this overlay fd and
+		// is captured + marked dirty here (mmap write tracking). MAP_PRIVATE
+		// mappings never reach the file and need no tracking. NOTE: dirty pages
+		// of a still-live MAP_SHARED mapping that a frozen process has not yet
+		// written back are outside the rollback/commit guarantee until full
+		// mapping pin + writeback quiescence is implemented; flushAgentFDs at
+		// commit captures already-written-back pages.
 		op, err := shadowBackend.PrepareWrite(cgroupID, n.origPath())
 		if err != nil {
 			log.Printf("[overlay] PrepareWrite failed: %v", err)
@@ -559,6 +586,123 @@ func (n *OverlayNode) Create(ctx context.Context, name string, flags uint32, mod
 		cgroupID:     cgroupID,
 		onOverlay:    true,
 	}, 0, 0
+}
+
+// xattrReadPath returns the path to read xattrs from: the overlay copy when
+// one exists (so an agent sees its own copy-up + modifications), else orig.
+func (n *OverlayNode) xattrReadPath() string {
+	rel := n.relPath()
+	op := filepath.Join(n.root.overlayDir, rel)
+	if _, err := os.Lstat(op); err == nil {
+		return op
+	}
+	return filepath.Join(n.root.origDir, rel)
+}
+
+// Link creates a hard link `name` in this directory pointing at `target`,
+// tracked speculatively (see backend.RecordLink). On commit the link is
+// promoted as a real hard link on the orig FS; on rollback it is discarded.
+func (n *OverlayNode) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	cgroupID := getCgroupID(ctx)
+	tgt, ok := target.(*OverlayNode)
+	if !ok {
+		return nil, syscall.EXDEV
+	}
+	targetOrig := tgt.origPath()
+	linkOrig := n.origChildPath(name)
+
+	childRel := filepath.Join(n.relPath(), name)
+	if hasAncestorWhiteout(n.root.overlayDir, childRel) {
+		return nil, syscall.ENOENT
+	}
+	if err := shadowBackend.RecordLink(cgroupID, targetOrig, linkOrig); err != nil {
+		log.Printf("[overlay] RecordLink failed: %v", err)
+		return nil, fs.ToErrno(err)
+	}
+	// Stat the overlay link to fill the entry (Nlink reflects the shared inode).
+	overlayLink := filepath.Join(n.root.overlayDir, childRel)
+	var st syscall.Stat_t
+	if err := syscall.Lstat(overlayLink, &st); err != nil {
+		return nil, fs.ToErrno(err)
+	}
+	attrFromStat(&st, &out.Attr)
+	stable := fs.StableAttr{Mode: st.Mode & syscall.S_IFMT, Ino: st.Ino}
+	child := n.NewInode(ctx, &OverlayNode{root: n.root}, stable)
+	return child, 0
+}
+
+// Mknod creates a special file (FIFO / socket / char / block device) `name`
+// in this directory, tracked speculatively (see backend.RecordMknod).
+func (n *OverlayNode) Mknod(ctx context.Context, name string, mode uint32, rdev uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	cgroupID := getCgroupID(ctx)
+	origChild := n.origChildPath(name)
+	childRel := filepath.Join(n.relPath(), name)
+	if hasAncestorWhiteout(n.root.overlayDir, childRel) {
+		return nil, syscall.ENOENT
+	}
+	if err := shadowBackend.RecordMknod(cgroupID, origChild, mode, uint64(rdev)); err != nil {
+		log.Printf("[overlay] RecordMknod failed: %v", err)
+		return nil, fs.ToErrno(err)
+	}
+	overlayChild := filepath.Join(n.root.overlayDir, childRel)
+	var st syscall.Stat_t
+	if err := syscall.Lstat(overlayChild, &st); err != nil {
+		return nil, fs.ToErrno(err)
+	}
+	attrFromStat(&st, &out.Attr)
+	stable := fs.StableAttr{Mode: st.Mode & syscall.S_IFMT, Ino: st.Ino}
+	child := n.NewInode(ctx, &OverlayNode{root: n.root}, stable)
+	return child, 0
+}
+
+// Getxattr reads one extended attribute (incl. ACLs, which are xattrs) from
+// the agent's current view (overlay copy if present, else orig).
+func (n *OverlayNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
+	sz, err := syscall.Getxattr(n.xattrReadPath(), attr, dest)
+	if err != nil {
+		return 0, fs.ToErrno(err)
+	}
+	return uint32(sz), 0
+}
+
+// Listxattr lists extended attribute names from the agent's current view.
+func (n *OverlayNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
+	sz, err := syscall.Listxattr(n.xattrReadPath(), dest)
+	if err != nil {
+		return 0, fs.ToErrno(err)
+	}
+	return uint32(sz), 0
+}
+
+// Setxattr sets an extended attribute (incl. ACLs). It first copies the file
+// up (RecordXattrWrite tracks it as a speculative write) so the change lands
+// on the overlay copy; commit's promote rename carries the modified xattrs,
+// and rollback discards the overlay copy leaving orig xattrs intact.
+func (n *OverlayNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
+	cgroupID := getCgroupID(ctx)
+	overlayPath, err := shadowBackend.RecordXattrWrite(cgroupID, n.origPath())
+	if err != nil {
+		log.Printf("[overlay] Setxattr copy-up failed: %v", err)
+		return fs.ToErrno(err)
+	}
+	if err := syscall.Setxattr(overlayPath, attr, data, int(flags)); err != nil {
+		return fs.ToErrno(err)
+	}
+	return 0
+}
+
+// Removexattr removes an extended attribute, tracked like Setxattr.
+func (n *OverlayNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
+	cgroupID := getCgroupID(ctx)
+	overlayPath, err := shadowBackend.RecordXattrWrite(cgroupID, n.origPath())
+	if err != nil {
+		log.Printf("[overlay] Removexattr copy-up failed: %v", err)
+		return fs.ToErrno(err)
+	}
+	if err := syscall.Removexattr(overlayPath, attr); err != nil {
+		return fs.ToErrno(err)
+	}
+	return 0
 }
 
 func (n *OverlayNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -667,14 +811,12 @@ func (n *OverlayNode) Rename(ctx context.Context, name string, newParent fs.Inod
 		return syscall.ENOENT
 	}
 
-	// Whiteout checks on destination: reject rename into a deleted path
-	// (direct whiteout) or into a deleted directory (ancestor whiteout).
+	// Whiteout checks on destination: renaming INTO a directly-whiteout'd
+	// path is LEGAL — it overwrites a name another agent deleted. We must NOT
+	// reject on a direct destination whiteout; RecordRename clears it and
+	// records dstHadWh so a rollback restores it. Only reject when an ANCESTOR
+	// directory is deleted (the destination location itself is gone).
 	newRel := filepath.Join(newParentNode.relPath(), newName)
-	if wp := whiteoutPath(n.root.overlayDir, newRel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
-			return syscall.ENOENT
-		}
-	}
 	if hasAncestorWhiteout(n.root.overlayDir, newRel) {
 		return syscall.ENOENT
 	}
@@ -695,11 +837,8 @@ func (n *OverlayNode) Rename(ctx context.Context, name string, newParent fs.Inod
 	if hasAncestorWhiteout(n.root.overlayDir, oldRel) {
 		return syscall.ENOENT
 	}
-	if wp := whiteoutPath(n.root.overlayDir, newRel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
-			return syscall.ENOENT
-		}
-	}
+	// (No direct destination-whiteout reject here either: renaming over a
+	// whiteout'd name is a legal overwrite — see above.)
 	if hasAncestorWhiteout(n.root.overlayDir, newRel) {
 		return syscall.ENOENT
 	}
@@ -921,6 +1060,10 @@ func main() {
 			Debug:             *debug,
 			AllowOther:        *allowOther,
 			ExtraCapabilities: fuse.CAP_ATOMIC_O_TRUNC,
+			// Enable POSIX (fcntl) and BSD (flock) advisory file locking so
+			// the trackedHandle lock passthrough (Getlk/Setlk/Setlkw/Flock)
+			// is exercised by the kernel.
+			EnableLocks: true,
 		},
 	}
 	server, err := fs.Mount(mntDir, root, opts)

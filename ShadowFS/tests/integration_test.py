@@ -2308,6 +2308,123 @@ class TestUnlinkRollbackDoesNotResurrectInUnaffected(unittest.TestCase):
 
 
 # ===========================================================================
+# Advanced FS features: hard links / special files / xattr / flock
+# (guarded like the rest of the suite: needs root/systemd/FUSE)
+# ===========================================================================
+class TestHardLinkCommit(unittest.TestCase):
+    """Hard link a committed file -> commit -> orig gains a real hard link."""
+
+    def test_hardlink_commit(self):
+        cfg = TestConfig("hardlink-commit")
+        try:
+            cfg.create_orig("t.txt", "data")
+            cfg.mount()
+            run_agent("A", [{"op": "link",
+                             "target": cfg.mnt_path("t.txt"),
+                             "path": cfg.mnt_path("l.txt")}])
+            self.assertFalse(cfg.orig_exists("l.txt"))
+            commit(cfg, "A")
+            time.sleep(0.3)
+            self.assertTrue(cfg.orig_exists("l.txt"))
+            self.assertEqual(cfg.read_orig("l.txt"), "data")
+            st_t = os.stat(cfg.orig_path("t.txt"))
+            st_l = os.stat(cfg.orig_path("l.txt"))
+            self.assertEqual(st_t.st_ino, st_l.st_ino)
+            self.assertGreaterEqual(st_t.st_nlink, 2)
+        finally:
+            cfg.cleanup()
+
+
+class TestMkfifoRollbackCommit(unittest.TestCase):
+    """mkfifo via FUSE -> rollback leaves orig clean; commit promotes it."""
+
+    def test_mkfifo(self):
+        cfg = TestConfig("mkfifo")
+        try:
+            cfg.mount()
+            run_agent("A", [{"op": "mknod", "kind": "fifo",
+                             "path": cfg.mnt_path("p.fifo"), "mode": 0o644}])
+            self.assertFalse(cfg.orig_exists("p.fifo"))
+            rollback(cfg, "A")
+            time.sleep(0.5)
+            self.assertFalse(cfg.orig_exists("p.fifo"))
+            run_agent("A", [{"op": "mknod", "kind": "fifo",
+                             "path": cfg.mnt_path("p.fifo"), "mode": 0o644}])
+            commit(cfg, "A")
+            time.sleep(0.3)
+            import stat as _stat
+            self.assertTrue(_stat.S_ISFIFO(os.stat(cfg.orig_path("p.fifo")).st_mode))
+        finally:
+            cfg.cleanup()
+
+
+class TestXattrRollbackCommit(unittest.TestCase):
+    """setxattr via FUSE -> rollback keeps orig xattrs; commit carries them."""
+
+    def test_xattr(self):
+        cfg = TestConfig("xattr")
+        try:
+            cfg.create_orig("f.txt", "x")
+            try:
+                os.setxattr(cfg.orig_path("f.txt"), "user.orig", b"O")
+            except OSError as e:
+                self.skipTest(f"xattr unsupported: {e}")
+            cfg.mount()
+            run_agent("A", [{"op": "setxattr", "path": cfg.mnt_path("f.txt"),
+                             "name": "user.agent", "value": "A"}])
+            # orig must not carry the speculative xattr yet
+            with self.assertRaises(OSError):
+                os.getxattr(cfg.orig_path("f.txt"), "user.agent")
+            rollback(cfg, "A")
+            time.sleep(0.5)
+            with self.assertRaises(OSError):
+                os.getxattr(cfg.orig_path("f.txt"), "user.agent")
+            self.assertEqual(os.getxattr(cfg.orig_path("f.txt"), "user.orig"), b"O")
+            # commit path
+            run_agent("A", [{"op": "setxattr", "path": cfg.mnt_path("f.txt"),
+                             "name": "user.agent", "value": "A"}])
+            commit(cfg, "A")
+            time.sleep(0.3)
+            self.assertEqual(os.getxattr(cfg.orig_path("f.txt"), "user.agent"), b"A")
+            self.assertEqual(os.getxattr(cfg.orig_path("f.txt"), "user.orig"), b"O")
+        finally:
+            cfg.cleanup()
+
+
+class TestFlockContention(unittest.TestCase):
+    """An exclusive flock held by A makes B's non-blocking flock fail, proving
+    lock operations pass through the FUSE mount."""
+
+    def test_flock_nb_contention(self):
+        cfg = TestConfig("flock")
+        try:
+            cfg.create_orig("lk.txt", "x")
+            cfg.mount()
+            # A holds an exclusive lock for a while (in the background).
+            import threading
+            errs = {}
+
+            def holder():
+                try:
+                    run_agent("A", [{"op": "flock", "path": cfg.mnt_path("lk.txt"),
+                                     "kind": "ex", "hold": 1.5}])
+                except Exception as e:  # noqa: BLE001
+                    errs["holder"] = e
+            th = threading.Thread(target=holder)
+            th.start()
+            time.sleep(0.4)  # let A acquire
+            # B tries a non-blocking exclusive lock -> should fail (EWOULDBLOCK).
+            res = run_agent("B", [{"op": "flock", "path": cfg.mnt_path("lk.txt"),
+                                   "kind": "ex", "nb": True}])
+            th.join()
+            self.assertNotIn("holder", errs, f"holder failed: {errs.get('holder')}")
+            self.assertFalse(res[0]["ok"],
+                             "B's non-blocking flock should fail while A holds it")
+        finally:
+            cfg.cleanup()
+
+
+# ===========================================================================
 # Orchestrator release gating (fail-closed) - pure unit tests, no FUSE/root.
 # Run standalone with:
 #   python3 -m unittest ShadowFS.tests.integration_test.TestOrchestratorReleaseFailClosed

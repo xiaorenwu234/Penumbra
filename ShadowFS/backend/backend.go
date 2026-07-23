@@ -130,6 +130,12 @@ type Backend struct {
 	dependents  map[string]map[string]struct{}
 	dependsOn   map[string]map[string]struct{}
 	fileDirty   map[string]map[string]struct{} // orig path -> set of agents that have dirtied it
+	// publishDirs accumulates the orig parent directories of paths promoted
+	// during the current settle. They are fsync'd as ONE group barrier before
+	// any agent in the group is marked Finalized, so the whole commit group's
+	// externally-visible publish is crash-atomic (all-or-nothing after
+	// recovery). Protected by mu.
+	publishDirs map[string]struct{}
 	seq         int64
 	mu          sync.Mutex
 	persistPath string
@@ -198,6 +204,7 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 		dependents:   make(map[string]map[string]struct{}),
 		dependsOn:    make(map[string]map[string]struct{}),
 		fileDirty:    make(map[string]map[string]struct{}),
+		publishDirs:  make(map[string]struct{}),
 		persistPath:  persistFilePath(stagingDir),
 		walPath:      walFilePath(stagingDir),
 		walNotify:    make(chan struct{}, 1),
@@ -560,6 +567,47 @@ func (b *Backend) redoEntry(s SerializableEntry) {
 			return
 		}
 		f.Close()
+	case "link":
+		// Recreate the overlay hard link to the target's overlay copy so a
+		// crash between WAL fsync and the os.Link is recovered. Idempotent:
+		// EEXIST is fine; a missing target overlay is skipped (the target's
+		// own redo will materialise it, and promote links on the orig side).
+		if s.OverlayPath == "" || s.TargetPath == "" {
+			return
+		}
+		if err := ensureOverlayParent(s.OverlayPath); err != nil {
+			log.Printf("[backend] redo link parent %q: %v", s.OverlayPath, err)
+			return
+		}
+		tgtOverlay, oerr := overlayPathFor(b.stagingDir, b.trackedDir, s.TargetPath)
+		if oerr == nil {
+			if _, st := os.Lstat(tgtOverlay); st == nil {
+				if err := os.Link(tgtOverlay, s.OverlayPath); err != nil && !os.IsExist(err) {
+					log.Printf("[backend] redo link %q -> %q: %v", tgtOverlay, s.OverlayPath, err)
+				}
+			}
+		}
+		if s.HadWhiteout && s.WhiteoutPath != "" {
+			if err := os.Remove(s.WhiteoutPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("[backend] redo link whiteout-remove %q: %v", s.WhiteoutPath, err)
+			}
+		}
+	case "mknod":
+		if s.OverlayPath == "" {
+			return
+		}
+		if err := ensureOverlayParent(s.OverlayPath); err != nil {
+			log.Printf("[backend] redo mknod parent %q: %v", s.OverlayPath, err)
+			return
+		}
+		if err := syscall.Mknod(s.OverlayPath, s.Mode, int(s.Rdev)); err != nil && !errors.Is(err, syscall.EEXIST) {
+			log.Printf("[backend] redo mknod %q: %v", s.OverlayPath, err)
+		}
+		if s.HadWhiteout && s.WhiteoutPath != "" {
+			if err := os.Remove(s.WhiteoutPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("[backend] redo mknod whiteout-remove %q: %v", s.WhiteoutPath, err)
+			}
+		}
 	}
 }
 
@@ -722,6 +770,29 @@ func (b *Backend) CloseAgentFDs(cgroupID string) {
 	}
 	if len(fds) > 0 {
 		log.Printf("[backend] CloseAgentFDs: agent=%q closed %d fd(s)", cgroupID, len(fds))
+	}
+}
+
+// flushAgentFDs fsyncs every tracked fd of the agent so that any data the
+// kernel has written back through the FUSE data path -- including dirty pages
+// of a writable MAP_SHARED mmap that the process has already msync'd/flushed --
+// is durable on the overlay copy BEFORE promotion renames it onto orig. Called
+// at commit time, when ShadowProc has frozen the agent. Best-effort: an fsync
+// error on an already-closed or read-only fd is ignored. NOTE: this cannot
+// force writeback of a still-live mapping whose dirty pages a FROZEN process
+// has not yet flushed -- see the mmap scope note in Open().
+func (b *Backend) flushAgentFDs(cgroupID string) {
+	b.openFDsMu.Lock()
+	fds := make([]*TrackedFD, len(b.openFDs[cgroupID]))
+	copy(fds, b.openFDs[cgroupID])
+	b.openFDsMu.Unlock()
+	for _, tfd := range fds {
+		if tfd.IsClosed() {
+			continue
+		}
+		if err := syscall.Fsync(tfd.FD()); err != nil {
+			log.Printf("[backend] flushAgentFDs: agent=%q fd=%d: %v", cgroupID, tfd.FD(), err)
+		}
 	}
 }
 
@@ -1477,6 +1548,221 @@ func (b *Backend) RecordRename(cgroupID, oldPath, newPath string) error {
 	return nil
 }
 
+// RecordLink creates a hard link at linkOrig pointing to targetOrig, tracked
+// for rollback/promote. The target is copied up so the overlay holds a shared
+// inode; on promote a real hard link is created on the orig FS. Hard links to
+// directories are rejected (EPERM), matching link(2).
+func (b *Backend) RecordLink(cgroupID, targetOrig, linkOrig string) error {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+
+	if st, lerr := os.Lstat(targetOrig); lerr == nil && st.IsDir() {
+		return syscall.EPERM
+	}
+
+	linkOverlay, err := overlayPathFor(b.stagingDir, b.trackedDir, linkOrig)
+	if err != nil {
+		return err
+	}
+	targetOverlay, err := overlayPathFor(b.stagingDir, b.trackedDir, targetOrig)
+	if err != nil {
+		return err
+	}
+	linkWhiteout, _ := whiteoutPathFor(b.stagingDir, b.trackedDir, linkOrig)
+
+	b.mu.Lock()
+	hadWh := false
+	if linkWhiteout != "" {
+		if _, statErr := os.Lstat(linkWhiteout); statErr == nil {
+			hadWh = true
+		}
+	}
+	seqNum := b.nextSeq()
+	rec := WALRecord{
+		CgroupID:          cgroupID,
+		SeqNum:            seqNum,
+		Entry:             SerializableEntry{Type: "link", SeqNum: seqNum, OrigPath: linkOrig, OverlayPath: linkOverlay, TargetPath: targetOrig, HadWhiteout: hadWh, WhiteoutPath: linkWhiteout},
+		DirtyOverlayPaths: []string{linkOverlay},
+	}
+	b.mu.Unlock()
+
+	if err := <-b.submitWAL(rec); err != nil {
+		b.applyTurnAbort(seqNum)
+		return err
+	}
+
+	b.mu.Lock()
+	b.applyTurnWait(seqNum)
+	defer func() {
+		b.applyTurnDone(seqNum)
+		b.mu.Unlock()
+	}()
+
+	if hasAncestorWhiteoutOverlay(b.stagingDir, linkOverlay) {
+		return fmt.Errorf("ancestor directory of %q has been deleted", linkOrig)
+	}
+	// Ensure the target has an overlay copy so both names share one inode.
+	if _, statErr := os.Lstat(targetOverlay); os.IsNotExist(statErr) {
+		if _, oerr := os.Lstat(targetOrig); oerr == nil {
+			if err := copyUpFile(targetOrig, targetOverlay); err != nil {
+				return fmt.Errorf("link copy-up target %q: %w", targetOrig, err)
+			}
+		} else {
+			return syscall.ENOENT
+		}
+	}
+	if err := ensureOverlayParent(linkOverlay); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(linkOverlay); err == nil {
+		if err := os.RemoveAll(linkOverlay); err != nil {
+			return fmt.Errorf("link clear dst overlay: %w", err)
+		}
+	}
+	if linkWhiteout != "" {
+		if _, statErr := os.Lstat(linkWhiteout); statErr == nil {
+			hadWh = true
+			if _, err := removeWhiteout(b.stagingDir, b.trackedDir, linkOrig); err != nil {
+				return err
+			}
+		}
+	}
+	if err := os.Link(targetOverlay, linkOverlay); err != nil {
+		return fmt.Errorf("link overlay %q -> %q: %w", targetOverlay, linkOverlay, err)
+	}
+
+	agent := b.ensureAgent(cgroupID)
+	b.markDirty(cgroupID, linkOrig)
+	// The link's content derives from the target: if the target's writer(s)
+	// roll back, this link must too. Add that dependency WITHOUT registering
+	// this agent as a writer of the target (it did not modify the target).
+	if tw, ok := b.fileDirty[targetOrig]; ok {
+		for prev := range tw {
+			if prev != cgroupID {
+				b.addDependency(prev, cgroupID)
+			}
+		}
+	}
+	if len(agent.UndoLog) > 0 {
+		kept := agent.UndoLog[:0]
+		for _, e := range agent.UndoLog {
+			if e.Path() == linkOrig {
+				continue
+			}
+			kept = append(kept, e)
+		}
+		agent.UndoLog = kept
+	}
+	log.Printf("[backend] RecordLink: agent=%q %q -> %q", cgroupID, linkOrig, targetOrig)
+	agent.UndoLog = append(agent.UndoLog, &OverlayLinkEntry{
+		baseEntry:     baseEntry{SeqNum: seqNum},
+		OrigPath:      linkOrig,
+		TargetOrig:    targetOrig,
+		OverlayPath:   linkOverlay,
+		OverlayTarget: targetOverlay,
+		HadWhiteout:   hadWh,
+		WhiteoutPath:  linkWhiteout,
+	})
+	return nil
+}
+
+// RecordMknod creates a special file (FIFO / socket / char / block device, or
+// a plain node) at origPath in the overlay, tracked for rollback/promote.
+// `mode` includes the S_IFMT type bits; `rdev` is the device number.
+func (b *Backend) RecordMknod(cgroupID, origPath string, mode uint32, rdev uint64) error {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+
+	overlayPath, err := overlayPathFor(b.stagingDir, b.trackedDir, origPath)
+	if err != nil {
+		return err
+	}
+	whPath, _ := whiteoutPathFor(b.stagingDir, b.trackedDir, origPath)
+
+	b.mu.Lock()
+	hadWh := false
+	if whPath != "" {
+		if _, statErr := os.Lstat(whPath); statErr == nil {
+			hadWh = true
+		}
+	}
+	seqNum := b.nextSeq()
+	rec := WALRecord{
+		CgroupID:          cgroupID,
+		SeqNum:            seqNum,
+		Entry:             SerializableEntry{Type: "mknod", SeqNum: seqNum, OrigPath: origPath, OverlayPath: overlayPath, Mode: mode, Rdev: rdev, HadWhiteout: hadWh, WhiteoutPath: whPath},
+		DirtyOverlayPaths: []string{overlayPath},
+	}
+	b.mu.Unlock()
+
+	if err := <-b.submitWAL(rec); err != nil {
+		b.applyTurnAbort(seqNum)
+		return err
+	}
+
+	b.mu.Lock()
+	b.applyTurnWait(seqNum)
+	defer func() {
+		b.applyTurnDone(seqNum)
+		b.mu.Unlock()
+	}()
+
+	if hasAncestorWhiteoutOverlay(b.stagingDir, overlayPath) {
+		return fmt.Errorf("ancestor directory of %q has been deleted", origPath)
+	}
+	if err := ensureOverlayParent(overlayPath); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(overlayPath); err == nil {
+		if err := os.RemoveAll(overlayPath); err != nil {
+			return fmt.Errorf("mknod clear overlay: %w", err)
+		}
+	}
+	if whPath != "" {
+		if _, statErr := os.Lstat(whPath); statErr == nil {
+			hadWh = true
+			if _, err := removeWhiteout(b.stagingDir, b.trackedDir, origPath); err != nil {
+				return err
+			}
+		}
+	}
+	if err := syscall.Mknod(overlayPath, mode, int(rdev)); err != nil {
+		return fmt.Errorf("mknod overlay %q: %w", overlayPath, err)
+	}
+
+	agent := b.ensureAgent(cgroupID)
+	b.markDirty(cgroupID, origPath)
+	if len(agent.UndoLog) > 0 {
+		kept := agent.UndoLog[:0]
+		for _, e := range agent.UndoLog {
+			if e.Path() == origPath {
+				continue
+			}
+			kept = append(kept, e)
+		}
+		agent.UndoLog = kept
+	}
+	log.Printf("[backend] RecordMknod: agent=%q path=%q mode=%#o rdev=%d", cgroupID, origPath, mode, rdev)
+	agent.UndoLog = append(agent.UndoLog, &OverlayMknodEntry{
+		baseEntry:    baseEntry{SeqNum: seqNum},
+		OrigPath:     origPath,
+		OverlayPath:  overlayPath,
+		Mode:         mode,
+		Rdev:         rdev,
+		HadWhiteout:  hadWh,
+		WhiteoutPath: whPath,
+	})
+	return nil
+}
+
+// RecordXattrWrite ensures origPath is copied up and tracked as a write, so a
+// subsequent syscall.Setxattr / Removexattr applied to the returned overlay
+// copy is captured for rollback (discard overlay) and promote (rename carries
+// the modified attributes). ACLs are stored as xattrs, so this covers them.
+func (b *Backend) RecordXattrWrite(cgroupID, origPath string) (string, error) {
+	return b.PrepareWrite(cgroupID, origPath)
+}
+
 // HasActiveState reports whether the agent has any undo log entries or dirty
 // files. Purely-read agents with no active state do not need read dependency
 // tracking (they have nothing to roll back).
@@ -2106,6 +2392,9 @@ func (b *Backend) commitInternal(cgroupID string) {
 		agent.State = AuthorizedPending
 		log.Printf("[backend] Commit: agent=%q authorized (pending finalization)", cgroupID)
 	}
+	// Flush the agent's writable overlay fds (incl. written-back mmap pages)
+	// so promotion renames a fully up-to-date overlay copy.
+	b.flushAgentFDs(cgroupID)
 	_ = b.tryPromoteAll()
 }
 
@@ -2127,6 +2416,7 @@ func (b *Backend) RetryFinalize(cgroupID string) (CommitResult, error) {
 	if agent.State < AuthorizedPending {
 		return CommitResult{}, fmt.Errorf("retry_finalize: agent %q not authorized (state=%s)", cgroupID, agent.State)
 	}
+	b.flushAgentFDs(cgroupID)
 	_ = b.tryPromoteAll()
 	return b.lifecycleResultLocked(cgroupID), nil
 }
@@ -2220,6 +2510,20 @@ func (b *Backend) ackReleaseInternal(cgroupID string) {
 	}
 	delete(b.agents, cgroupID)
 	log.Printf("[backend] release_ack: dropped finalized agent=%q", cgroupID)
+}
+
+// publishBarrier fsyncs every orig parent directory accumulated by promotions
+// since the last barrier, then clears the set. This is the crash-atomic
+// group-publish durability point: it runs BEFORE any agent in the group is
+// marked Finalized, so a commit group's renames are all durable together
+// before its external effects can be released. Must be called with b.mu held.
+func (b *Backend) publishBarrier() {
+	for dir := range b.publishDirs {
+		if err := fsyncDir(dir); err != nil && !os.IsNotExist(err) {
+			log.Printf("[backend] publishBarrier fsync %q: %v", dir, err)
+		}
+		delete(b.publishDirs, dir)
+	}
 }
 
 // tryPromoteAll iterates over every dirty path and promotes those whose
@@ -2402,6 +2706,8 @@ func (b *Backend) tryPromotePath(path string) (bool, error) {
 	// an active UnlinkEntry for this path whose whiteout this is. The
 	// UnlinkEntry.Promote() will clean up its own whiteout when it runs.
 	_ = removeOverlayState(b.stagingDir, b.trackedDir, path, false)
+	// Record this path's orig parent dir for the group publish barrier.
+	b.publishDirs[filepath.Dir(path)] = struct{}{}
 	log.Printf("[backend] Promote: path=%q promoted (%d entries)", path, len(matched))
 	return true, nil
 }
@@ -2486,9 +2792,9 @@ func (b *Backend) computeSCCs() [][]string {
 
 	// Iterative Tarjan to avoid deep recursion on long dependency chains.
 	type frame struct {
-		node  string
-		succ  []string
-		i     int
+		node string
+		succ []string
+		i    int
 	}
 	successors := func(id string) []string {
 		out := make([]string, 0, len(b.dependsOn[id]))
@@ -2559,11 +2865,13 @@ func (b *Backend) computeSCCs() [][]string {
 
 // tryFinalizeSCCs finalizes every strongly-connected component that is READY,
 // treating each SCC as an atomic unit. An SCC becomes Finalized iff:
-//   (1) every member's policy is approved, AND
-//   (2) every member has no remaining undo entries (all its file promotions
-//       have succeeded — a failed/pending promotion leaves undo entries), AND
-//   (3) every upstream OUTSIDE the SCC is already Finalized (a pure-read
-//       upstream with no undo/dirty state does not block).
+//
+//	(1) every member's policy is approved, AND
+//	(2) every member has no remaining undo entries (all its file promotions
+//	    have succeeded — a failed/pending promotion leaves undo entries), AND
+//	(3) every upstream OUTSIDE the SCC is already Finalized (a pure-read
+//	    upstream with no undo/dirty state does not block).
+//
 // If any member fails (2), the WHOLE SCC stays fenced — this is what prevents a
 // cycle A -> B -> A from being released early or waiting forever. Returns true
 // if any SCC finalized. Must be called with b.mu held.
@@ -2621,7 +2929,11 @@ func (b *Backend) finalizeSCCIfReady(scc []string) bool {
 			}
 		}
 	}
-	// Ready: finalize the whole component atomically.
+	// Ready: finalize the whole component atomically. Publish barrier FIRST:
+	// fsync every orig parent directory touched by promotions in this settle
+	// so the group's on-disk state is durable as a unit before ANY member
+	// becomes releasable.
+	b.publishBarrier()
 	if len(scc) > 1 {
 		log.Printf("[backend] finalize SCC (cycle) as a unit: %v", scc)
 	}

@@ -18,7 +18,7 @@ Actions format (JSON array):
    {"op":"rmtree","path":"/mnt/dir"},
    {"op":"noop"}]
 """
-import sys, os, json, errno, shutil, time
+import sys, os, json, errno, shutil, time, fcntl, stat as statmod
 
 def run_actions(actions):
     results = []
@@ -87,6 +87,46 @@ def run_actions(actions):
                 # Create a symlink at `path` pointing to `target` (no resolution).
                 os.symlink(a["target"], a["path"])
                 results.append({"op": op, "ok": True})
+            elif op == "link":
+                # Hard link: create `path` pointing at the same inode as `target`.
+                os.link(a["target"], a["path"])
+                results.append({"op": op, "ok": True})
+            elif op == "mknod":
+                # Special file. `kind` is one of fifo/char/block; `mode` is the
+                # permission bits; `dev` is the device number (char/block).
+                kind = a.get("kind", "fifo")
+                perm = int(a.get("mode", 0o644))
+                if kind == "fifo":
+                    os.mkfifo(a["path"], perm)
+                else:
+                    ifmt = statmod.S_IFCHR if kind == "char" else statmod.S_IFBLK
+                    os.mknod(a["path"], perm | ifmt, int(a.get("dev", 0)))
+                results.append({"op": op, "ok": True})
+            elif op == "setxattr":
+                os.setxattr(a["path"], a["name"], a.get("value", "").encode())
+                results.append({"op": op, "ok": True})
+            elif op == "getxattr":
+                val = os.getxattr(a["path"], a["name"])
+                results.append({"op": op, "ok": True, "value": val.decode("utf-8", errors="replace")})
+            elif op == "listxattr":
+                results.append({"op": op, "ok": True, "names": sorted(os.listxattr(a["path"]))})
+            elif op == "removexattr":
+                os.removexattr(a["path"], a["name"])
+                results.append({"op": op, "ok": True})
+            elif op == "flock":
+                # Acquire an advisory lock, optionally hold it, then release.
+                # `kind` is sh/ex; `nb` requests non-blocking (LOCK_NB).
+                lk = fcntl.LOCK_EX if a.get("kind", "ex") == "ex" else fcntl.LOCK_SH
+                if a.get("nb"):
+                    lk |= fcntl.LOCK_NB
+                fd = os.open(a["path"], os.O_RDWR | os.O_CREAT, 0o644)
+                try:
+                    fcntl.flock(fd, lk)
+                    time.sleep(float(a.get("hold", 0.0)))
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    results.append({"op": op, "ok": True})
+                finally:
+                    os.close(fd)
             elif op == "readlink":
                 results.append({"op": op, "ok": True, "target": os.readlink(a["path"])})
             elif op == "raw_write":

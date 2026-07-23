@@ -31,11 +31,11 @@ type PersistAgent struct {
 	// lifecycle refactor: loadState maps a legacy Committed=true to
 	// AuthorizedPending and lets recovery re-derive Finalized. New checkpoints
 	// always write State and leave Committed at its zero value.
-	State       AgentLifecycle `json:"state"`
-	Committed   bool           `json:"committed,omitempty"`
-	FinalizeErr string         `json:"finalize_err,omitempty"`
-	EpochOpen     bool          `json:"epoch_open,omitempty"`
-	EpochStartSeq int64         `json:"epoch_start_seq,omitempty"`
+	State         AgentLifecycle `json:"state"`
+	Committed     bool           `json:"committed,omitempty"`
+	FinalizeErr   string         `json:"finalize_err,omitempty"`
+	EpochOpen     bool           `json:"epoch_open,omitempty"`
+	EpochStartSeq int64          `json:"epoch_start_seq,omitempty"`
 }
 
 // snapshot creates a deep copy of the backend state for serialization.

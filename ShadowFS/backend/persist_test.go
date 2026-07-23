@@ -3,6 +3,7 @@ package backend
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -30,6 +31,36 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 		if se != se2 {
 			t.Errorf("round-trip mismatch for %T: %+v != %+v", entry, se, se2)
 		}
+	}
+}
+
+func TestMarshalUnmarshalLinkMknod(t *testing.T) {
+	entries := []LogEntry{
+		&OverlayLinkEntry{baseEntry: baseEntry{SeqNum: 1}, OrigPath: "/a/l.txt", TargetOrig: "/a/t.txt", OverlayPath: "/s/l.txt", HadWhiteout: true, WhiteoutPath: "/s/.shadow.wh.l.txt"},
+		&OverlayMknodEntry{baseEntry: baseEntry{SeqNum: 2}, OrigPath: "/a/p.fifo", OverlayPath: "/s/p.fifo", Mode: uint32(syscall.S_IFIFO) | 0o644, Rdev: 0},
+		&OverlayMknodEntry{baseEntry: baseEntry{SeqNum: 3}, OrigPath: "/a/dev", OverlayPath: "/s/dev", Mode: uint32(syscall.S_IFCHR) | 0o600, Rdev: 0x0501},
+	}
+	for _, e := range entries {
+		se := MarshalEntry(e)
+		r := UnmarshalEntry(se)
+		if r == nil {
+			t.Fatalf("UnmarshalEntry returned nil for %T", e)
+		}
+		if r.Seq() != e.Seq() || r.Path() != e.Path() {
+			t.Errorf("seq/path mismatch for %T", e)
+		}
+		if MarshalEntry(r) != se {
+			t.Errorf("round-trip mismatch for %T: %+v != %+v", e, MarshalEntry(r), se)
+		}
+	}
+	// Link target and mknod device/mode survive the round trip.
+	link := UnmarshalEntry(MarshalEntry(entries[0])).(*OverlayLinkEntry)
+	if link.TargetOrig != "/a/t.txt" {
+		t.Errorf("link target not restored: %q", link.TargetOrig)
+	}
+	dev := UnmarshalEntry(MarshalEntry(entries[2])).(*OverlayMknodEntry)
+	if dev.Rdev != 0x0501 || dev.Mode&uint32(syscall.S_IFMT) != uint32(syscall.S_IFCHR) {
+		t.Errorf("mknod fields not restored: mode=%#o rdev=%#x", dev.Mode, dev.Rdev)
 	}
 }
 

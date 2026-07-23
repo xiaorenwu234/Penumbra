@@ -290,6 +290,104 @@ func (e *OverlayRmdirEntry) Promote() error {
 	return nil
 }
 
+// OverlayLinkEntry describes a hard link created in the overlay view at
+// OrigPath, pointing at the target TargetOrig. The overlay holds a hard link
+// (OverlayPath) to the target's overlay copy so both names share one inode
+// within the overlay; on promote the link is (re)created on the orig FS as a
+// real hard link to the promoted target, preserving hard-link semantics.
+type OverlayLinkEntry struct {
+	baseEntry
+	OrigPath      string // the new link path
+	TargetOrig    string // orig path of the link target
+	OverlayPath   string // overlay copy of the link (a hard link within staging)
+	OverlayTarget string // overlay copy of the target (record-time only)
+	HadWhiteout   bool
+	WhiteoutPath  string
+}
+
+func (e *OverlayLinkEntry) Path() string { return e.OrigPath }
+
+func (e *OverlayLinkEntry) Rollback() error {
+	if err := os.Remove(e.OverlayPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("rollback overlay link %q: %w", e.OverlayPath, err)
+	}
+	if e.HadWhiteout && e.WhiteoutPath != "" {
+		if err := os.MkdirAll(filepath.Dir(e.WhiteoutPath), 0o755); err != nil {
+			return fmt.Errorf("rollback link restore whiteout mkdir %q: %w", e.WhiteoutPath, err)
+		}
+		f, err := os.OpenFile(e.WhiteoutPath, os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return fmt.Errorf("rollback link restore whiteout %q: %w", e.WhiteoutPath, err)
+		}
+		f.Close()
+	}
+	return nil
+}
+
+func (e *OverlayLinkEntry) Promote() error {
+	if err := os.MkdirAll(filepath.Dir(e.OrigPath), 0o755); err != nil {
+		return fmt.Errorf("promote link mkdir parent: %w", err)
+	}
+	// Create the real hard link on the orig FS. If the target's own overlay
+	// write has not promoted yet, TargetOrig is still missing; returning the
+	// error keeps this link pending so tryPromoteAll retries it after the
+	// target promotes in a later fixpoint iteration (target and link are
+	// distinct paths). EEXIST means a prior run already linked it.
+	if err := os.Link(e.TargetOrig, e.OrigPath); err != nil && !os.IsExist(err) {
+		return fmt.Errorf("promote link %q -> %q: %w", e.TargetOrig, e.OrigPath, err)
+	}
+	if err := fsyncDir(filepath.Dir(e.OrigPath)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("promote link fsync parent %q: %w", filepath.Dir(e.OrigPath), err)
+	}
+	return nil
+}
+
+// OverlayMknodEntry describes a special file (FIFO / socket / char / block
+// device, or a plain regular node) created in the overlay view via mknod(2).
+type OverlayMknodEntry struct {
+	baseEntry
+	OrigPath     string
+	OverlayPath  string
+	Mode         uint32 // includes the S_IFMT type bits
+	Rdev         uint64 // device number (char/block); 0 otherwise
+	HadWhiteout  bool
+	WhiteoutPath string
+}
+
+func (e *OverlayMknodEntry) Path() string { return e.OrigPath }
+
+func (e *OverlayMknodEntry) Rollback() error {
+	if err := os.Remove(e.OverlayPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("rollback overlay mknod %q: %w", e.OverlayPath, err)
+	}
+	if e.HadWhiteout && e.WhiteoutPath != "" {
+		if err := os.MkdirAll(filepath.Dir(e.WhiteoutPath), 0o755); err != nil {
+			return fmt.Errorf("rollback mknod restore whiteout mkdir %q: %w", e.WhiteoutPath, err)
+		}
+		f, err := os.OpenFile(e.WhiteoutPath, os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return fmt.Errorf("rollback mknod restore whiteout %q: %w", e.WhiteoutPath, err)
+		}
+		f.Close()
+	}
+	return nil
+}
+
+func (e *OverlayMknodEntry) Promote() error {
+	if err := os.MkdirAll(filepath.Dir(e.OrigPath), 0o755); err != nil {
+		return fmt.Errorf("promote mknod mkdir parent: %w", err)
+	}
+	if err := syscall.Mknod(e.OrigPath, e.Mode, int(e.Rdev)); err != nil {
+		if !errors.Is(err, syscall.EEXIST) {
+			return fmt.Errorf("promote mknod %q (mode=%#o): %w", e.OrigPath, e.Mode, err)
+		}
+	}
+	if err := fsyncDir(filepath.Dir(e.OrigPath)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("promote mknod fsync parent %q: %w", filepath.Dir(e.OrigPath), err)
+	}
+	return nil
+}
+
 // --- Serialization ---
 
 // SerializableEntry is a flat JSON-friendly representation of any LogEntry.
@@ -305,6 +403,10 @@ type SerializableEntry struct {
 	// redoEntry can detect a partially-written overlay file after a crash
 	// between copyUpFile and its fsync.
 	OrigSize int64 `json:"orig_size,omitempty"`
+	// TargetPath is the orig path of a hard link's target (Type=="link").
+	TargetPath string `json:"target_path,omitempty"`
+	// Rdev is the device number of a special file (Type=="mknod").
+	Rdev uint64 `json:"rdev,omitempty"`
 }
 
 // MarshalEntry converts a LogEntry to its serializable form.
@@ -328,6 +430,20 @@ func MarshalEntry(e LogEntry) SerializableEntry {
 		return SerializableEntry{Type: "unlink", SeqNum: v.SeqNum, OrigPath: v.OrigPath, OverlayPath: v.OverlayPath, WhiteoutPath: v.WhiteoutPath}
 	case *OverlayRmdirEntry:
 		return SerializableEntry{Type: "rmdir", SeqNum: v.SeqNum, OrigPath: v.OrigPath, OverlayPath: v.OverlayPath, WhiteoutPath: v.WhiteoutPath}
+	case *OverlayLinkEntry:
+		se := SerializableEntry{Type: "link", SeqNum: v.SeqNum, OrigPath: v.OrigPath, OverlayPath: v.OverlayPath, TargetPath: v.TargetOrig}
+		if v.HadWhiteout {
+			se.WhiteoutPath = v.WhiteoutPath
+			se.HadWhiteout = true
+		}
+		return se
+	case *OverlayMknodEntry:
+		se := SerializableEntry{Type: "mknod", SeqNum: v.SeqNum, OrigPath: v.OrigPath, OverlayPath: v.OverlayPath, Mode: v.Mode, Rdev: v.Rdev}
+		if v.HadWhiteout {
+			se.WhiteoutPath = v.WhiteoutPath
+			se.HadWhiteout = true
+		}
+		return se
 	default:
 		return SerializableEntry{}
 	}
@@ -359,6 +475,25 @@ func UnmarshalEntry(s SerializableEntry) LogEntry {
 		return &OverlayUnlinkEntry{baseEntry: baseEntry{SeqNum: s.SeqNum}, OrigPath: s.OrigPath, OverlayPath: s.OverlayPath, WhiteoutPath: s.WhiteoutPath}
 	case "rmdir":
 		return &OverlayRmdirEntry{baseEntry: baseEntry{SeqNum: s.SeqNum}, OrigPath: s.OrigPath, OverlayPath: s.OverlayPath, WhiteoutPath: s.WhiteoutPath}
+	case "link":
+		return &OverlayLinkEntry{
+			baseEntry:    baseEntry{SeqNum: s.SeqNum},
+			OrigPath:     s.OrigPath,
+			TargetOrig:   s.TargetPath,
+			OverlayPath:  s.OverlayPath,
+			HadWhiteout:  s.HadWhiteout,
+			WhiteoutPath: s.WhiteoutPath,
+		}
+	case "mknod":
+		return &OverlayMknodEntry{
+			baseEntry:    baseEntry{SeqNum: s.SeqNum},
+			OrigPath:     s.OrigPath,
+			OverlayPath:  s.OverlayPath,
+			Mode:         s.Mode,
+			Rdev:         s.Rdev,
+			HadWhiteout:  s.HadWhiteout,
+			WhiteoutPath: s.WhiteoutPath,
+		}
 	default:
 		return nil
 	}
