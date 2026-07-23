@@ -1188,6 +1188,12 @@ func TestReadOnlyAgentDoesNotBlockUpstreamFinalize(t *testing.T) {
 //	  UndoLog empty ✓, dependsOn[A] empty ✓ → finalize A
 //	  tryFinalize(B): B.Committed=false → before fix: return false
 //	  After fix: B is read-only (no undo, no dirty) → allowed
+// TestReadOnlyDownstreamDoesNotBlockWriterFinalize: an uncommitted read-only
+// agent B (which merely read A's file, so B depends on A) does NOT block A's
+// promotion/finalization -- B is downstream, not upstream. Under the strong
+// semantics B is NOT auto-finalized: it has no filesystem writes but may still
+// have process/network/output effects, so it stays Speculative until its own
+// policy is approved (committed).
 func TestReadOnlyUpstreamDoesNotBlockWriterPromote(t *testing.T) {
 	b, trackedDir, _, cleanup := setup(t)
 	defer cleanup()
@@ -1206,7 +1212,8 @@ func TestReadOnlyUpstreamDoesNotBlockWriterPromote(t *testing.T) {
 	// Commit ONLY A. B is never committed.
 	b.Commit(agentA)
 
-	// A should be finalized and f.txt promoted.
+	// A should be finalized and f.txt promoted (B, being downstream, does
+	// not block it).
 	got, _ := os.ReadFile(f)
 	if string(got) != "new" {
 		t.Errorf("orig = %q, want new", got)
@@ -1214,10 +1221,13 @@ func TestReadOnlyUpstreamDoesNotBlockWriterPromote(t *testing.T) {
 	if b.AgentLen(agentA) != 0 {
 		t.Errorf("agentA should be finalized, AgentLen = %d", b.AgentLen(agentA))
 	}
+	if !b.CanRelease(agentA) {
+		t.Error("agentA should be releasable after finalize")
+	}
 
-	// B should also be auto-finalized (read-only, no undo, no dirty). Under
-	// the lifecycle model a finalized agent is RETAINED with State=Finalized
-	// (until the orchestrator acks release), not deleted.
+	// B must NOT be auto-finalized: an epoch is only authorized by an explicit
+	// commit (policy approval), even with zero filesystem writes. It stays
+	// Speculative and is NOT releasable.
 	b.mu.Lock()
 	bAgent, bExists := b.agents[agentB]
 	var bState AgentLifecycle = -1
@@ -1225,8 +1235,19 @@ func TestReadOnlyUpstreamDoesNotBlockWriterPromote(t *testing.T) {
 		bState = bAgent.State
 	}
 	b.mu.Unlock()
-	if !bExists || bState != Finalized {
-		t.Errorf("read-only agentB should be retained as Finalized after upstream A is finalized (exists=%v state=%v)", bExists, bState)
+	if !bExists || bState != Speculative {
+		t.Errorf("read-only agentB must stay Speculative until committed (exists=%v state=%v)", bExists, bState)
+	}
+	if b.CanRelease(agentB) {
+		t.Error("uncommitted read-only agentB must NOT be releasable")
+	}
+
+	// Once B's policy is approved, it finalizes (upstream A already finalized).
+	if _, err := b.Commit(agentB); err != nil {
+		t.Fatalf("Commit B: %v", err)
+	}
+	if !b.CanRelease(agentB) {
+		t.Error("agentB should finalize+release once committed and upstream is finalized")
 	}
 }
 
@@ -1961,5 +1982,111 @@ func TestSetxattrRollbackAndCommit(t *testing.T) {
 	n2, gerr2 := syscall.Getxattr(f, "user.orig", buf)
 	if gerr2 != nil || string(buf[:n2]) != "O" {
 		t.Errorf("pre-existing xattr not preserved after commit: err=%v val=%q", gerr2, buf[:n2])
+	}
+}
+
+// --- Strong-semantics invariants: no auto-authorize / deferred promotion /
+//     rollback refused after promotion starts ---
+
+// TestRollbackRefusedAfterPromotionStarted: once an agent has entered
+// Finalizing (a promotion has started, so some writes may already be
+// published), a rollback must be REFUSED -- the undo log can no longer restore
+// the torn workspace. Uses a read-only destination dir to wedge the agent in
+// Finalizing. Skipped as root (root bypasses dir perms).
+func TestRollbackRefusedAfterPromotionStarted(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	sub, fail, heal := roDir(t, trackedDir, "sub")
+	defer heal()
+	f := filepath.Join(sub, "f.txt")
+	writeOverlay(t, b, agentA, f, []byte("v"))
+
+	fail()
+	if _, err := b.Commit(agentA); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	// Promotion started but failed => agent is Finalizing.
+	b.mu.Lock()
+	st := b.agents[agentA].State
+	b.mu.Unlock()
+	if st != Finalizing {
+		t.Fatalf("expected Finalizing after a failed promotion, got %v", st)
+	}
+	// Rollback must be refused (cannot undo already-started promotion).
+	if _, err := b.RollbackWithAffected(agentA); err == nil {
+		t.Fatal("rollback of a Finalizing agent must be refused")
+	}
+	// The agent and its recovery state must still be intact for retry.
+	if b.AgentLen(agentA) == 0 {
+		t.Error("undo log must be preserved after a refused rollback")
+	}
+	// Clearing the fault + retry still finalizes it.
+	heal()
+	if _, err := b.RetryFinalize(agentA); err != nil {
+		t.Fatalf("RetryFinalize: %v", err)
+	}
+	if !b.CanRelease(agentA) {
+		t.Error("agent should finalize after fault cleared")
+	}
+}
+
+// TestPromotionDeferredUntilUpstreamFinalized: a downstream agent's files must
+// NOT be published to the real workspace while its upstream is merely approved
+// (not yet Finalized). A writes fa into a read-only dir (so A is stuck in
+// Finalizing, approved-but-not-finalized); B writes fb (writable) and depends
+// on A (reads fa). Committing both must leave fb UN-promoted until A finalizes.
+// Skipped as root.
+func TestPromotionDeferredUntilUpstreamFinalized(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	b, trackedDir, _, cleanup := setup(t)
+	defer cleanup()
+
+	aDir, fail, heal := roDir(t, trackedDir, "a")
+	defer heal()
+	fa := filepath.Join(aDir, "fa.txt")
+	writeOverlay(t, b, agentA, fa, []byte("a"))
+
+	fb := filepath.Join(trackedDir, "fb.txt")
+	writeOverlay(t, b, agentB, fb, []byte("b"))
+	b.RecordReadOpen(agentB, fa) // B depends on A (distinct paths, not co-writers)
+	if !b.DependsOn(agentB, agentA) {
+		t.Fatal("precondition: B must depend on A")
+	}
+
+	fail()
+	if _, err := b.Commit(agentA); err != nil {
+		t.Fatalf("Commit A: %v", err)
+	}
+	if _, err := b.Commit(agentB); err != nil {
+		t.Fatalf("Commit B: %v", err)
+	}
+	// A is approved but NOT Finalized (its promotion is failing), so B's fb
+	// must NOT have been published yet -- promotion is deferred.
+	if _, err := os.Lstat(fb); !os.IsNotExist(err) {
+		t.Error("downstream fb must NOT be promoted while upstream A is un-finalized")
+	}
+	if b.CanRelease(agentB) {
+		t.Error("downstream B must not be releasable before upstream A finalizes")
+	}
+
+	// Once A's fault clears and A finalizes, B's fb may finally publish.
+	heal()
+	if _, err := b.RetryFinalize(agentA); err != nil {
+		t.Fatalf("RetryFinalize A: %v", err)
+	}
+	if !b.CanRelease(agentA) {
+		t.Fatal("A should finalize after fault cleared")
+	}
+	if got, _ := os.ReadFile(fb); string(got) != "b" {
+		t.Errorf("fb should be promoted once upstream finalized, got %q", got)
+	}
+	if !b.CanRelease(agentB) {
+		t.Error("B should finalize once upstream A is finalized")
 	}
 }

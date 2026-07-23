@@ -233,16 +233,12 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 	} else if len(records) > 0 {
 		b.replayWAL(records)
 	}
-	// Auto-authorize pure-read agents after WAL replay: they have no writes
-	// to promote and no dirty files, so they must not block other agents'
-	// finalization. During normal operation tryPromoteAll handles this, but
-	// during replay we restore this transient state explicitly since the
-	// auto-authorize was never persisted to the WAL.
-	for _, agent := range b.agents {
-		if !agent.approved() && len(agent.UndoLog) == 0 && len(agent.DirtyFiles) == 0 {
-			agent.State = AuthorizedPending
-		}
-	}
+	// NOTE: agents are NOT auto-authorized on recovery. An epoch is authorized
+	// only if a durable "commit" (authorize) WAL record was replayed above,
+	// which sets AuthorizedPending via commitInternal. A read-only epoch that
+	// was never committed stays Speculative: it may still have process /
+	// network / output effects that policy must approve before it finalizes
+	// (see the invariant enforced in tryPromoteAll / tryFinalizeSCCs).
 	// Re-derive Finalized states after recovery. Every Promote() is
 	// idempotent, so this is safe to run and reconstructs the durable
 	// finalized set from the authorized agents. Crucially, an agent is only
@@ -2114,6 +2110,22 @@ func (b *Backend) RollbackWithAffected(cgroupID string) ([]string, error) {
 		log.Printf("[backend] Rollback: agent %q not found, no-op", cgroupID)
 		return nil, nil
 	}
+	// Refuse rollback once promotion has STARTED for the target or for any
+	// agent its rollback would cascade into. Beyond AuthorizedPending (i.e.
+	// Finalizing/Finalized) some of the agent's writes may already be published
+	// to the real workspace, with their undo-log entries removed, so a rollback
+	// could no longer restore the pre-epoch state -- it would leave the
+	// workspace in a torn, unrecoverable state. The caller must instead drive
+	// the epoch to completion via retry_finalize. (An AuthorizedPending agent
+	// has promoted nothing yet -- its undo log is intact -- so it stays safely
+	// rollable.)
+	for id := range b.reachableFrom(cgroupID) {
+		if a := b.agents[id]; a != nil && a.State >= Finalizing {
+			st := a.State
+			b.mu.Unlock()
+			return nil, fmt.Errorf("rollback refused: agent %q is %s (promotion started; published state cannot be undone)", id, st)
+		}
+	}
 	seqNum := b.nextSeq()
 	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "rollback"}
 	b.mu.Unlock()
@@ -2555,28 +2567,23 @@ func (b *Backend) tryPromoteAll() error {
 			}
 			return paths[i] > paths[j]
 		})
+		// SCC membership for this pass. Under the strong-semantics model,
+		// promoting a member's files requires every upstream OUTSIDE its SCC to
+		// be Finalized (the incoming group must finalize before we publish
+		// downstream work); intra-SCC upstreams are resolved by the atomic SCC
+		// finalize below. Crucially, NO agent is auto-authorized here: an epoch
+		// must be explicitly committed (policy-approved) to advance, even if it
+		// made no filesystem writes -- a pure-read epoch may still have
+		// process / network / output effects that policy must gate.
+		sccOf := b.sccMembership()
 		progress := false
 		for _, p := range paths {
-			ran, err := b.tryPromotePath(p)
+			ran, err := b.tryPromotePath(p, sccOf)
 			if ran {
 				progress = true
 			}
 			if err != nil {
 				errs = append(errs, err)
-			}
-		}
-		ids := make([]string, 0, len(b.agents))
-		for id := range b.agents {
-			ids = append(ids, id)
-		}
-		for _, id := range ids {
-			// Auto-authorize read-only agents: they have no writes to
-			// promote and no dirty files, so they must not block other
-			// agents' finalization.
-			agent := b.agents[id]
-			if agent != nil && !agent.approved() && len(agent.UndoLog) == 0 && len(agent.DirtyFiles) == 0 {
-				agent.State = AuthorizedPending
-				progress = true
 			}
 		}
 		// Finalize whole strongly-connected components at once so dependency
@@ -2605,7 +2612,7 @@ func (b *Backend) tryPromoteAll() error {
 // every Promote() is idempotent, a later RetryFinalize re-runs the whole set
 // and only tears down once they all succeed. Returns (true, nil) when the
 // path was fully promoted, (false, nil) when it is not yet eligible.
-func (b *Backend) tryPromotePath(path string) (bool, error) {
+func (b *Backend) tryPromotePath(path string, sccOf map[string]int) (bool, error) {
 	writers, ok := b.fileDirty[path]
 	if !ok || len(writers) == 0 {
 		return false, nil
@@ -2617,15 +2624,30 @@ func (b *Backend) tryPromotePath(path string) (bool, error) {
 		}
 		for up := range b.dependsOn[w] {
 			upAgent, ok := b.agents[up]
-			if ok && !upAgent.approved() {
-				// A pure-read upstream (no undo entries, no dirty
-				// files) cannot affect promotion — treat it as
-				// effectively finalized so it does not block writers.
-				if len(upAgent.UndoLog) == 0 && len(upAgent.DirtyFiles) == 0 {
-					continue
-				}
-				return false, nil
+			if !ok {
+				continue // upstream gone => finalized and acked
 			}
+			if upAgent.State == Finalized {
+				continue
+			}
+			// Co-writers of THIS path share a single overlay copy and are
+			// promoted together as a unit (one rename), so their mutual
+			// dependency does not block the path's promotion: they all move to
+			// Finalizing together here, and the rollback guard then protects
+			// the torn window.
+			if _, coWriter := writers[up]; coWriter {
+				continue
+			}
+			// Strong semantics: an un-finalized upstream OUTSIDE this writer's
+			// SCC blocks promotion. Its group must Finalize first, otherwise a
+			// later reject of that upstream could cascade into files we have
+			// already published to the real workspace -- which the undo log can
+			// no longer restore. Intra-SCC upstreams do NOT block: the whole
+			// cycle promotes and finalizes together (see tryFinalizeSCCs).
+			if sccOf[up] == sccOf[w] {
+				continue
+			}
+			return false, nil
 		}
 	}
 
@@ -2731,10 +2753,8 @@ func (b *Backend) tryFinalize(cgroupID string) bool {
 	for up := range b.dependsOn[cgroupID] {
 		upAgent, ok := b.agents[up]
 		if ok && upAgent.State != Finalized {
-			// Pure-read upstreams do not block finalization.
-			if len(upAgent.UndoLog) == 0 && len(upAgent.DirtyFiles) == 0 {
-				continue
-			}
+			// Strong semantics: every incoming (upstream) group must be
+			// Finalized before this agent can finalize.
 			return false
 		}
 	}
@@ -2863,6 +2883,21 @@ func (b *Backend) computeSCCs() [][]string {
 	return sccs
 }
 
+// sccMembership maps each tracked agent to an integer identifying its
+// strongly-connected component in the current dependency graph. Two agents
+// share an id iff they are mutually reachable (a dependency cycle). Used by
+// tryPromotePath to allow intra-SCC promotion while still requiring every
+// upstream OUTSIDE the SCC to be Finalized. Must be called with b.mu held.
+func (b *Backend) sccMembership() map[string]int {
+	m := make(map[string]int, len(b.agents))
+	for i, comp := range b.computeSCCs() {
+		for _, id := range comp {
+			m[id] = i
+		}
+	}
+	return m
+}
+
 // tryFinalizeSCCs finalizes every strongly-connected component that is READY,
 // treating each SCC as an atomic unit. An SCC becomes Finalized iff:
 //
@@ -2922,9 +2957,8 @@ func (b *Backend) finalizeSCCIfReady(scc []string) bool {
 				continue // gone => finalized and acked
 			}
 			if upA.State != Finalized {
-				if len(upA.UndoLog) == 0 && len(upA.DirtyFiles) == 0 {
-					continue // pure-read upstream cannot cascade
-				}
+				// Strong semantics: the incoming group must be Finalized
+				// before this group may finalize (and release its effects).
 				return false
 			}
 		}
