@@ -46,6 +46,8 @@ def _bare_orch(proc_handler, fs_handler):
     orch._output_buffers = {}
     orch._pending_release = set()
     orch._pending_lock = threading.Lock()
+    orch._pending_ack = set()
+    orch._pending_ack_lock = threading.Lock()
     orch._release_lock = threading.RLock()
     return orch
 
@@ -195,6 +197,82 @@ class TestReleaseProcFailClosed(unittest.TestCase):
                       "cgroup must stay parked for the retry loop")
         self.assertNotIn("ack_release", orch.fs_client.actions(),
                          "release must never be acked while procs stay frozen")
+
+    def test_output_preread_failure_before_resume(self):
+        """frozen != [] but output pre-read fails => must NOT resume, no ack,
+        buffer preserved. This is the ordering fix: the read failure fails
+        closed BEFORE any process is resumed, so no external effect escapes."""
+        cg = "cg-preread-fail"
+
+        def proc(req):
+            if req["action"] == "list_frozen":
+                return {"status": "ok", "frozen": [5, 6]}
+            if req["action"] == "continue_by_cgroup":
+                raise AssertionError("must NOT resume when output pre-read failed")
+            return {"status": "ok"}
+
+        orch = _bare_orch(proc, _fs_ok)
+        # Unreadable buffer (a directory): open() for read raises OSError.
+        bad = tempfile.mkdtemp(prefix="shadow-out-dir-")
+        self.addCleanup(lambda: os.path.isdir(bad) and os.rmdir(bad))
+        orch._output_buffers[cg] = bad
+
+        ok, out = orch._release_proc(cg)
+
+        self.assertFalse(ok)
+        self.assertEqual(out, "")
+        self.assertNotIn("continue_by_cgroup", orch.proc_client.actions(),
+                         "processes must NOT be resumed after a pre-read failure")
+        self.assertNotIn("ack_release", orch.fs_client.actions())
+        self.assertIn(cg, orch._output_buffers,
+                      "buffer record must survive a pre-read failure")
+
+    def test_ack_failure_retries_ack_only(self):
+        """Resume + output succeed but ack fails => (True, content) with the
+        cgroup parked in _pending_ack; the ack-only retry then succeeds WITHOUT
+        re-resuming processes or re-flushing output."""
+        cg = "cg-ack-fail"
+
+        def proc(req):
+            if req["action"] == "list_frozen":
+                return {"status": "ok", "frozen": [3]}
+            if req["action"] == "continue_by_cgroup":
+                return {"status": "ok", "pids": [3]}
+            return {"status": "ok"}
+
+        ack_state = {"n": 0}
+
+        def fs(req):
+            if req["action"] == "ack_release":
+                ack_state["n"] += 1
+                # Fail the first ack, succeed on the retry.
+                if ack_state["n"] >= 2:
+                    return {"status": "ok"}
+                return {"status": "error", "message": "fs busy"}
+            return _fs_ok(req)
+
+        orch = _bare_orch(proc, fs)
+        path = self._make_buffer(orch, cg, content="out\n")
+
+        ok, out = orch._release_proc(cg)
+
+        self.assertTrue(ok, "external effects released even though ack failed")
+        self.assertEqual(out, "out\n")
+        self.assertIn(cg, orch._pending_ack, "failed ack must be parked for retry")
+        # Output was consumed (processes were resumed), so the file is gone.
+        self.assertNotIn(cg, orch._output_buffers)
+        self.assertFalse(os.path.exists(path))
+
+        # Ack-only retry: succeeds and must NOT resume or re-query processes.
+        orch._retry_pending_acks()
+
+        self.assertNotIn(cg, orch._pending_ack, "ack should clear on retry")
+        self.assertEqual(orch.proc_client.actions().count("continue_by_cgroup"), 1,
+                         "ack retry must NOT resume processes again")
+        self.assertEqual(orch.proc_client.actions().count("list_frozen"), 1,
+                         "ack retry must NOT re-query frozen processes")
+        self.assertEqual(orch.fs_client.actions().count("ack_release"), 2,
+                         "exactly one initial ack + one retry")
 
 
 if __name__ == "__main__":

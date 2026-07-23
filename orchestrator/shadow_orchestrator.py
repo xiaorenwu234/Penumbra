@@ -137,6 +137,17 @@ class ShadowOrchestrator:
         self._pending_release: set = set()
         self._pending_lock = threading.Lock()
 
+        # Ack-only retry set.
+        #
+        # Once a cgroup's external effects HAVE been released (processes
+        # resumed AND buffered output delivered), the only remaining step is
+        # telling ShadowFS it may drop the Finalized terminal record
+        # (ack_release). If that ack fails, the effects are already out -- we
+        # must NOT re-resume or re-flush. Such cgroups are parked here and the
+        # background loop retries ONLY the ack (AckRelease is idempotent).
+        self._pending_ack: set = set()
+        self._pending_ack_lock = threading.Lock()
+
         # Serializes ALL multi-service release/finalize interactions (commit
         # release path, _try_release_pending, and the background retry loop) so
         # their requests over the shared fs/proc sockets never interleave.
@@ -203,37 +214,39 @@ class ShadowOrchestrator:
                  cgroup_id, output_file)
         return {"status": "ok", "output_file": output_file}
 
-    def _flush_output(self, cgroup_id: str) -> Tuple[bool, str]:
-        """Read and remove the buffered stdout for a cgroup.
+    def _peek_output(self, cgroup_id: str) -> Tuple[bool, str]:
+        """Read the buffered stdout for a cgroup WITHOUT removing the record or
+        deleting the file.
 
-        Returns (ok, content). On a genuine read error (OSError) the buffer
-        record is PRESERVED (not removed) and ok=False, so the caller can skip
-        acking the release and retry later. A missing buffer (never registered
-        or file already gone) is treated as success with empty content. The
-        record and on-disk file are only removed after a SUCCESSFUL read.
+        Returns (ok, content). A missing buffer (never registered or file
+        already gone) is success with empty content. A genuine read error
+        (OSError) returns (False, "") and leaves the buffer intact, so the
+        caller can fail closed BEFORE resuming any process.
         """
         output_file = self._output_buffers.get(cgroup_id)
         if not output_file:
             return True, ""
         try:
             with open(output_file, "r", errors="replace") as f:
-                content = f.read()
+                return True, f.read()
         except FileNotFoundError:
-            # Nothing to release; drop the stale record.
-            self._output_buffers.pop(cgroup_id, None)
             return True, ""
         except OSError as e:
-            # Transient read failure: keep the record so a retry can flush it.
             log.warning("Failed to read buffered stdout %s: %s -- preserving "
                         "buffer for retry", output_file, e)
             return False, ""
-        # Read succeeded: now it is safe to remove the record and unlink.
-        self._output_buffers.pop(cgroup_id, None)
-        try:
-            os.unlink(output_file)
-        except OSError:
-            pass
-        return True, content
+
+    def _consume_output(self, cgroup_id: str) -> None:
+        """Remove the buffer record and unlink its file. Called ONLY after the
+        output has been successfully pre-read (see _peek_output) AND the
+        processes have been resumed, so a failure earlier cannot lose output.
+        """
+        output_file = self._output_buffers.pop(cgroup_id, None)
+        if output_file:
+            try:
+                os.unlink(output_file)
+            except OSError:
+                pass
 
     def _discard_output(self, cgroup_id: str) -> None:
         """Discard the buffered stdout for a cgroup (used on rollback)."""
@@ -302,31 +315,43 @@ class ShadowOrchestrator:
         except Exception as e:  # noqa: BLE001
             return {"status": "error", "message": str(e)}
 
-    def _fs_ack_release(self, cgroup_id: str) -> None:
+    def _fs_ack_release(self, cgroup_id: str) -> bool:
         """Tell ShadowFS the external effects for a Finalized agent have been
-        released, so it may drop the terminal record. Best-effort: ShadowFS
-        refuses to drop a non-finalized agent, so a spurious ack is harmless.
+        released, so it may drop the terminal record. AckRelease is idempotent
+        on the ShadowFS side (unknown agent -> ok), so retrying is safe.
+
+        Returns True iff ShadowFS acknowledged (status==ok). On a socket error
+        or a non-ok response returns False so the caller can park the cgroup
+        for an ack-only retry (a failed ack would otherwise leave a permanent
+        Finalized record in ShadowFS).
         """
         try:
             resp = self.fs_client.request({
                 "action": "ack_release",
                 "cgroup_id": cgroup_id,
             })
-            if resp.get("status") != "ok":
-                log.debug("  ack_release(%s): %s", cgroup_id, resp.get("message"))
         except Exception as e:  # noqa: BLE001
             log.warning("  ack_release(%s) failed: %s", cgroup_id, e)
+            return False
+        if not isinstance(resp, dict) or resp.get("status") != "ok":
+            log.debug("  ack_release(%s): %s", cgroup_id,
+                      resp.get("message") if isinstance(resp, dict) else resp)
+            return False
+        return True
 
     def _finalize_retry_loop(self) -> None:
         """Background loop: periodically retry finalization for deferred
         cgroups and release them once ShadowFS reports Finalized. This turns a
         transient promotion failure into a self-healing wait instead of a
-        permanent stall, while never releasing before Finalized.
+        permanent stall, while never releasing before Finalized. It also
+        retries ack-only for cgroups already released but not yet acked.
         """
         while not self._retry_stop.wait(self._retry_interval):
             with self._pending_lock:
                 pending = list(self._pending_release)
-            if not pending:
+            with self._pending_ack_lock:
+                acks = list(self._pending_ack)
+            if not pending and not acks:
                 continue
             with self._release_lock:
                 for cg in pending:
@@ -341,6 +366,23 @@ class ShadowOrchestrator:
                         else:
                             log.warning("  finalize-retry: release of cgroup=%s "
                                         "failed -- keeping pending for retry", cg)
+                # Retry ONLY the ack for already-released cgroups.
+                self._retry_pending_acks()
+
+    def _retry_pending_acks(self) -> None:
+        """Retry ONLY the ShadowFS ack_release for cgroups whose external
+        effects were already released (processes resumed AND output delivered)
+        but whose ack did not land. NEVER re-resumes processes or re-flushes
+        output. Must be called with self._release_lock held.
+        """
+        with self._pending_ack_lock:
+            acks = list(self._pending_ack)
+        for cg in acks:
+            if self._fs_ack_release(cg):
+                with self._pending_ack_lock:
+                    self._pending_ack.discard(cg)
+                log.info("  ack-retry: cgroup=%s acked -- ShadowFS record dropped",
+                         cg)
 
     def _release_proc(self, cgroup_id: str) -> Tuple[bool, str]:
         """
@@ -352,14 +394,23 @@ class ShadowOrchestrator:
         MUST only be called for a cgroup ShadowFS has confirmed Finalized
         (see _fs_can_release).
 
-        Returns (ok, stdout). FAIL CLOSED: if ShadowProc cannot be queried or
-        resumed, or the buffered stdout cannot be read, this returns
-        (False, "") WITHOUT acking the release, WITHOUT consuming the output
-        buffer, and WITHOUT removing pending state -- so the caller keeps the
-        cgroup fenced and parked for retry. ack_release is sent ONLY when both
-        the process resume AND the output flush succeed. This prevents the
-        state where processes are still frozen but ShadowFS has already dropped
-        the Finalized terminal record.
+        Ordering is chosen so an output-read failure fails CLOSED before any
+        process is resumed:
+          1. query frozen processes
+          2. PRE-READ the buffered output (without deleting it)
+          3. resume the processes
+          4. consume (delete) the output buffer
+          5. ack the release to ShadowFS
+
+        Returns (ok, stdout). If the process query/resume or the output
+        PRE-READ fails, returns (False, "") WITHOUT resuming (when the failure
+        is the pre-read), WITHOUT consuming the output buffer, and WITHOUT
+        acking -- the caller keeps the cgroup fenced and parked for retry.
+
+        Once processes are resumed AND the output consumed, the external
+        effects are OUT: this returns (True, stdout) even if the final
+        ack_release fails. A failed ack does NOT re-fence -- the cgroup is
+        parked in _pending_ack for an ACK-ONLY retry (never re-resumed).
         """
         # Step 1: query frozen processes. A failed/unreachable query means we
         # cannot know the process state -- do not proceed.
@@ -377,8 +428,17 @@ class ShadowOrchestrator:
                       cgroup_id, frozen_resp)
             return False, ""
 
-        # Step 2: resume the frozen processes (if any). A resume failure leaves
-        # them frozen, so we must NOT ack the release.
+        # Step 2: PRE-READ the buffered output WITHOUT consuming it. Doing this
+        # BEFORE resuming means a read failure fails closed with the processes
+        # still frozen -- no external effect has escaped.
+        read_ok, buffered = self._peek_output(cgroup_id)
+        if not read_ok:
+            log.error("  Output pre-read failed for cgroup=%s -- NOT resuming/"
+                      "acking (fail closed; buffer preserved)", cgroup_id)
+            return False, ""
+
+        # Step 3: resume the frozen processes (if any). A resume failure leaves
+        # them frozen, so we must NOT consume the output or ack.
         frozen = frozen_resp.get("frozen") or []
         if frozen:
             log.info("  Releasing %d frozen process(es) for cgroup=%s",
@@ -399,20 +459,21 @@ class ShadowOrchestrator:
                 return False, ""
             log.info("  Resumed PIDs: %s", resume_resp.get("pids", []))
 
-        # Step 3: flush buffered stdout. A read failure preserves the buffer
-        # (see _flush_output) and blocks the ack so nothing is lost.
-        ok, buffered = self._flush_output(cgroup_id)
-        if not ok:
-            log.error("  Output flush failed for cgroup=%s -- NOT acking "
-                      "(buffer preserved; will retry)", cgroup_id)
-            return False, ""
+        # Step 4: processes are resumed -- now it is safe to consume (delete)
+        # the buffered stdout we already read.
+        self._consume_output(cgroup_id)
         if buffered:
             log.info("  Releasing %d bytes of buffered stdout for cgroup=%s",
                      len(buffered), cgroup_id)
 
-        # Processes resumed AND output read: the external effects are now out,
-        # so it is finally safe to tell ShadowFS to drop the terminal record.
-        self._fs_ack_release(cgroup_id)
+        # Step 5: external effects are OUT -- ack so ShadowFS drops the record.
+        # A failed ack does NOT re-fence (effects already released); park it
+        # for an ack-only retry instead.
+        if not self._fs_ack_release(cgroup_id):
+            with self._pending_ack_lock:
+                self._pending_ack.add(cgroup_id)
+            log.warning("  ack_release(%s) failed -- external effects already "
+                        "released; parked for ack-only retry", cgroup_id)
         return True, buffered
 
     def _try_release_pending(self) -> None:
@@ -439,6 +500,8 @@ class ShadowOrchestrator:
                     else:
                         log.warning("  Release of deferred cgroup=%s failed -- "
                                     "keeping pending for retry", cg)
+            # Also finish any ack-only retries (never re-resumes processes).
+            self._retry_pending_acks()
 
     def commit(self, cgroup_id: str) -> dict:
         """
