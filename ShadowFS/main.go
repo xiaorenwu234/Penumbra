@@ -16,6 +16,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"golang.org/x/sys/unix"
 
 	"wokron/shadowfs/backend"
 )
@@ -43,9 +44,6 @@ var cgroupCache sync.Map // cgroupCacheKey -> string
 // shadowBackend is the global rollback backend, initialized in main.
 var shadowBackend *backend.Backend
 
-// ctlFileName is the virtual control file at the mount root.
-const ctlFileName = ".shadow.ctl"
-
 // OverlayRoot is the shared state of the overlay mount: orig (read-only
 // source of truth), overlay (write-side staging) and the backend that owns
 // rollback/commit semantics.
@@ -61,24 +59,23 @@ type OverlayNode struct {
 }
 
 var (
-	_ fs.NodeOnAdder    = (*OverlayNode)(nil)
-	_ fs.NodeLookuper   = (*OverlayNode)(nil)
-	_ fs.NodeGetattrer  = (*OverlayNode)(nil)
-	_ fs.NodeReaddirer  = (*OverlayNode)(nil)
-	_ fs.NodeOpener     = (*OverlayNode)(nil)
-	_ fs.NodeCreater    = (*OverlayNode)(nil)
-	_ fs.NodeMkdirer    = (*OverlayNode)(nil)
-	_ fs.NodeRmdirer    = (*OverlayNode)(nil)
-	_ fs.NodeUnlinker   = (*OverlayNode)(nil)
-	_ fs.NodeRenamer    = (*OverlayNode)(nil)
-	_ fs.NodeSetattrer  = (*OverlayNode)(nil)
-	_ fs.NodeReadlinker = (*OverlayNode)(nil)
-	_ fs.NodeLinker       = (*OverlayNode)(nil)
-	_ fs.NodeMknoder      = (*OverlayNode)(nil)
-	_ fs.NodeGetxattrer   = (*OverlayNode)(nil)
-	_ fs.NodeSetxattrer   = (*OverlayNode)(nil)
+	_ fs.NodeLookuper      = (*OverlayNode)(nil)
+	_ fs.NodeGetattrer     = (*OverlayNode)(nil)
+	_ fs.NodeReaddirer     = (*OverlayNode)(nil)
+	_ fs.NodeOpener        = (*OverlayNode)(nil)
+	_ fs.NodeCreater       = (*OverlayNode)(nil)
+	_ fs.NodeMkdirer       = (*OverlayNode)(nil)
+	_ fs.NodeRmdirer       = (*OverlayNode)(nil)
+	_ fs.NodeUnlinker      = (*OverlayNode)(nil)
+	_ fs.NodeRenamer       = (*OverlayNode)(nil)
+	_ fs.NodeSetattrer     = (*OverlayNode)(nil)
+	_ fs.NodeReadlinker    = (*OverlayNode)(nil)
+	_ fs.NodeLinker        = (*OverlayNode)(nil)
+	_ fs.NodeMknoder       = (*OverlayNode)(nil)
+	_ fs.NodeGetxattrer    = (*OverlayNode)(nil)
+	_ fs.NodeSetxattrer    = (*OverlayNode)(nil)
 	_ fs.NodeRemovexattrer = (*OverlayNode)(nil)
-	_ fs.NodeListxattrer  = (*OverlayNode)(nil)
+	_ fs.NodeListxattrer   = (*OverlayNode)(nil)
 )
 
 // --- Tracked file handle ---
@@ -144,61 +141,13 @@ func (n *OverlayNode) origChildPath(name string) string {
 }
 
 // --- Control file ---
-
-type controlFile struct {
-	fs.Inode
-}
-
-var (
-	_ fs.NodeGetattrer = (*controlFile)(nil)
-	_ fs.NodeOpener    = (*controlFile)(nil)
-	_ fs.NodeWriter    = (*controlFile)(nil)
-)
-
-func (f *controlFile) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	return 0
-}
-
-func (f *controlFile) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	return nil, fuse.FOPEN_DIRECT_IO, 0
-}
-
-// Write handles writes to the control file. Recognized commands:
 //
-//	"r <cgroup-id>" — rollback the specified agent (and its rollback group)
-//	"c <cgroup-id>" — commit (clear the undo log) for the specified agent
-func (f *controlFile) Write(ctx context.Context, _ fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
-	cmd := strings.TrimSpace(string(data))
-	parts := strings.Fields(cmd)
-	if len(parts) != 2 {
-		return 0, syscall.EINVAL
-	}
-	action, cgroupID := parts[0], parts[1]
-	switch action {
-	case "r":
-		log.Printf("[ctl] rollback agent=%q", cgroupID)
-		if err := shadowBackend.Rollback(cgroupID); err != nil {
-			log.Printf("[ctl] rollback failed: %v", err)
-			return 0, syscall.EIO
-		}
-	case "c":
-		log.Printf("[ctl] commit agent=%q", cgroupID)
-		shadowBackend.Commit(cgroupID)
-	default:
-		return 0, syscall.EINVAL
-	}
-	return uint32(len(data)), 0
-}
-
-// OnAdd installs the virtual .shadow.ctl file at the mount root.
-func (n *OverlayNode) OnAdd(ctx context.Context) {
-	if !n.IsRoot() {
-		return
-	}
-	ch := n.NewPersistentInode(ctx, &controlFile{},
-		fs.StableAttr{Mode: syscall.S_IFREG | 0o644})
-	n.AddChild(ctlFileName, ch, true)
-}
+// The in-mount virtual control file (.shadow.ctl) has been REMOVED: it exposed
+// rollback/commit to any process that could write into the mount (i.e. the
+// sandboxed agent itself), letting the agent drive its own finalization. The
+// only control interface is now the ShadowFS Unix control socket
+// (socket_server.go), which is not reachable through the filesystem view and
+// is peer-authenticated to the orchestrator's uid.
 
 // --- cgroup id helper ---
 
@@ -400,12 +349,6 @@ func (n *OverlayNode) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.At
 }
 
 func (n *OverlayNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	if n.IsRoot() && name == ctlFileName {
-		if ch := n.GetChild(ctlFileName); ch != nil {
-			out.Mode = syscall.S_IFREG | 0o644
-			return ch, 0
-		}
-	}
 	rel := filepath.Join(n.relPath(), name)
 	_, st, ok := n.root.resolveStat(rel)
 	if !ok {
@@ -462,15 +405,6 @@ func (n *OverlayNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 		return nil, fs.ToErrno(err)
 	}
 	entries := make([]fuse.DirEntry, 0, len(merged)+1)
-	if n.IsRoot() {
-		if ch := n.GetChild(ctlFileName); ch != nil {
-			entries = append(entries, fuse.DirEntry{
-				Name: ctlFileName,
-				Mode: syscall.S_IFREG,
-				Ino:  ch.StableAttr().Ino,
-			})
-		}
-	}
 	for _, e := range merged {
 		entries = append(entries, fuse.DirEntry{
 			Name: e.Name,
@@ -543,14 +477,6 @@ func (n *OverlayNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 }
 
 func (n *OverlayNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	if n.IsRoot() && name == ctlFileName {
-		ch := n.GetChild(ctlFileName)
-		if ch != nil {
-			fh, fuseFlags, errno := ch.Operations().(fs.NodeOpener).Open(ctx, flags)
-			out.Mode = syscall.S_IFREG | 0o644
-			return ch, fh, fuseFlags, errno
-		}
-	}
 	cgroupID := getCgroupID(ctx)
 	origChild := n.origChildPath(name)
 	// Check ancestor whiteouts: reject create inside a deleted directory
@@ -1038,6 +964,17 @@ func main() {
 	mntDir := flag.Arg(0)
 	origDir := flag.Arg(1)
 	stagingDir := *staging
+
+	// Harden the control plane (issue #2): forbid gaining privileges via a
+	// setuid/setgid bit. Enabled only when already root: FUSE (un)mount shells
+	// out to the setuid-root `fusermount3`, which a NON-root daemon relies on to
+	// elevate -- no_new_privs would break that. A root daemon never needs to
+	// elevate, so enabling it there is safe and is inherited by any child.
+	if os.Geteuid() == 0 {
+		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+			log.Printf("[main] Warning: PR_SET_NO_NEW_PRIVS failed: %v -- continuing", err)
+		}
+	}
 
 	var err error
 	shadowBackend, err = backend.NewBackend(stagingDir, origDir)

@@ -1188,6 +1188,7 @@ func TestReadOnlyAgentDoesNotBlockUpstreamFinalize(t *testing.T) {
 //	  UndoLog empty ✓, dependsOn[A] empty ✓ → finalize A
 //	  tryFinalize(B): B.Committed=false → before fix: return false
 //	  After fix: B is read-only (no undo, no dirty) → allowed
+//
 // TestReadOnlyDownstreamDoesNotBlockWriterFinalize: an uncommitted read-only
 // agent B (which merely read A's file, so B depends on A) does NOT block A's
 // promotion/finalization -- B is downstream, not upstream. Under the strong

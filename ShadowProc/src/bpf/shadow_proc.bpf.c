@@ -719,17 +719,25 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
     // Reject fds beyond the process's actual fd-table capacity: indexing
     // fd_array[fd] past max_fds would read past the array and could
     // misclassify the fd. max_fds is the true size of the current table.
+    // An fd we cannot inspect is treated as a possible pipe/socket carrying
+    // data out, so we FAIL CLOSED (intercept) rather than pass.
     unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
-    if (fd >= max_fds)
-        return 0;
+    if (fd >= max_fds) {
+        do_intercept(1, EVENT_WRITE_OUT);
+        return -ERESTARTSYS;
+    }
 
     struct file **fd_array = BPF_CORE_READ(fdt, fd);
     if (!fd_array)
         return 0;
 
-    // Keep a constant upper bound so the verifier can prove the index is safe.
-    if (fd > 1023)
-        return 0;
+    // Above this constant bound the verifier cannot prove fd_array[fd] is in
+    // range, so the fd type is un-inspectable. FAIL CLOSED (intercept): a high
+    // fd may well be a pipe/socket exfil channel.
+    if (fd > 1023) {
+        do_intercept(1, EVENT_WRITE_OUT);
+        return -ERESTARTSYS;
+    }
 
     struct file *f = NULL;
     bpf_probe_read_kernel(&f, sizeof(f), &fd_array[fd]);
@@ -773,17 +781,23 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
         return 0;
 
     // Reject fds beyond the process's actual fd-table capacity (see write hook).
+    // Un-inspectable fd => FAIL CLOSED (intercept).
     unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
-    if (fd >= max_fds)
-        return 0;
+    if (fd >= max_fds) {
+        do_intercept(20, EVENT_WRITE_OUT);
+        return -ERESTARTSYS;
+    }
 
     struct file **fd_array = BPF_CORE_READ(fdt, fd);
     if (!fd_array)
         return 0;
 
-    // Keep a constant upper bound so the verifier can prove the index is safe.
-    if (fd > 1023)
-        return 0;
+    // Above this constant bound the verifier cannot prove fd_array[fd] is in
+    // range. FAIL CLOSED (intercept) rather than pass an un-inspectable fd.
+    if (fd > 1023) {
+        do_intercept(20, EVENT_WRITE_OUT);
+        return -ERESTARTSYS;
+    }
 
     struct file *f = NULL;
     bpf_probe_read_kernel(&f, sizeof(f), &fd_array[fd]);
@@ -801,6 +815,56 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
     }
 
     return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// fmod_ret exfil hooks for data-moving syscalls with NO byte inspection:
+//   - sendfile/sendfile64 : copies bytes between two fds (in-kernel), so it
+//     can push file contents straight out a socket/pipe without ever calling
+//     write().
+//   - splice / vmsplice / tee : move pages between pipes, fds, and user memory,
+//     another zero-copy path data can leave by.
+// These bypass the write()/sendmsg() hooks entirely, so they were previously
+// UNCOVERED exfil channels. We DEFAULT-DENY: while a monitored process is
+// armed (should_intercept()), any of these is intercepted and the process is
+// frozen at its first use, exactly like an external write. Fine-grained
+// same-epoch fd-pair inspection is deferred; failing closed is the safe base.
+// ═══════════════════════════════════════════════════════════════
+
+SEC("fmod_ret/__x64_sys_sendfile64")
+int BPF_PROG(shadow_sys_sendfile, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(40, EVENT_WRITE_OUT); // 40 = sendfile
+    return -ERESTARTSYS;
+}
+
+SEC("fmod_ret/__x64_sys_splice")
+int BPF_PROG(shadow_sys_splice, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(275, EVENT_WRITE_OUT); // 275 = splice
+    return -ERESTARTSYS;
+}
+
+SEC("fmod_ret/__x64_sys_vmsplice")
+int BPF_PROG(shadow_sys_vmsplice, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(278, EVENT_WRITE_OUT); // 278 = vmsplice
+    return -ERESTARTSYS;
+}
+
+SEC("fmod_ret/__x64_sys_tee")
+int BPF_PROG(shadow_sys_tee, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(276, EVENT_WRITE_OUT); // 276 = tee
+    return -ERESTARTSYS;
 }
 
 // ═══════════════════════════════════════════════════════════════

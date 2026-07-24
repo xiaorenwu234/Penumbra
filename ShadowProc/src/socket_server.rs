@@ -49,6 +49,25 @@ pub struct SocketServer {
     handle: Option<thread::JoinHandle<()>>,
 }
 
+/// Validate a cgroup path supplied over the control socket (issue #2 cgroupfs
+/// write restriction). Fail-closed: the path must be absolute, live under the
+/// cgroup2 root `/sys/fs/cgroup`, and contain no `..`/`.` traversal component,
+/// so a malicious control message can never point the daemon at an arbitrary
+/// cgroup outside the managed subtree.
+fn cgroup_path_ok(path: &str) -> bool {
+    use std::path::Component;
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return false;
+    }
+    for c in p.components() {
+        if matches!(c, Component::ParentDir | Component::CurDir) {
+            return false;
+        }
+    }
+    p.starts_with("/sys/fs/cgroup")
+}
+
 impl SocketServer {
     pub fn start(
         sock_path: &Path,
@@ -59,6 +78,15 @@ impl SocketServer {
         // Remove stale socket
         let _ = std::fs::remove_file(sock_path);
 
+        // Restrict the containing directory to the daemon's uid (0700) so no
+        // other user can reach the socket path at all.
+        #[cfg(unix)]
+        if let Some(dir) = sock_path.parent() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::create_dir_all(dir);
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+
         let listener = UnixListener::bind(sock_path)
             .with_context(|| format!("Failed to bind socket: {:?}", sock_path))?;
 
@@ -66,12 +94,13 @@ impl SocketServer {
         // running flag periodically and shut down gracefully.
         listener.set_nonblocking(true)?;
 
-        // Ensure socket is world-readable/writable so socat/nc can connect
-        // regardless of umask.
+        // Lock the socket down to owner rw only (0600). This is the ONLY control
+        // interface; a co-located sandboxed agent must not be able to reach it.
+        // Peer identity is additionally checked (SO_PEERCRED) on every accept.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o777))
+            std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o600))
                 .ok();
         }
 
@@ -100,6 +129,13 @@ impl SocketServer {
         while running.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, _addr)) => {
+                    // Peer authentication: only admit a client running as the
+                    // daemon's own uid (the orchestrator). Reject anyone else
+                    // (e.g. a sandboxed agent) before handing off the stream.
+                    if !Self::authorized_peer(&stream) {
+                        eprintln!("[socket] Rejected unauthorized peer");
+                        continue;
+                    }
                     eprintln!("[socket] New connection accepted");
                     let pm = process_manager.clone();
                     let bpf = bpf_manager.clone();
@@ -126,6 +162,38 @@ impl SocketServer {
             }
         }
         eprintln!("[socket] Accept loop exiting");
+    }
+
+    /// Verify the connecting peer via SO_PEERCRED and only admit a process
+    /// running as the daemon's own effective uid (the orchestrator). Any other
+    /// uid (e.g. a sandboxed agent) is rejected. Fails closed on any error.
+    fn authorized_peer(stream: &UnixStream) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if ret != 0 {
+            eprintln!("[socket] SO_PEERCRED failed; rejecting peer");
+            return false;
+        }
+        let self_uid = unsafe { libc::geteuid() };
+        if cred.uid != self_uid {
+            eprintln!(
+                "[socket] Reject peer uid={} pid={} != daemon uid={}",
+                cred.uid, cred.pid, self_uid
+            );
+            return false;
+        }
+        true
     }
 
     fn handle_conn(
@@ -196,6 +264,15 @@ impl SocketServer {
                         pids: None,
                     };
                 };
+                if !cgroup_path_ok(path) {
+                    return Response {
+                        status: "error".into(),
+                        message: Some(format!(
+                            "refused cgroup_path outside managed root: {}", path)),
+                        frozen: None,
+                        pids: None,
+                    };
+                }
                 match bpf_manager.add_cgroup(Path::new(path)) {
                     Ok(_) => Response {
                         status: "ok".into(),
@@ -221,6 +298,15 @@ impl SocketServer {
                         pids: None,
                     };
                 };
+                if !cgroup_path_ok(path) {
+                    return Response {
+                        status: "error".into(),
+                        message: Some(format!(
+                            "refused cgroup_path outside managed root: {}", path)),
+                        frozen: None,
+                        pids: None,
+                    };
+                }
                 match bpf_manager.remove_cgroup(Path::new(path)) {
                     Ok(_) => Response {
                         status: "ok".into(),
@@ -395,6 +481,39 @@ impl SocketServer {
                     Ok(()) => Response {
                         status: "ok".into(),
                         message: Some(format!("Resumed pid {} (will be intercepted again)", pid)),
+                        frozen: None,
+                        pids: None,
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                    },
+                }
+            }
+
+            // Wake a speculative candidate WITHOUT granting any allow-map pass.
+            // Unlike resume_pid (which sets allowed_pids=1, a permanent
+            // per-epoch bypass), this is a plain SIGCONT: the candidate runs
+            // ARMED, so its first external effect is intercepted and frozen.
+            // This is the correct primitive for starting a candidate at the
+            // input gate; full release only happens after finalization via
+            // continue/commit (allowed_pids=2).
+            "resume_candidate" => {
+                let Some(pid) = req.pid else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("pid required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                let mut pm = process_manager.lock().unwrap();
+                match pm.resume_candidate_raw(pid) {
+                    Ok(()) => Response {
+                        status: "ok".into(),
+                        message: Some(format!("Resumed candidate {} armed (no allow pass)", pid)),
                         frozen: None,
                         pids: None,
                     },

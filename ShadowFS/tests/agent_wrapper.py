@@ -139,12 +139,6 @@ def run_actions(actions):
                 finally:
                     os.close(fd)
                 results.append({"op": op, "ok": True})
-            elif op == "ctl":
-                # Write a raw control command into .shadow.ctl.
-                # Used to verify malformed-input safety.
-                with open(a["path"], "w") as f:
-                    f.write(a.get("content", ""))
-                results.append({"op": op, "ok": True})
             elif op == "noop":
                 results.append({"op": op, "ok": True})
             else:

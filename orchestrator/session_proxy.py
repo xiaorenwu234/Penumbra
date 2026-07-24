@@ -268,13 +268,13 @@ class SessionProxy:
         Works both between epochs (on the committed shell) and inside an epoch
         (on the speculative candidate) — the caller doesn't need to care which.
 
-        Output is commit-gated: the speculating agent still receives this
-        command's stdout directly (it needs the candidate's result to decide
-        what to do next), but the externally-releasable transcript is only
-        updated when the output is canonical. Output produced INSIDE an epoch is
-        held in the epoch buffer and released to the committed transcript on
-        commit / discarded on reject; output produced outside an epoch is
-        committed immediately. See get_output().
+        Output is commit-gated. Output produced OUTSIDE an epoch is canonical
+        and returned immediately. Output produced INSIDE an epoch is SPECULATIVE
+        and is NOT returned to the caller (the paper keeps the tool call
+        pending: the agent must not read speculative output before
+        finalization). It is buffered and released to the committed transcript
+        on commit / discarded on reject. In-epoch calls therefore return None.
+        See get_output().
         """
         sess = self.sessions[sid]
         sentinel = f"__SHADOW_DONE_{next(self._sentinel_ids)}__"
@@ -288,9 +288,11 @@ class SessionProxy:
                 idx = lines.index(sentinel, n0)
                 out = "\n".join(lines[n0:idx])
                 if sess.epoch is not None:
-                    sess.epoch_buffer.append(out)   # speculative: hold pending commit
-                else:
-                    sess.committed_output.append(out)  # canonical: release now
+                    # Speculative: hold pending commit and DO NOT release it to
+                    # the caller before finalization.
+                    sess.epoch_buffer.append(out)
+                    return None
+                sess.committed_output.append(out)  # canonical: release now
                 return out
             time.sleep(0.05)
         raise TimeoutError(f"command timed out: {command!r}")
@@ -330,8 +332,13 @@ class SessionProxy:
                     raise RuntimeError("begin_speculative returned no candidate pid")
                 candidate = pids[0]
                 baseline = sess.live_pid
-                # Resume the candidate — it becomes the live shell.
-                self.client.call("resume_pid", pid=candidate)
+                # Resume the candidate ARMED (no allow-map pass): it becomes the
+                # live shell but its first external effect is intercepted and
+                # frozen. Using resume_candidate (plain SIGCONT) instead of
+                # resume_pid is what stops the candidate from silently bypassing
+                # the fence for the whole epoch. Authorized effects are released
+                # only after finalization (commit -> full release).
+                self.client.call("resume_candidate", pid=candidate)
                 time.sleep(0.3)
                 sess.epoch = {"baseline": baseline, "candidate": candidate}
                 sess.live_pid = candidate
@@ -345,15 +352,41 @@ class SessionProxy:
         raise RuntimeError(f"begin_epoch failed after {retries} attempts: {last_err}")
 
     def commit(self, sid):
-        """Accept the candidate as canonical; discard the frozen baseline."""
+        """Accept the candidate as canonical; discard the frozen baseline.
+
+        This is the single-caller convenience path (used by the demo/tests). The
+        orchestrator drives commit as TWO phases so it can insert the ShadowFS
+        finalize gate between them: quiesce_for_commit() (reversible) then
+        finalize_commit() (destructive). Keep the two in lock-step here.
+        """
+        self.quiesce_for_commit(sid)
+        self.finalize_commit(sid)
+
+    def quiesce_for_commit(self, sid):
+        """REVERSIBLE commit phase 1: bring the candidate to a stopped
+        read()-boundary. Discards nothing — if the caller (orchestrator) then
+        finds ShadowFS cannot finalize, the epoch can still be rejected and the
+        pristine baseline resumed. No baseline is destroyed here.
+        """
+        sess = self.sessions[sid]
+        if sess.epoch is None:
+            raise RuntimeError("no active epoch to commit")
+        # Quiesce the candidate to a stopped read()-boundary first (the proven
+        # commit flow acts on a frozen candidate, then continues it).
+        self._quiesce_epoch(sess)
+
+    def finalize_commit(self, sid):
+        """DESTRUCTIVE commit phase 2: discard the frozen baseline, keep the
+        candidate as canonical, and release the buffered speculative transcript.
+
+        MUST only be called after the file layer (ShadowFS) has finalized: this
+        discards the baseline (commit_pid) and can no longer be rolled back.
+        """
         sess = self.sessions[sid]
         if sess.epoch is None:
             raise RuntimeError("no active epoch to commit")
         candidate = sess.epoch["candidate"]
         baseline = sess.epoch["baseline"]
-        # Quiesce the candidate to a stopped read()-boundary first (the proven
-        # commit flow acts on a frozen candidate, then continues it).
-        self._quiesce_epoch(sess)
         self.client.call("commit_pid", pid=candidate)
         self._reap(baseline)
         # The candidate is still frozen at its boundary — resume it as canonical.
@@ -433,11 +466,13 @@ def _demo(proxy):
         proxy.begin_epoch(sid)
         proxy.run(sid, "export SHADOW_VAR=MODIFIED_BY_AGENT")
         in_epoch = proxy.run(sid, "echo VAL=$SHADOW_VAR")
-        print(f"  inside epoch (candidate): {in_epoch}")
+        print(f"  inside epoch (candidate): {in_epoch!r} (pending, not released)")
         proxy.reject(sid)
         after_reject = proxy.run(sid, "echo VAL=$SHADOW_VAR")
         print(f"  after REJECT:          {after_reject}")
-        ok &= (in_epoch.strip() == "VAL=MODIFIED_BY_AGENT"
+        # Speculative output is held pending: in-epoch run() returns None (the
+        # agent must not read speculative output before finalization).
+        ok &= (in_epoch is None
                and after_reject.strip() == "VAL=ORIGINAL")
 
         # ── Epoch 2: speculative mutation → COMMIT (expect state persists) ──

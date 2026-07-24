@@ -111,9 +111,14 @@ impl ProcessManager {
         Ok(())
     }
 
-    /// Resume a frozen process for speculative execution:
-    /// Temporarily allows the process to pass, then re-enables interception.
-    /// This allows the process to be intercepted AGAIN on future syscalls (e.g., connect).
+    /// Resume a frozen process with a PERMANENT per-epoch allow (allowed_pids=1):
+    /// the process passes all interception for the rest of the epoch.
+    ///
+    /// NOTE: this is NOT used to start a speculative candidate at the input gate
+    /// -- doing so would let the candidate's whole epoch of external effects
+    /// bypass the fence. Candidate startup uses `resume_candidate_raw` (armed,
+    /// no allow pass); authorized effects are released only AFTER finalization
+    /// via `continue_process`/`commit_process` (full release, allowed_pids=2).
     pub fn resume_process(&mut self, pid: u32) -> Result<()> {
         let pid = self.resolve_pid(pid);
         if !self.frozen.contains_key(&pid) {
@@ -289,17 +294,30 @@ impl ProcessManager {
             .collect()
     }
 
-    /// Continue all frozen processes in a given cgroup
+    /// Continue all frozen processes in a given cgroup to completion (full
+    /// release). Returns Ok(resumed pids) only if EVERY frozen process in the
+    /// cgroup was released; if any PID fails to continue it returns an Err
+    /// naming the failures, so the caller can fail closed rather than acking a
+    /// partial release. Already-released PIDs are still reflected via the error
+    /// message for diagnostics.
     pub fn continue_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
         let pids: Vec<u32> = self.frozen.values()
             .filter(|p| p.cgroup_path == cgroup_path)
             .map(|p| p.tgid)
             .collect();
         let mut resumed = Vec::new();
+        let mut failed: Vec<u32> = Vec::new();
         for pid in pids {
-            if self.continue_process(pid).is_ok() {
-                resumed.push(pid);
+            match self.continue_process(pid) {
+                Ok(()) => resumed.push(pid),
+                Err(_) => failed.push(pid),
             }
+        }
+        if !failed.is_empty() {
+            anyhow::bail!(
+                "continue_by_cgroup partial failure in {}: resumed {:?}, failed {:?}",
+                cgroup_path, resumed, failed
+            );
         }
         Ok(resumed)
     }
@@ -773,43 +791,51 @@ impl ProcessManager {
         Ok(frozen_pids)
     }
 
-    /// Shutdown helper: leave NO process stuck in SIGSTOP.
+    /// Shutdown helper: leave NO process stuck in SIGSTOP, and NEVER release an
+    /// unauthorized pending effect.
     ///
     /// The BPF programs detach when the daemon exits, after which the LSM hooks
-    /// no longer fire — but any process we already SIGSTOP'd (frozen siblings,
-    /// pristine baselines, speculative candidates) would remain stopped forever
-    /// as orphaned, wedged tasks. This releases them all:
+    /// no longer fire. Any process we already SIGSTOP'd would otherwise remain
+    /// stopped forever as an orphaned, wedged task. We resolve this WITHOUT
+    /// letting speculative or unauthorized side effects leak:
     ///
     ///   1. For every active speculative epoch, abandon the speculation the way
     ///      a reject would: discard the disposable candidate (and its epoch
     ///      descendants) and resume the pristine baseline as canonical. This is
-    ///      the safe direction — it never lets speculative side effects leak.
-    ///   2. SIGCONT every remaining plain frozen process, clearing its kernel
-    ///      stopped mark first so a still-attached hook can't immediately
-    ///      re-stop the restarted syscall.
+    ///      the safe direction -- the baseline never ran the epoch's commands.
+    ///   2. For every REMAINING plain frozen process (a non-versioned process
+    ///      caught at an external effect that was never authorized): SIGKILL it.
+    ///      Its pending syscall was blocked and is being auto-restarted on
+    ///      SIGCONT -- so resuming it would let the unauthorized effect ESCAPE
+    ///      once the hooks are gone. Killing discards the in-flight unauthorized
+    ///      work (the effect never happened) and leaves no wedged task.
     ///
-    /// Returns the number of processes resumed.
+    /// Returns the number of processes handled (baselines resumed + frozen killed).
     pub fn release_all(&mut self) -> usize {
-        let mut resumed = 0;
+        let mut handled = 0;
 
         // 1. Abandon in-flight speculation: resume baselines, discard candidates.
         for b in self.memory_tracker.tracked_pids() {
             if self.reject_to_checkpoint(b).is_ok() {
-                resumed += 1;
+                handled += 1;
             }
         }
 
-        // 2. Resume every remaining frozen process so none is left stopped.
+        // 2. Kill every remaining frozen process: its pending external effect
+        //    was never authorized, so it must NOT be resumed after the hooks
+        //    detach. Clear its stopped mark first (best-effort) so nothing is
+        //    left dangling in the maps, then SIGKILL.
         let pids: Vec<u32> = self.frozen.keys().copied().collect();
         for pid in pids {
             let _ = self.bpf_manager.clear_stopped(pid);
-            if signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT).is_ok() {
-                resumed += 1;
+            if signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok() {
+                handled += 1;
             }
             self.frozen.remove(&pid);
+            self.promoted.retain(|_, v| v.canonical != pid);
         }
 
-        resumed
+        handled
     }
 
     /// Drop bookkeeping for processes that have exited on their own.

@@ -217,10 +217,13 @@ scenario() {
     orch session_run session_id="$SID" 'command=export SHADOW_VAR=MODIFIED_BY_AGENT' >/dev/null
     orch session_run session_id="$SID" "command=echo speculative > $ORIG_DIR/epoch1.txt" >/dev/null
     sleep 0.3
+    # In-epoch output is SPECULATIVE: it is held pending and NOT released to the
+    # caller before finalization (session_run returns status=pending, output=null).
+    # The file-layer write, by contrast, is visible in the mount immediately.
     local e1_env e1_file
-    e1_env=$(orch session_run session_id="$SID" 'command=echo VAL=$SHADOW_VAR' | jf output)
+    e1_env=$(orch session_run session_id="$SID" 'command=echo VAL=$SHADOW_VAR' | jf status)
     e1_file=$([[ -f "$ORIG_DIR/epoch1.txt" ]] && echo present || echo absent)
-    check "in-epoch env"   "$e1_env"  "VAL=MODIFIED_BY_AGENT"
+    check "in-epoch output pending" "$e1_env"  "pending"
     check "in-epoch file"  "$e1_file" "present"
 
     step ">>> ROLLBACK epoch 1 (discard candidate + undo file writes)..."

@@ -22,6 +22,7 @@ import os
 import pathlib
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -51,13 +52,19 @@ class TestConfig:
         os.makedirs(self.orig)
         os.makedirs(self.staging)
         os.makedirs(self.mnt)
+        # Control socket for the daemon. The in-mount .shadow.ctl was removed;
+        # commit/rollback now go over this Unix socket. It lives inside the
+        # per-test temp dir so the daemon's 0700-parent-dir hardening is
+        # harmless (the dir is already private to this test's uid).
+        self.sock = os.path.join(self._base, "control.sock")
         self._proc = None
 
     # -- lifecycle --
 
     def mount(self):
         self._proc = subprocess.Popen(
-            [str(SHADOWFS_BIN), "-staging", self.staging, self.mnt, self.orig],
+            [str(SHADOWFS_BIN), "-staging", self.staging,
+             "-sock", self.sock, self.mnt, self.orig],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
         for _ in range(30):
@@ -144,18 +151,58 @@ def run_agent(agent_name: str, actions: list[dict]) -> list[dict]:
     return json.loads(r.stdout.strip())
 
 
+def sock_request(cfg: TestConfig, obj: dict, timeout: float = 5.0) -> dict:
+    """Send one JSON-line request to the daemon's control socket and return the
+    parsed response dict (empty dict if no line came back).
+    """
+    raw = sock_send_raw(cfg, json.dumps(obj) + "\n", timeout=timeout)
+    line = raw.split("\n", 1)[0] if raw else ""
+    return json.loads(line) if line else {}
+
+
+def sock_send_raw(cfg: TestConfig, payload: str, timeout: float = 5.0) -> str:
+    """Send an arbitrary (possibly malformed) payload to the control socket and
+    return the single response line ("" if none). Retries the connect briefly
+    because the socket is created just after the FUSE mount becomes visible.
+    Used both for real commands and to prove the daemon survives garbage input.
+    """
+    deadline = time.time() + timeout
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        while True:
+            try:
+                s.connect(cfg.sock)
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    raise
+                time.sleep(0.05)
+        s.sendall(payload.encode())
+        buf = b""
+        while b"\n" not in buf:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        s.close()
+    return buf.decode(errors="replace")
+
+
 def control_cmd(cfg: TestConfig, action: str, agent_name: str):
-    """Send a commit/rollback command via .shadow.ctl.
+    """Send a commit/rollback command via the control socket.
 
     The cgroup ID used here must match the one systemd-run creates.
     """
     unit = _next_unit(agent_name)
     cg_id = (f"/user.slice/user-{os.getuid()}.slice/"
              f"user@{os.getuid()}.service/app.slice/{unit}.scope")
-    cmd_str = f"{action} {cg_id}\n"
-    ctl = os.path.join(cfg.mnt, ".shadow.ctl")
-    with open(ctl, "w") as f:
-        f.write(cmd_str)
+    sock_action = "commit" if action == "c" else "rollback"
+    sock_request(cfg, {"action": sock_action, "cgroup_id": cg_id})
 
 
 def commit(cfg: TestConfig, agent: str):
@@ -1006,8 +1053,8 @@ class TestMergeReaddirOrigAndOverlay(unittest.TestCase):
             self.assertIn("b.txt", entries)
             self.assertIn("c.txt", entries)
             self.assertNotIn("a.txt", entries)
-            # internal files must not leak
-            for hidden in (".shadow_state.json", ".shadow_wal"):
+            # internal files (and the removed control file) must not leak
+            for hidden in (".shadow_state.json", ".shadow_wal", ".shadow.ctl"):
                 self.assertNotIn(hidden, entries)
             for e in entries:
                 self.assertFalse(e.startswith(".shadow.wh."),
@@ -1522,17 +1569,21 @@ class TestWhiteoutNotLeakedAfterCommit(unittest.TestCase):
             cfg.cleanup()
 
 
-class TestCtlFileInvisibleInListing(unittest.TestCase):
-    """`.shadow.ctl` should be writable but not appear in readdir of root."""
+class TestCtlFileAbsentFromListing(unittest.TestCase):
+    """The in-mount `.shadow.ctl` control file was REMOVED: it must not appear
+    in the mount nor be resolvable, while real files list normally."""
 
-    def test_ctl_invisible(self):
-        cfg = TestConfig("ctl-invis")
+    def test_ctl_absent(self):
+        cfg = TestConfig("ctl-absent")
         try:
             cfg.create_orig("a.txt", "a")
             cfg.mount()
             entries = agent_list(cfg, "A", "")
-            # Implementation may show or hide .shadow.ctl; assert real files present
             self.assertIn("a.txt", entries)
+            self.assertNotIn(".shadow.ctl", entries,
+                             ".shadow.ctl must be gone from the mount")
+            # It must not resolve as a magic control file either.
+            self.assertFalse(agent_exists(cfg, "A", ".shadow.ctl"))
         finally:
             cfg.cleanup()
 
@@ -1741,21 +1792,21 @@ class TestParallelIndependentWritesCommit(unittest.TestCase):
 
 
 class TestInvalidCtlCommandIgnored(unittest.TestCase):
-    """Garbage written to .shadow.ctl must not crash the FUSE server."""
+    """Garbage sent to the control socket must not crash the FUSE server."""
 
     def test_garbage_ctl(self):
         cfg = TestConfig("bad-ctl")
         try:
             cfg.mount()
-            ctl = os.path.join(cfg.mnt, ".shadow.ctl")
-            # Several malformed commands. Each is at most one line.
-            for payload in ("\n", "x\n", "c\n", "r \n", "???\n",
-                            "commit \n", "r /nonexistent/cgroup\n"):
+            # Malformed control-socket payloads (one line each).
+            for payload in ("\n", "x\n", "???\n", "{not json}\n",
+                            '{"action":"bogus"}\n',
+                            '{"action":"rollback"}\n',
+                            '{"action":"rollback","cgroup_id":"/nonexistent"}\n'):
                 try:
-                    with open(ctl, "w") as f:
-                        f.write(payload)
+                    sock_send_raw(cfg, payload)
                 except OSError:
-                    pass  # backend may reject the write — that is fine
+                    pass  # daemon may drop the connection — that is fine
             time.sleep(0.3)
             # Mount remains operational
             agent_write(cfg, "A", "after.txt", "ok")
@@ -2239,9 +2290,8 @@ class TestRollbackUnknownAgentNoCrash(unittest.TestCase):
         cfg = TestConfig("rb-typo")
         try:
             cfg.mount()
-            ctl = os.path.join(cfg.mnt, ".shadow.ctl")
-            with open(ctl, "w") as f:
-                f.write("r /user.slice/never-existed.scope\n")
+            sock_request(cfg, {"action": "rollback",
+                               "cgroup_id": "/user.slice/never-existed.scope"})
             time.sleep(0.3)
             # mount remains usable
             agent_write(cfg, "A", "after.txt", "ok")

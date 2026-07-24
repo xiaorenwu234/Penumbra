@@ -2,6 +2,9 @@
 /*
  * socket_server.cpp – Unix socket JSON-line server for ShadowObserve daemon.
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE  /* struct ucred / SO_PEERCRED */
+#endif
 #include "ghostbpf-observ/socket_server.h"
 #include "observ_common.h"
 
@@ -135,6 +138,26 @@ static std::vector<std::string> json_parse_array_objects(const std::string &arr)
 /*  ObserveDaemon implementation                                         */
 /* ===================================================================== */
 
+/* Verify the connecting peer via SO_PEERCRED and only admit a process running
+ * as the daemon's own effective uid (the orchestrator). Any other uid (e.g. a
+ * sandboxed agent) is rejected. Fails closed on any error. */
+static bool authorized_peer(int fd) {
+    struct ucred cred;
+    socklen_t len = sizeof(cred);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
+        fprintf(stderr, "[ObserveDaemon] SO_PEERCRED failed: %s -- rejecting peer\n",
+                strerror(errno));
+        return false;
+    }
+    uid_t self = geteuid();
+    if (cred.uid != self) {
+        fprintf(stderr, "[ObserveDaemon] Reject peer uid=%u pid=%d != daemon uid=%u\n",
+                cred.uid, cred.pid, self);
+        return false;
+    }
+    return true;
+}
+
 ObserveDaemon::ObserveDaemon() {
     try {
         enforcer_ = std::make_unique<Enforcer>();
@@ -169,8 +192,19 @@ void ObserveDaemon::serve(const std::string &sock_path) {
         return;
     }
 
-    /* Make socket world-accessible */
-    chmod(sock_path.c_str(), 0777);
+    /* Lock the socket down to owner rw only (0600) and restrict its containing
+     * directory to 0700. A co-located sandboxed agent must not be able to reach
+     * the control socket; peer identity is additionally checked on every
+     * accept (SO_PEERCRED). */
+    {
+        std::string dir = sock_path;
+        auto slash = dir.find_last_of('/');
+        if (slash != std::string::npos && slash != 0) {
+            dir.resize(slash);
+            chmod(dir.c_str(), 0700);
+        }
+    }
+    chmod(sock_path.c_str(), 0600);
 
     if (listen(listen_fd_, 16) < 0) {
         fprintf(stderr, "[ObserveDaemon] listen() failed: %s\n", strerror(errno));
@@ -192,6 +226,13 @@ void ObserveDaemon::serve(const std::string &sock_path) {
 
         int client_fd = accept(listen_fd_, nullptr, nullptr);
         if (client_fd < 0) continue;
+
+        /* Peer authentication: reject any client whose uid is not the daemon's
+         * own (defense-in-depth beyond the 0600 socket perms). */
+        if (!authorized_peer(client_fd)) {
+            close(client_fd);
+            continue;
+        }
 
         /* Handle in a new thread */
         std::thread([this, client_fd]() {

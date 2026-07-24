@@ -6,7 +6,10 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"wokron/shadowfs/backend"
 )
@@ -43,12 +46,32 @@ type Response struct {
 }
 
 // NewSocketServer creates and starts a Unix socket server at the given path.
+//
+// The control socket is the ONLY control interface (the in-mount .shadow.ctl
+// file was removed). It is hardened against a co-located unprivileged agent:
+// the socket lives in a 0700 directory and is itself 0600, and every accepted
+// connection is peer-authenticated (SO_PEERCRED) to the daemon's own uid.
 func NewSocketServer(sockPath string) (*SocketServer, error) {
 	// Remove stale socket file if it exists
 	os.Remove(sockPath)
 
+	// Restrict the containing directory to the daemon's uid (0700) so no other
+	// user can even reach the socket path.
+	if dir := filepath.Dir(sockPath); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		_ = os.Chmod(dir, 0o700)
+	}
+
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
+		return nil, err
+	}
+
+	// Restrict the socket file itself to owner rw only (0600).
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		listener.Close()
 		return nil, err
 	}
 
@@ -58,7 +81,7 @@ func NewSocketServer(sockPath string) (*SocketServer, error) {
 	}
 
 	go s.acceptLoop()
-	log.Printf("[socket] listening on %s", sockPath)
+	log.Printf("[socket] listening on %s (0600, peer-authenticated)", sockPath)
 	return s, nil
 }
 
@@ -77,8 +100,49 @@ func (s *SocketServer) acceptLoop() {
 			}
 			return
 		}
+		// Peer authentication: reject any client whose uid is not the daemon's
+		// own (defense-in-depth beyond the 0600 socket perms).
+		if !authorizedPeer(conn) {
+			conn.Close()
+			continue
+		}
 		go s.handleConn(conn)
 	}
+}
+
+// authorizedPeer verifies the connecting peer's uid via SO_PEERCRED and only
+// admits a process running as the daemon's own uid (the orchestrator). Any
+// other uid (e.g. a sandboxed agent) is rejected.
+func authorizedPeer(conn net.Conn) bool {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		log.Printf("[socket] reject: non-unix connection")
+		return false
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		log.Printf("[socket] reject: SyscallConn: %v", err)
+		return false
+	}
+	var cred *unix.Ucred
+	var credErr error
+	if err := raw.Control(func(fd uintptr) {
+		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); err != nil {
+		log.Printf("[socket] reject: Control: %v", err)
+		return false
+	}
+	if credErr != nil {
+		log.Printf("[socket] reject: SO_PEERCRED: %v", credErr)
+		return false
+	}
+	self := uint32(os.Geteuid())
+	if cred.Uid != self {
+		log.Printf("[socket] reject: peer uid=%d pid=%d != daemon uid=%d",
+			cred.Uid, cred.Pid, self)
+		return false
+	}
+	return true
 }
 
 func (s *SocketServer) handleConn(conn net.Conn) {

@@ -11,9 +11,11 @@
 #include "ghostbpf-observ/socket_server.h"
 
 #include <csignal>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <sys/prctl.h>
 
 static ghostbpf_observ::ObserveDaemon *g_daemon = nullptr;
 
@@ -60,6 +62,15 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Error: --sock is required\n\n");
         print_usage(argv[0]);
         return 1;
+    }
+
+    /* Harden the control plane (issue #2): forbid this daemon (and any child)
+     * from gaining privileges via a setuid/setgid bit. no_new_privs is
+     * inherited across fork/exec and can never be unset. The daemon never
+     * execs a setuid helper, so this is always safe. Best-effort. */
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        fprintf(stderr, "[ObserveDaemon] Warning: PR_SET_NO_NEW_PRIVS failed: "
+                        "%s -- continuing without it.\n", strerror(errno));
     }
 
     fprintf(stderr, "╔══════════════════════════════════════════════════════════╗\n");

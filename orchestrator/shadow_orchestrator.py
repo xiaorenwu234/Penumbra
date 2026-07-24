@@ -398,13 +398,14 @@ class ShadowOrchestrator:
         process is resumed:
           1. query frozen processes
           2. PRE-READ the buffered output (without deleting it)
-          3. resume the processes
-          4. consume (delete) the output buffer
-          5. ack the release to ShadowFS
+          3. discard baselines (commit_by_cgroup) -- FS is already finalized
+          4. resume the processes (continue_by_cgroup, full release)
+          5. consume (delete) the output buffer
+          6. ack the release to ShadowFS
 
-        Returns (ok, stdout). If the process query/resume or the output
-        PRE-READ fails, returns (False, "") WITHOUT resuming (when the failure
-        is the pre-read), WITHOUT consuming the output buffer, and WITHOUT
+        Returns (ok, stdout). If the process query/resume, the output PRE-READ,
+        or the baseline discard (commit_by_cgroup) fails, returns (False, "")
+        WITHOUT resuming, WITHOUT consuming the output buffer, and WITHOUT
         acking -- the caller keeps the cgroup fenced and parked for retry.
 
         Once processes are resumed AND the output consumed, the external
@@ -437,7 +438,25 @@ class ShadowOrchestrator:
                       "acking (fail closed; buffer preserved)", cgroup_id)
             return False, ""
 
-        # Step 3: resume the frozen processes (if any). A resume failure leaves
+        # Step 3: discard baselines (commit_by_cgroup) BEFORE full-releasing. FS
+        # is already finalized so the file epoch is canonical; this discards the
+        # frozen process baselines so they can't linger. Failure is fail-closed:
+        # do NOT resume / consume / ack.
+        try:
+            commit_resp = self.proc_client.request({
+                "action": "commit_by_cgroup",
+                "cgroup_id": cgroup_id,
+            })
+        except Exception as e:  # noqa: BLE001 - fail closed
+            log.error("  commit_by_cgroup(%s) unreachable: %s -- NOT releasing/"
+                      "acking (processes stay frozen)", cgroup_id, e)
+            return False, ""
+        if not isinstance(commit_resp, dict) or commit_resp.get("status") != "ok":
+            log.error("  commit_by_cgroup(%s) failed: %r -- NOT releasing/acking "
+                      "(processes stay frozen; will retry)", cgroup_id, commit_resp)
+            return False, ""
+
+        # Step 4: resume the frozen processes (if any). A resume failure leaves
         # them frozen, so we must NOT consume the output or ack.
         frozen = frozen_resp.get("frozen") or []
         if frozen:
@@ -459,14 +478,14 @@ class ShadowOrchestrator:
                 return False, ""
             log.info("  Resumed PIDs: %s", resume_resp.get("pids", []))
 
-        # Step 4: processes are resumed -- now it is safe to consume (delete)
+        # Step 5: processes are resumed -- now it is safe to consume (delete)
         # the buffered stdout we already read.
         self._consume_output(cgroup_id)
         if buffered:
             log.info("  Releasing %d bytes of buffered stdout for cgroup=%s",
                      len(buffered), cgroup_id)
 
-        # Step 5: external effects are OUT -- ack so ShadowFS drops the record.
+        # Step 6: external effects are OUT -- ack so ShadowFS drops the record.
         # A failed ack does NOT re-fence (effects already released); park it
         # for an ack-only retry instead.
         if not self._fs_ack_release(cgroup_id):
@@ -826,12 +845,22 @@ class ShadowOrchestrator:
         return {"status": "ok", "session_id": sid, "cgroup_id": cgroup_id}
 
     def session_run(self, session_id: str, command: str) -> dict:
-        """Feed one command to the session's current live shell; return stdout."""
+        """Feed one command to the session's current live shell.
+
+        Output is commit-gated. OUTSIDE an epoch the command is canonical and
+        its stdout is returned immediately. INSIDE an active epoch the output is
+        SPECULATIVE: it is held pending (never returned to the caller before
+        finalization, so a non-rollbackable caller can't act on unwound state).
+        The committed transcript is released by session_commit_epoch.
+        """
         proxy = self._get_proxy()
         try:
             out = proxy.run(session_id, command)
         except KeyError:
             return {"status": "error", "message": f"unknown session {session_id}"}
+        if out is None:
+            # Speculative epoch active: do not release speculative output.
+            return {"status": "pending", "output": None}
         return {"status": "ok", "output": out}
 
     def _session_cgroup(self, session_id: str) -> Optional[str]:
@@ -880,18 +909,33 @@ class ShadowOrchestrator:
             return {"status": "error", "message": f"unknown session {session_id}"}
         log.info("SESSION_COMMIT_EPOCH sid=%s cgroup=%s", session_id, cgroup_id)
         proxy = self._get_proxy()
+        # FS-FIRST finalization. Phase 1 is REVERSIBLE: quiesce the candidate to
+        # a stopped boundary WITHOUT discarding the baseline, so if the file
+        # layer cannot finalize we can still roll the epoch back losslessly.
         try:
-            proxy.commit(session_id)
+            proxy.quiesce_for_commit(session_id)
         except Exception as e:  # noqa: BLE001
-            log.error("  commit_epoch (process layer) failed: %s", e)
+            log.error("  quiesce_for_commit (process layer) failed: %s", e)
             return {"status": "error", "message": str(e)}
+        # Gate on the file layer: only proceed to the destructive process commit
+        # once ShadowFS has finalized the epoch's file changes.
         fs_resp = self.fs_client.request({
             "action": "commit_epoch",
             "cgroup_id": cgroup_id,
         })
         if fs_resp.get("status") != "ok":
-            log.error("  ShadowFS commit_epoch failed: %s", fs_resp.get("message"))
+            # FS did NOT finalize: do NOT discard the baseline. The epoch stays
+            # intact (candidate still frozen) so it can be rolled back later.
+            log.error("  ShadowFS commit_epoch failed: %s -- baseline preserved",
+                      fs_resp.get("message"))
             return fs_resp
+        # FS finalized: perform the DESTRUCTIVE process commit (discard baseline,
+        # keep candidate canonical) and release the buffered speculative output.
+        try:
+            proxy.finalize_commit(session_id)
+        except Exception as e:  # noqa: BLE001
+            log.error("  finalize_commit (process layer) failed: %s", e)
+            return {"status": "error", "message": str(e)}
         return {"status": "ok", "output": proxy.get_output(session_id)}
 
     def session_rollback_epoch(self, session_id: str) -> dict:
@@ -1100,7 +1144,16 @@ class ShadowOrchestrator:
 
         # ── Step 3: Audit recorded events against policy ──
         log.info("  Step 3: Auditing events...")
-        audit_rules = self._convert_policy_to_audit_rules(allowed_ops)
+        # FAIL CLOSED on a malformed policy: an unknown event_type must not be
+        # silently widened to ANY. Contain the cgroup instead of auditing
+        # against a permissive rule set.
+        try:
+            audit_rules = self._convert_policy_to_audit_rules(allowed_ops)
+        except ValueError as e:
+            return self._fail_closed(
+                cgroup_id, state,
+                f"invalid policy (audit rules): {e}",
+            )
         audit_resp = self.observe_client.request({
             "action": "audit",
             "log_path": state["log_path"],
@@ -1137,8 +1190,18 @@ class ShadowOrchestrator:
             log.info("  Step 4: Audit PASSED - committing...")
 
             # Install whitelist eBPF filter
-            whitelist_ops = self._convert_policy_to_whitelist(allowed_ops,
-                                                             state["cgroup_inode"])
+            # FAIL CLOSED on a malformed policy: an unknown event_type must not
+            # be silently widened to the 0xFFFF wildcard, which would admit
+            # every event once the workload is released.
+            try:
+                whitelist_ops = self._convert_policy_to_whitelist(
+                    allowed_ops, state["cgroup_inode"])
+            except ValueError as e:
+                return self._fail_closed(
+                    cgroup_id, state,
+                    f"invalid policy (whitelist): {e}",
+                    total_events=total_events,
+                )
             wl_resp = self.observe_client.request({
                 "action": "install_whitelist",
                 "cgroup_id": state["cgroup_inode"],
@@ -1301,6 +1364,10 @@ class ShadowOrchestrator:
 
         Audit rules format:
             [{"event_type": 2, "action": "allow", "path_pattern": "/tmp/"}]
+
+        Fails CLOSED: an unrecognized event_type raises ValueError instead of
+        defaulting to ANY (-1), so a typo can never widen a rule to match every
+        event. The only wildcards are the explicit "*"/"ANY".
         """
         EVENT_TYPE_MAP = {
             "OPEN": 1, "CREATE": 2, "DELETE": 3, "RENAME": 4,
@@ -1313,7 +1380,9 @@ class ShadowOrchestrator:
         rules = []
         for op in allowed_ops:
             event_str = op.get("event_type", "*").upper()
-            event_num = EVENT_TYPE_MAP.get(event_str, -1)
+            if event_str not in EVENT_TYPE_MAP:
+                raise ValueError(f"unknown policy event_type: {event_str}")
+            event_num = EVENT_TYPE_MAP[event_str]
             rules.append({
                 "event_type": event_num,
                 "action": op.get("action", "allow"),
@@ -1330,6 +1399,10 @@ class ShadowOrchestrator:
 
         Whitelist format:
             [{"event_type": 2, "path_prefix": "/tmp/"}]
+
+        Fails CLOSED: an unrecognized event_type raises ValueError instead of
+        defaulting to the 0xFFFF wildcard, so a typo can never install a rule
+        that admits every event. The only wildcards are the explicit "*"/"ANY".
         """
         EVENT_TYPE_MAP = {
             "OPEN": 1, "CREATE": 2, "DELETE": 3, "RENAME": 4,
@@ -1344,7 +1417,9 @@ class ShadowOrchestrator:
             if op.get("action", "allow").lower() != "allow":
                 continue
             event_str = op.get("event_type", "*").upper()
-            event_num = EVENT_TYPE_MAP.get(event_str, 0xFFFF)
+            if event_str not in EVENT_TYPE_MAP:
+                raise ValueError(f"unknown policy event_type: {event_str}")
+            event_num = EVENT_TYPE_MAP[event_str]
             whitelist.append({
                 "event_type": event_num,
                 "path_prefix": ShadowOrchestrator._normalize_fs_prefix(

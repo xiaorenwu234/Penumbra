@@ -33,8 +33,8 @@
 ### 文件结构
 
 ```
-main.go               — FUSE 挂载、ShadowNode、cgroup 识别、控制文件 .shadow.ctl
-socket_server.go      — Unix socket 控制 API（commit/rollback/list_agents/…）
+main.go               — FUSE 挂载、ShadowNode、cgroup 识别
+socket_server.go      — Unix socket 控制 API（commit/rollback/list_agents/…，唯一控制接口）
 backend/
   backend.go          — Backend 结构体：agent 状态、依赖图、WAL、级联回滚、检查点
   operations.go       — LogEntry 接口 + 各 overlay 操作类型的 Rollback / Promote
@@ -64,14 +64,17 @@ Makefile              — 编译 + 本地 demo 启动
 
 所有子节点通过 `WrapChild` 自动获得追踪能力。写打开时自动执行 copy-up，确保 orig 不被修改。
 
-### 2. 控制文件
+### 2. 控制接口
 
-挂载点根目录下自动创建虚拟文件 `.shadow.ctl`：
+控制接口只有 **ShadowFS Unix 控制 socket**（`socket_server.go`）。之前挂载点
+根目录下的虚拟文件 `.shadow.ctl` 已被**移除**：它对任何能写入挂载点的进程
+（包括被沙箱隔离的 agent 本身）暴露了 commit/rollback，等于让 agent 自行
+驱动 finalization。socket 不经由文件系统视图暴露，且通过 `SO_PEERCRED`
+只接受 orchestrator（daemon 自身 uid）的连接，socket 文件为 `0600`、
+所在目录为 `0700`。
 
-```bash
-echo r > .shadow.ctl   # 回滚当前 agent 的全部操作
-echo c > .shadow.ctl   # 提交（promote overlay → orig）
-```
+commit/rollback 通过 socket 的 JSON 行协议下发（由 orchestrator 调用），
+例如 `{"action":"rollback","cgroup_id":"/shadow-demo"}`。
 
 ### 3. Overlay 层（backend/overlay.go）
 
@@ -139,9 +142,9 @@ echo hello > a.txt
 mkdir -p x/y
 rm -r x
 
-# 回滚
-echo r > .shadow.ctl    # 恢复 x/y/ 和 a.txt
-echo c > .shadow.ctl    # 提交
+# 回滚 / 提交：通过控制 socket 下发（不再有 .shadow.ctl 文件）
+#   {"action":"rollback","cgroup_id":"<cgroup>"}   # 恢复 x/y/ 和 a.txt
+#   {"action":"commit","cgroup_id":"<cgroup>"}     # 提交
 
 # 退出
 make clean              # 卸载 + 清理

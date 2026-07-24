@@ -59,6 +59,12 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Harden the control plane (issue #2): forbid this daemon (and anything it
+    // ever execs) from gaining privileges via a setuid/setgid bit. no_new_privs
+    // is inherited across fork/exec and can never be unset. ShadowProc never
+    // execs a setuid helper, so this is always safe here.
+    set_no_new_privs();
+
     eprintln!("╔══════════════════════════════════════════════════════════╗");
     eprintln!("║         ShadowProc - Process Communication Guard        ║");
     eprintln!("╠══════════════════════════════════════════════════════════╣");
@@ -233,13 +239,15 @@ fn main() -> Result<()> {
     }
 
     eprintln!("\n[*] Shutting down ShadowProc...");
-    // Resume everything we froze so no process is left stuck in SIGSTOP once the
-    // BPF programs detach (would otherwise leave orphaned, wedged tasks).
+    // Abandon in-flight speculation (resume pristine baselines, discard
+    // candidates) and KILL any remaining non-versioned frozen process so its
+    // unauthorized pending effect cannot escape once the BPF hooks detach.
     {
         let mut pm = process_manager.lock().unwrap();
         let n = pm.release_all();
         if n > 0 {
-            eprintln!("[*] Resumed {} frozen process(es) on shutdown.", n);
+            eprintln!("[*] Handled {} frozen process(es) on shutdown \
+                       (baselines resumed, unauthorized frozen killed).", n);
         }
     }
     // bpf_manager is dropped via Arc when all references go out of scope
@@ -252,4 +260,18 @@ fn ctrlc_handler(running: Arc<AtomicBool>) {
     let _ = ctrlc::set_handler(move || {
         running.store(false, Ordering::Relaxed);
     });
+}
+
+/// Set PR_SET_NO_NEW_PRIVS so no execve from this process tree can gain
+/// privileges via a setuid/setgid bit. Best-effort: a failure is logged but
+/// not fatal (the daemon's other fences remain in force).
+fn set_no_new_privs() {
+    // SAFETY: PR_SET_NO_NEW_PRIVS takes only scalar args (no pointers).
+    let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if ret != 0 {
+        eprintln!(
+            "[!] Warning: PR_SET_NO_NEW_PRIVS failed ({}); continuing without it.",
+            std::io::Error::last_os_error()
+        );
+    }
 }

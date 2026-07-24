@@ -124,12 +124,12 @@ type walPending struct {
 //     dependency-graph edges and overlay mutations observe the same
 //     ordering as the WAL on disk.
 type Backend struct {
-	stagingDir  string
-	trackedDir  string
-	agents      map[string]*AgentState
-	dependents  map[string]map[string]struct{}
-	dependsOn   map[string]map[string]struct{}
-	fileDirty   map[string]map[string]struct{} // orig path -> set of agents that have dirtied it
+	stagingDir string
+	trackedDir string
+	agents     map[string]*AgentState
+	dependents map[string]map[string]struct{}
+	dependsOn  map[string]map[string]struct{}
+	fileDirty  map[string]map[string]struct{} // orig path -> set of agents that have dirtied it
 	// publishDirs accumulates the orig parent directories of paths promoted
 	// during the current settle. They are fsync'd as ONE group barrier before
 	// any agent in the group is marked Finalized, so the whole commit group's
