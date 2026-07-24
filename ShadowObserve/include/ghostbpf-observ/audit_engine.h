@@ -52,6 +52,13 @@ struct AuditReport {
     std::vector<Violation> violations;
     size_t total_events     = 0;
     size_t total_violations = 0;
+    /* Log-integrity status. `complete` is false if the log could not be opened
+     * or any line failed to parse: an unparsable record is an unknown event
+     * that could hide a violation, so the epoch must fail closed rather than
+     * silently skip it. */
+    size_t      parse_errors = 0;
+    bool        complete     = true;
+    std::string integrity_reason;
 };
 
 /* ---- engine ----------------------------------------------------------- */
@@ -81,7 +88,15 @@ public:
 
     /**
      * Audit a JSONL log file against the current rule set.
-     * Matches against event.path for all event types.
+     *
+     * Single-resource events (OPEN/CREATE/DELETE/... and all PROC events) are
+     * matched against event.path. DUAL-RESOURCE file operations (RENAME and
+     * hard LINK) carry a second resource in event.new_path and are governed by
+     * two-endpoint semantics: the operation is a violation if EITHER endpoint
+     * (source or destination) fails the policy. This mirrors the BPF enforcer,
+     * which denies a rename/link unless BOTH dentries are whitelisted, so a
+     * file in an allowed directory cannot be renamed/linked into a forbidden
+     * one.
      * @return AuditReport with violations and summary counts.
      */
     AuditReport audit(const std::string &log_file_path) const;
@@ -91,6 +106,16 @@ private:
 
     static bool path_matches(const std::string &pattern,
                              const std::string &path);
+
+    /**
+     * Evaluate a single resource endpoint (event_type + path) against the rule
+     * set. Returns true if the endpoint is a violation (matched a deny rule, or
+     * -- under default-deny with a non-empty rule set -- lacked any allow
+     * rule). On a violation, matched_out receives the offending rule (a real
+     * deny rule or the synthetic "(default-deny)").
+     */
+    bool endpoint_violation(int event_type, const std::string &path,
+                            AuditRule &matched_out) const;
 };
 
 } // namespace ghostbpf_observ

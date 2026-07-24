@@ -325,11 +325,25 @@ std::string ObserveDaemon::handle_stop_observe(uint64_t cgroup_id) {
     }
 
     std::string log_path = it->second.log_path;
-    it->second.observer->stop();
+    IntegrityReport rep = it->second.observer->stop();
     sessions_.erase(it);
 
-    fprintf(stderr, "[ObserveDaemon] Stopped observing cgroup %lu\n", cgroup_id);
-    return json_ok("\"log_path\":\"" + json_escape_str(log_path) + "\"");
+    fprintf(stderr, "[ObserveDaemon] Stopped observing cgroup %lu (complete=%d "
+            "dropped=%lu write_err=%d drain_err=%d)\n",
+            cgroup_id, rep.complete, (unsigned long)rep.dropped_events,
+            rep.write_error, rep.drain_error);
+
+    /* Surface the log-integrity status so the orchestrator can fail the epoch
+     * closed when the recorded log is known to be incomplete. */
+    std::ostringstream extra;
+    extra << "\"log_path\":\"" << json_escape_str(log_path) << "\""
+          << ",\"complete\":"       << (rep.complete ? "true" : "false")
+          << ",\"dropped_events\":" << rep.dropped_events
+          << ",\"write_error\":"    << (rep.write_error ? "true" : "false")
+          << ",\"drain_error\":"    << (rep.drain_error ? "true" : "false");
+    if (!rep.complete)
+        extra << ",\"reason\":\"" << json_escape_str(rep.reason) << "\"";
+    return json_ok(extra.str());
 }
 
 std::string ObserveDaemon::handle_audit(const std::string &log_path, const std::string &rules_json) {
@@ -356,7 +370,12 @@ std::string ObserveDaemon::handle_audit(const std::string &log_path, const std::
     std::ostringstream extra;
     extra << "\"total_events\":" << report.total_events
           << ",\"total_violations\":" << report.total_violations
-          << ",\"violations\":[";
+          << ",\"parse_errors\":" << report.parse_errors
+          << ",\"complete\":" << (report.complete ? "true" : "false");
+    if (!report.complete)
+        extra << ",\"integrity_reason\":\""
+              << json_escape_str(report.integrity_reason) << "\"";
+    extra << ",\"violations\":[";
 
     for (size_t i = 0; i < report.violations.size(); i++) {
         if (i > 0) extra << ",";

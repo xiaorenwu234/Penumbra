@@ -139,8 +139,16 @@ int BPF_PROG(enforce_inode_rename, struct inode *old_dir,
     if (!enforcing(&cgroup_id))
         return 0;
 
-    /* Enforce on the source path (matches the observer's RENAME path field). */
+    /* DUAL-RESOURCE operation: a rename touches BOTH the source and the
+     * destination, so BOTH must be whitelisted for FS_EVENT_RENAME. Checking
+     * only the source would let an allowed file be renamed INTO a forbidden
+     * directory (and checking only the destination would let a forbidden file
+     * be renamed OUT). Deny if EITHER endpoint is not permitted. The observer
+     * records old_dentry as `path` and new_dentry as `new_path`; the audit
+     * engine mirrors this two-endpoint check, so observe==enforce holds. */
     if (enforce_dentry(cgroup_id, FS_EVENT_RENAME, old_dentry) < 0)
+        return -1;
+    if (enforce_dentry(cgroup_id, FS_EVENT_RENAME, new_dentry) < 0)
         return -1;
     return 0;
 }
@@ -188,8 +196,16 @@ int BPF_PROG(enforce_inode_link, struct dentry *old_dentry, struct inode *dir,
     if (!enforcing(&cgroup_id))
         return 0;
 
-    /* Enforce on the created link (matches the observer's LINK path field). */
+    /* DUAL-RESOURCE operation: a hard link creates a new name (new_dentry) for
+     * an existing inode (old_dentry). BOTH the created link and the existing
+     * target must be whitelisted for FS_EVENT_LINK, else a forbidden file
+     * could be linked into an allowed directory (or an allowed file linked
+     * into a forbidden one). Deny if EITHER endpoint is not permitted. The
+     * observer records new_dentry as `path` and old_dentry as `new_path`; the
+     * audit engine mirrors this two-endpoint check. */
     if (enforce_dentry(cgroup_id, FS_EVENT_LINK, new_dentry) < 0)
+        return -1;
+    if (enforce_dentry(cgroup_id, FS_EVENT_LINK, old_dentry) < 0)
         return -1;
     return 0;
 }

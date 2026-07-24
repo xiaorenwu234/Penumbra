@@ -184,12 +184,46 @@ void AuditEngine::add_deny_rule(int event_type, const std::string &path_prefix) 
 
 void AuditEngine::clear_rules() { rules_.clear(); }
 
+bool AuditEngine::endpoint_violation(int event_type, const std::string &path,
+                                     AuditRule &matched_out) const {
+    bool has_allow = false;
+    const AuditRule *deny_rule = nullptr;
+
+    for (const auto &r : rules_) {
+        if (r.event_type != -1 && r.event_type != event_type)
+            continue;
+        if (!path_matches(r.path_pattern, path))
+            continue;
+        if (r.action == AUDIT_DENY) {
+            deny_rule = &r;
+            break;
+        } else {
+            has_allow = true;
+        }
+    }
+
+    if (deny_rule) {
+        matched_out = *deny_rule;
+        return true;
+    }
+    // Default-deny: a non-empty rule set with no matching allow rule is a
+    // violation. An empty rule set audits nothing (allows all).
+    if (!has_allow && !rules_.empty()) {
+        matched_out = {-1, AUDIT_DENY, "(default-deny)"};
+        return true;
+    }
+    return false;
+}
+
 AuditReport AuditEngine::audit(const std::string &log_file_path) const {
     AuditReport report;
 
     std::ifstream log(log_file_path);
     if (!log) {
         fprintf(stderr, "[AuditEngine] cannot open %s\n", log_file_path.c_str());
+        // Cannot read the log at all: treat as an incomplete log (fail closed).
+        report.complete = false;
+        report.integrity_reason = "cannot open log file";
         return report;
     }
 
@@ -198,58 +232,79 @@ AuditReport AuditEngine::audit(const std::string &log_file_path) const {
         if (line.empty()) continue;
 
         ObservEvent evt;
-        if (!parse_json_line(line, evt)) {
+        bool parsed = false;
+        try {
+            parsed = parse_json_line(line, evt);
+        } catch (const std::exception &) {
+            // A malformed numeric field (stoull/stoul) throws: count as a
+            // parse failure rather than letting it abort the audit.
+            parsed = false;
+        }
+        if (!parsed) {
+            // An unparsable record is an UNKNOWN event that may hide a
+            // violation. Do NOT silently skip it as if it passed: mark the
+            // log incomplete so the caller fails the epoch closed.
+            report.parse_errors++;
+            report.complete = false;
             fprintf(stderr, "[AuditEngine] parse error: %s\n", line.c_str());
             continue;
         }
 
         report.total_events++;
 
-        bool has_allow = false;
-        bool has_deny  = false;
-        const AuditRule *deny_rule = nullptr;
+        // Evaluate the primary/source resource (event.path).
+        AuditRule matched_src;
+        bool src_viol = endpoint_violation(static_cast<int>(evt.event_type),
+                                           std::string(evt.path), matched_src);
 
-        for (const auto &r : rules_) {
-            if (r.event_type != -1 && r.event_type != static_cast<int>(evt.event_type))
-                continue;
+        // DUAL-RESOURCE operations (RENAME, hard LINK) also touch a second
+        // resource carried in new_path (rename destination / existing link
+        // target). The operation must satisfy the policy for BOTH endpoints,
+        // so evaluate the destination too and treat a violation on EITHER
+        // side as a violation of the whole operation. This closes the
+        // "rename an allowed file into a forbidden directory" bypass and
+        // matches the BPF enforcer, which denies unless both dentries pass.
+        bool is_dual = (evt.event_type == FS_EVENT_RENAME ||
+                        evt.event_type == FS_EVENT_LINK);
+        std::string dst_path(evt.new_path);
+        AuditRule matched_dst;
+        bool dst_viol = false;
+        if (is_dual && !dst_path.empty())
+            dst_viol = endpoint_violation(static_cast<int>(evt.event_type),
+                                          dst_path, matched_dst);
 
-            if (!path_matches(r.path_pattern, std::string(evt.path)))
-                continue;
-
-            if (r.action == AUDIT_DENY) {
-                has_deny = true;
-                deny_rule = &r;
-                break;
+        if (src_viol || dst_viol) {
+            Violation v;
+            v.event = evt;
+            std::ostringstream desc;
+            desc << "DENY: " << evt.event_name();
+            if (src_viol && dst_viol) {
+                v.matched_rule = matched_src;
+                desc << " source '" << evt.path << "' and destination '"
+                     << evt.new_path << "'";
+            } else if (src_viol) {
+                v.matched_rule = matched_src;
+                desc << (is_dual ? " source '" : " '") << evt.path << "'";
             } else {
-                has_allow = true;
+                v.matched_rule = matched_dst;
+                desc << " destination '" << evt.new_path << "'";
             }
+            desc << " (pid=" << evt.pid << " comm=" << evt.comm << ")";
+            const AuditRule &mr = src_viol ? matched_src : matched_dst;
+            if (mr.path_pattern == "(default-deny)")
+                desc << " -- no matching allow rule";
+            else
+                desc << " matches blacklist '" << mr.path_pattern << "'";
+            v.description = desc.str();
+            report.violations.push_back(std::move(v));
+            report.total_violations++;
         }
+    }
 
-        if (has_deny) {
-            Violation v;
-            v.event = evt;
-            v.matched_rule = *deny_rule;
-            std::ostringstream desc;
-            desc << "DENY: " << evt.event_name()
-                 << " on '" << evt.path << "'"
-                 << " (pid=" << evt.pid << " comm=" << evt.comm << ")"
-                 << " matches blacklist '" << deny_rule->path_pattern << "'";
-            v.description = desc.str();
-            report.violations.push_back(std::move(v));
-            report.total_violations++;
-        } else if (!has_allow && !rules_.empty()) {
-            Violation v;
-            v.event = evt;
-            v.matched_rule = {-1, AUDIT_DENY, "(default-deny)"};
-            std::ostringstream desc;
-            desc << "DENY: " << evt.event_name()
-                 << " on '" << evt.path << "'"
-                 << " (pid=" << evt.pid << " comm=" << evt.comm << ")"
-                 << " -- no matching allow rule";
-            v.description = desc.str();
-            report.violations.push_back(std::move(v));
-            report.total_violations++;
-        }
+    if (!report.complete && report.integrity_reason.empty()) {
+        std::ostringstream r;
+        r << "parse_errors=" << report.parse_errors;
+        report.integrity_reason = r.str();
     }
 
     return report;

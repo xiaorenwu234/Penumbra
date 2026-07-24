@@ -32,6 +32,20 @@ struct {
     __uint(max_entries, RING_BUF_SIZE);
 } events SEC(".maps");
 
+/*
+ * dropped[0] counts events that were LOST because the ring buffer was full at
+ * submit time for a MONITORED cgroup. Userspace reads it at stop() to decide
+ * whether the epoch's audit log is complete: a non-zero count means the log is
+ * missing events, which must make the epoch fail closed (the paper: an
+ * incomplete log implies rollback). Reset per epoch in Observer::start().
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} dropped SEC(".maps");
+
 /* ---- helpers ---------------------------------------------------------- */
 
 static __always_inline struct observ_event *
@@ -42,8 +56,16 @@ reserve_event(void) {
         return NULL;
 
     struct observ_event *evt = bpf_ringbuf_reserve(&events, sizeof(*evt), 0);
-    if (!evt)
+    if (!evt) {
+        /* Ring buffer full: a MONITORED event is being lost. Count it so the
+         * userspace observer can mark this epoch's log incomplete (fail
+         * closed). Not counted for unmonitored cgroups (handled above). */
+        __u32 k = 0;
+        __u64 *cnt = bpf_map_lookup_elem(&dropped, &k);
+        if (cnt)
+            __sync_fetch_and_add(cnt, 1);
         return NULL;
+    }
 
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u64 uid_gid  = bpf_get_current_uid_gid();

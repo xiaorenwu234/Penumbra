@@ -101,6 +101,7 @@ struct Observer::Impl {
     std::ofstream       log_file;
     uint64_t            cgroup_id = 0;
     bool                running   = false;
+    bool                write_error = false;   /* a log write/flush failed */
 
     ~Impl() {
         if (running) {
@@ -112,11 +113,27 @@ struct Observer::Impl {
         if (skel) observ_bpf__destroy(skel);
     }
 
+    /* Read the BPF ring-buffer overflow counter (dropped[0]). */
+    uint64_t read_dropped() {
+        if (!skel) return 0;
+        __u32 key = 0;
+        __u64 val = 0;
+        if (bpf_map__lookup_elem(skel->maps.dropped,
+                                 &key, sizeof(key),
+                                 &val, sizeof(val), 0) != 0)
+            return 0;
+        return val;
+    }
+
     static int handle_event(void *ctx, void *data, size_t /*data_sz*/) {
         auto *impl = static_cast<Impl *>(ctx);
         auto &evt  = *static_cast<struct observ_event *>(data);
         impl->log_file << evt_to_json(evt);
         impl->log_file.flush();
+        /* A failed write/flush means the on-disk log is missing this event:
+         * remember it so stop() can fail the epoch closed. */
+        if (!impl->log_file)
+            impl->write_error = true;
         return 0;
     }
 };
@@ -144,6 +161,15 @@ Observer &Observer::operator=(Observer &&) noexcept = default;
 
 bool Observer::start(uint64_t cgroup_id, const std::string &output_path) {
     if (impl_->running) stop();
+
+    /* Reset the per-epoch integrity state and drop counter. */
+    impl_->write_error = false;
+    {
+        __u32 key = 0;
+        __u64 zero = 0;
+        bpf_map__update_elem(impl_->skel->maps.dropped,
+                             &key, sizeof(key), &zero, sizeof(zero), BPF_ANY);
+    }
 
     __u8 one = 1;
     int err = bpf_map__update_elem(impl_->skel->maps.cgroup_monitor,
@@ -182,15 +208,51 @@ void Observer::poll(int timeout_ms) {
     ring_buffer__poll(impl_->rb, timeout_ms);
 }
 
-void Observer::stop() {
-    if (!impl_->running) return;
+IntegrityReport Observer::stop() {
+    IntegrityReport rep;
+    if (!impl_->running) return rep;
 
+    /* 1. Stop the source of new events FIRST: unmonitor the cgroup so no
+     *    further syscalls reserve ring-buffer slots. (Callers freeze the
+     *    workload before stop, so this quiesces the event stream.) */
     bpf_map__delete_elem(impl_->skel->maps.cgroup_monitor,
                          &impl_->cgroup_id, sizeof(impl_->cgroup_id), 0);
-    ring_buffer__free(impl_->rb);
-    impl_->rb = nullptr;
+
+    /* 2. DRAIN the ring buffer to empty so tail events already queued are
+     *    written to the log before we seal it. ring_buffer__consume returns
+     *    the number of records processed (0 when empty, <0 on error). */
+    if (impl_->rb) {
+        for (;;) {
+            int n = ring_buffer__consume(impl_->rb);
+            if (n < 0) { rep.drain_error = true; break; }
+            if (n == 0) break;
+        }
+        ring_buffer__free(impl_->rb);
+        impl_->rb = nullptr;
+    }
+
+    /* 3. Flush + close the log, detecting any write failure. */
+    impl_->log_file.flush();
+    if (!impl_->log_file) impl_->write_error = true;
     impl_->log_file.close();
+
+    /* 4. Read the BPF drop counter and compose the completeness verdict. */
+    rep.dropped_events = impl_->read_dropped();
+    rep.write_error    = impl_->write_error;
+    rep.complete = (rep.dropped_events == 0) && !rep.write_error && !rep.drain_error;
+    if (!rep.complete) {
+        std::ostringstream r;
+        r << "incomplete log:";
+        if (rep.dropped_events) r << " dropped_events=" << rep.dropped_events;
+        if (rep.write_error)    r << " write_error";
+        if (rep.drain_error)    r << " drain_error";
+        rep.reason = r.str();
+        fprintf(stderr, "[Observer] %s (cgroup=%lu)\n",
+                rep.reason.c_str(), (unsigned long)impl_->cgroup_id);
+    }
+
     impl_->running = false;
+    return rep;
 }
 
 bool Observer::is_running() const { return impl_->running; }

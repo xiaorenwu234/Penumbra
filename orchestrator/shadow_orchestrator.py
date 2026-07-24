@@ -1071,12 +1071,32 @@ class ShadowOrchestrator:
         frozen_pids = freeze_resp.get("pids", [])
         log.info("  Froze %d processes: %s", len(frozen_pids), frozen_pids)
 
-        # ── Step 2: Stop observation (ensures log is complete) ──
+        # ── Step 2: Stop observation (drains tail events, then seals log) ──
         log.info("  Step 2: Stopping observation...")
-        self.observe_client.request({
+        stop_resp = self.observe_client.request({
             "action": "stop_observe",
             "cgroup_id": state["cgroup_inode"],
         })
+        # FAIL CLOSED on an incomplete log. The paper guarantees an incomplete
+        # audit log implies rollback: if stop failed, events were dropped
+        # (ring-buffer overflow), the log write failed, or the ring could not be
+        # drained, then the recorded log is NOT a faithful record of what the
+        # frozen workload did -- auditing it could pass unaudited effects. The
+        # `complete` field defaults to False when absent (unknown => fail closed).
+        if (stop_resp.get("status") != "ok"
+                or not stop_resp.get("complete", False)
+                or stop_resp.get("dropped_events", 0) > 0
+                or stop_resp.get("write_error", False)
+                or stop_resp.get("drain_error", False)):
+            return self._fail_closed(
+                cgroup_id, state,
+                "observation log incomplete at stop "
+                f"(complete={stop_resp.get('complete')}, "
+                f"dropped={stop_resp.get('dropped_events')}, "
+                f"write_error={stop_resp.get('write_error')}, "
+                f"drain_error={stop_resp.get('drain_error')}, "
+                f"status={stop_resp.get('status')})",
+            )
 
         # ── Step 3: Audit recorded events against policy ──
         log.info("  Step 3: Auditing events...")
@@ -1091,6 +1111,20 @@ class ShadowOrchestrator:
             log.error("  Audit request failed: %s", audit_resp.get("message"))
             return {"status": "error", "message": "audit failed",
                     "detail": audit_resp.get("message")}
+
+        # FAIL CLOSED if the audit could not fully parse the log. An unparsable
+        # record is an unknown event that may hide a violation; skipping it (the
+        # old behaviour) would let it silently pass. `complete` defaults to
+        # False when absent so an older daemon also fails closed.
+        if (not audit_resp.get("complete", False)
+                or audit_resp.get("parse_errors", 0) > 0):
+            return self._fail_closed(
+                cgroup_id, state,
+                "audit log integrity failure "
+                f"(complete={audit_resp.get('complete')}, "
+                f"parse_errors={audit_resp.get('parse_errors')})",
+                total_events=audit_resp.get("total_events", 0),
+            )
 
         total_violations = audit_resp.get("total_violations", 0)
         total_events = audit_resp.get("total_events", 0)

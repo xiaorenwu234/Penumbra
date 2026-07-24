@@ -123,6 +123,24 @@
 - `event_type = -1` 表示匹配所有事件类型
 - 路径匹配为前缀匹配：`/etc/` 匹配 `/etc/passwd`
 
+### 双资源操作语义（rename / hard link）
+
+`RENAME` 与硬 `LINK` 是**双资源操作**：一次操作同时触及两个文件系统资源——
+源（`path`）与目标（`new_path`）。策略语义为**两端点都必须通过**：
+
+```
+双资源操作 ALLOW  ⟺  源端点 ALLOW  ∧  目标端点 ALLOW
+（任一端点命中 deny 或在 default-deny 下无 allow，则整个操作视为违规）
+```
+
+- `RENAME`：`path` = 源，`new_path` = 目标；二者都按 `FS_EVENT_RENAME` 校验。
+- `LINK`：`path` = 新建的链接，`new_path` = 既有目标 inode；二者都按 `FS_EVENT_LINK` 校验。
+
+这样可堵住“把允许目录中的文件 rename/link 进入禁止目录”（以及反向）的绕过。
+Enforcer（`lsm/inode_rename`、`lsm/inode_link`）对**两个 dentry**做同样的双端点
+校验，与审计引擎逐位一致（observe==enforce）。`SYMLINK` 的 `new_path` 是任意的
+链接内容字符串（并非在创建时解析的路径），因此仍只校验被创建的符号链接路径本身。
+
 ## 白名单执行（Enforcer）
 
 审计通过后，Enforcer 安装 LSM eBPF 程序，限制 cgroup 仅执行白名单内的操作：
