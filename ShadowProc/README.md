@@ -60,7 +60,9 @@ explicitly **out of scope** for the current fence and are deferred hardening:
 
 - `AF_NETLINK` / D-Bus fine-grained admission (currently exempt as kernel/system peers).
 - io_uring SQE-level inspection (currently whole-syscall default-deny).
-- Reclaiming `shared_map_owner` entries on last-unmap / inode-free (a reused
-  inode pointer could carry a stale owner; the first map is always fail-closed).
 - UID/GID drop, capability drop, and mount-namespace isolation for the daemons
   (this pass adds `no_new_privs` + cgroupfs-path confinement only).
+
+Writable `MAP_SHARED` owner tracking now reclaims its entries on inode teardown
+(`lsm/inode_free_security`), so a reused inode pointer cannot inherit a stale
+owner; the first mapping of any inode remains fail-closed.

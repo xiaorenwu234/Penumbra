@@ -1135,3 +1135,20 @@ int BPF_PROG(shadow_sched_exit, struct task_struct *task)
     bpf_map_delete_elem(&stopped_pids, &tgid);
     return 0;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Shared-mapping owner cleanup - reclaim a shared_map_owner entry when its
+// inode is torn down, so a later REUSED inode pointer can never inherit a
+// stale owner cgroup (which could otherwise wrongly exempt a cross-epoch
+// MAP_SHARED). A live mapping pins the inode, so an entry is only reclaimed
+// once every mapping is gone. This fires for every inode teardown; the delete
+// is a cheap no-op for the (vast majority of) inodes that were never a tracked
+// writable MAP_SHARED target.
+// ═══════════════════════════════════════════════════════════════
+SEC("lsm/inode_free_security")
+int BPF_PROG(shadow_inode_free, struct inode *inode)
+{
+    __u64 ino_key = (__u64)(unsigned long)inode;
+    bpf_map_delete_elem(&shared_map_owner, &ino_key);
+    return 0;
+}
