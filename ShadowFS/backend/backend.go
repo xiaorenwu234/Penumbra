@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -181,6 +182,20 @@ type Backend struct {
 	// destination of a rolled-back rename). The FUSE layer registers this to
 	// drop those cache entries. Set once at startup; read without locking.
 	invalidateFn func(paths []string)
+
+	// mountDir is the FUSE mountpoint (set once at startup via SetMountDir).
+	// Commit-time mmap quiescence matches an agent's /proc/<pid>/maps entries
+	// (which show the mount path) to the overlay copy. Empty disables quiescence.
+	mountDir string
+}
+
+// SetMountDir records the FUSE mountpoint so commit-time writable-MAP_SHARED
+// quiescence can translate an agent's /proc/<pid>/maps paths to overlay copies.
+// Set once at startup, before serving.
+func (b *Backend) SetMountDir(dir string) {
+	if dir != "" {
+		b.mountDir = filepath.Clean(dir)
+	}
 }
 
 // SetInvalidateCallback registers a function invoked after a rollback with the
@@ -774,9 +789,9 @@ func (b *Backend) CloseAgentFDs(cgroupID string) {
 // of a writable MAP_SHARED mmap that the process has already msync'd/flushed --
 // is durable on the overlay copy BEFORE promotion renames it onto orig. Called
 // at commit time, when ShadowProc has frozen the agent. Best-effort: an fsync
-// error on an already-closed or read-only fd is ignored. NOTE: this cannot
-// force writeback of a still-live mapping whose dirty pages a FROZEN process
-// has not yet flushed -- see the mmap scope note in Open().
+// error on an already-closed or read-only fd is ignored. Dirty pages a FROZEN
+// process never got to flush are handled separately by quiesceMappings(), which
+// runs just before this at commit time.
 func (b *Backend) flushAgentFDs(cgroupID string) {
 	b.openFDsMu.Lock()
 	fds := make([]*TrackedFD, len(b.openFDs[cgroupID]))
@@ -790,6 +805,172 @@ func (b *Backend) flushAgentFDs(cgroupID string) {
 			log.Printf("[backend] flushAgentFDs: agent=%q fd=%d: %v", cgroupID, tfd.FD(), err)
 		}
 	}
+}
+
+// mapRegion is one writable MAP_SHARED region of a frozen agent process that is
+// backed by a file under the ShadowFS mount.
+type mapRegion struct {
+	start, end, offset uint64
+	mountPath          string
+}
+
+// parseWritableSharedMaps extracts every writable MAP_SHARED region whose
+// backing file lives under mountDir from a /proc/<pid>/maps blob. A maps line
+// is `start-end perms offset dev inode pathname`; perms is e.g. "rw-s" where the
+// 2nd char 'w' means writable and the 4th 's' means a shared (not private)
+// mapping. Read-only, private, or non-ShadowFS mappings are skipped.
+func parseWritableSharedMaps(maps, mountDir string) []mapRegion {
+	var out []mapRegion
+	root := strings.TrimSuffix(mountDir, "/")
+	prefix := root + "/"
+	for _, line := range strings.Split(maps, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue // no pathname -> anonymous shared mapping, skip
+		}
+		perms := fields[1]
+		if len(perms) < 4 || perms[1] != 'w' || perms[3] != 's' {
+			continue
+		}
+		path := strings.Join(fields[5:], " ")
+		if path != root && !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		dash := strings.IndexByte(fields[0], '-')
+		if dash < 0 {
+			continue
+		}
+		start, err1 := strconv.ParseUint(fields[0][:dash], 16, 64)
+		end, err2 := strconv.ParseUint(fields[0][dash+1:], 16, 64)
+		off, err3 := strconv.ParseUint(fields[2], 16, 64)
+		if err1 != nil || err2 != nil || err3 != nil || end <= start {
+			continue
+		}
+		out = append(out, mapRegion{start: start, end: end, offset: off, mountPath: path})
+	}
+	return out
+}
+
+// cgroupPIDs reads the member PIDs of a cgroup from its cgroup.procs file.
+func cgroupPIDs(cgroupID string) ([]int, error) {
+	p := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(cgroupID, "/"), "cgroup.procs")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	for _, tok := range strings.Fields(string(data)) {
+		if pid, err := strconv.Atoi(tok); err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
+// quiesceMappings captures the current contents of every FROZEN agent process's
+// writable MAP_SHARED mappings of ShadowFS-backed files into the overlay copy,
+// so promotion carries the agent's latest in-memory writes even for dirty mmap
+// pages the (frozen) process never got to msync/write back itself. This closes
+// the mmap writeback gap: ShadowFS cannot ask a frozen process to flush, but it
+// CAN read the process's stable memory directly and write it into the overlay.
+//
+// Idempotent: a shared file mapping's memory IS the file's intended content, so
+// writing it back is safe even for pages that were already flushed. Requires
+// the agent to be frozen (stable memory); callers invoke it from the commit
+// path where ShadowProc has already frozen the cgroup. Only files that already
+// have an overlay copy (i.e. tracked/dirty, hence promotable) are quiesced; a
+// mapping of a never-copied-up file is logged and skipped. Best-effort per
+// region. Returns the number of regions flushed.
+func (b *Backend) quiesceMappings(cgroupID string) int {
+	if b.mountDir == "" {
+		return 0 // mountpoint unknown -> cannot match maps entries
+	}
+	pids, err := cgroupPIDs(cgroupID)
+	if err != nil {
+		return 0 // cgroup gone / unreadable -> nothing to quiesce
+	}
+	flushed := 0
+	for _, pid := range pids {
+		maps, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", pid))
+		if err != nil {
+			continue
+		}
+		regions := parseWritableSharedMaps(string(maps), b.mountDir)
+		if len(regions) == 0 {
+			continue
+		}
+		mem, err := os.OpenFile(fmt.Sprintf("/proc/%d/mem", pid), os.O_RDONLY, 0)
+		if err != nil {
+			log.Printf("[backend] quiesceMappings: open /proc/%d/mem: %v", pid, err)
+			continue
+		}
+		for _, r := range regions {
+			if b.quiesceRegion(mem, r) {
+				flushed++
+			}
+		}
+		mem.Close()
+	}
+	if flushed > 0 {
+		log.Printf("[backend] quiesceMappings: agent=%q flushed %d writable MAP_SHARED region(s)",
+			cgroupID, flushed)
+	}
+	return flushed
+}
+
+// quiesceRegion copies one region's bytes from the frozen process's memory
+// (/proc/<pid>/mem) into its overlay copy at the mapped file offset. Returns
+// true on a successful (possibly partial) capture + fsync.
+func (b *Backend) quiesceRegion(mem *os.File, r mapRegion) bool {
+	root := strings.TrimSuffix(b.mountDir, "/")
+	rel := strings.TrimPrefix(r.mountPath, root)
+	origPath := filepath.Join(b.trackedDir, rel)
+	overlayPath, err := overlayPathFor(b.stagingDir, b.trackedDir, origPath)
+	if err != nil {
+		return false
+	}
+	// Only quiesce files that already have an overlay copy (tracked/dirty, so
+	// promotion will carry them). Injecting a brand-new tracked write during
+	// commit is out of scope.
+	if st, serr := os.Lstat(overlayPath); serr != nil || st.IsDir() {
+		log.Printf("[backend] quiesceMappings: %q has no overlay copy -- skipped", r.mountPath)
+		return false
+	}
+	out, err := os.OpenFile(overlayPath, os.O_WRONLY, 0)
+	if err != nil {
+		return false
+	}
+	defer out.Close()
+	const chunk = 1 << 20 // 1 MiB
+	buf := make([]byte, chunk)
+	total := r.end - r.start
+	ok := true
+	for done := uint64(0); done < total; {
+		n := chunk
+		if remaining := total - done; remaining < uint64(n) {
+			n = int(remaining)
+		}
+		rn, rerr := mem.ReadAt(buf[:n], int64(r.start+done))
+		if rn > 0 {
+			if _, werr := out.WriteAt(buf[:rn], int64(r.offset+done)); werr != nil {
+				ok = false
+				break
+			}
+			done += uint64(rn)
+		}
+		if rerr != nil {
+			// Unreadable page (hole) or EOF: stop. A partial capture is still a
+			// strict improvement over losing all of the process's dirty pages.
+			break
+		}
+		if rn == 0 {
+			break
+		}
+	}
+	if err := out.Sync(); err != nil {
+		ok = false
+	}
+	return ok
 }
 
 // --- Dependency graph ---
@@ -2458,8 +2639,11 @@ func (b *Backend) commitInternal(cgroupID string) {
 		agent.State = AuthorizedPending
 		log.Printf("[backend] Commit: agent=%q authorized (pending finalization)", cgroupID)
 	}
-	// Flush the agent's writable overlay fds (incl. written-back mmap pages)
-	// so promotion renames a fully up-to-date overlay copy.
+	// Capture the (frozen) agent's dirty writable MAP_SHARED pages into the
+	// overlay BEFORE promotion, closing the mmap writeback gap for pages the
+	// frozen process never got to flush itself. Then fsync the tracked fds so
+	// promotion renames a fully up-to-date overlay copy.
+	b.quiesceMappings(cgroupID)
 	b.flushAgentFDs(cgroupID)
 	_ = b.tryPromoteAll()
 }

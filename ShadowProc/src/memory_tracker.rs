@@ -142,8 +142,9 @@ impl MemoryTracker {
     /// Phase 1 of a lock-free epoch setup: reserve `pid` so no other caller can
     /// start a second epoch (or a duplicate clone injection) for it while the
     /// slow ptrace injection runs with the ProcessManager lock released. Call
-    /// while holding the lock. Fails if an epoch is already active or a
-    /// reservation is already in flight for this pid.
+    /// while holding the lock. Fails if an epoch is already active, a
+    /// reservation is already in flight for this pid, OR the process does not
+    /// pass the persistent-session admission checks (see `admission_check`).
     pub fn reserve(&mut self, pid: u32) -> Result<()> {
         if let Some(e) = self.epochs.get(&pid) {
             anyhow::bail!(
@@ -151,6 +152,11 @@ impl MemoryTracker {
                 pid, e.candidate_pid
             );
         }
+        // Persistent-session admission gate. Must pass BEFORE we take the
+        // reservation, so a non-admissible process leaves no in-flight state.
+        admission_check(pid).with_context(|| {
+            format!("process {} is not admissible for a speculative epoch", pid)
+        })?;
         if !self.reserving.insert(pid) {
             anyhow::bail!("Process {} already has an in-flight epoch setup", pid);
         }
@@ -339,6 +345,192 @@ impl MemoryTracker {
 // ═══════════════════════════════════════════════════════════════
 // Helper functions
 // ═══════════════════════════════════════════════════════════════
+
+// ───────────────────────────────────────────────────────────────
+// Persistent-session admission checks
+//
+// A process may enter a speculative epoch only if resuming its pristine,
+// frozen baseline on rollback is guaranteed lossless. The Frozen-Baseline +
+// COW-clone model can only version state the injected clone() actually
+// snapshots, so we reject any process that is not quiesced at a clean input
+// boundary or that holds state the model cannot cover:
+//
+//   1. single-threaded          — clone() copies only the calling thread; a
+//                                 multi-threaded process would lose its sibling
+//                                 threads in the candidate.
+//   2. at the input gate        — the process must be BLOCKED in an
+//      / no in-flight command     input-wait syscall (read/recv/poll/select/
+//                                 epoll family). A "running" state or any other
+//                                 syscall means a command is mid-flight, whose
+//                                 partial effects could not be cleanly rewound.
+//   3. no pre-existing          — children spawned before the epoch are not
+//      descendants                part of the speculative unit and would need
+//                                 independent versioning.
+//   4. no writable MAP_SHARED   — shared writable mappings are not COW'd by
+//                                 clone(), so baseline and candidate would
+//                                 share those pages and writes through them
+//                                 could not be rolled back.
+//
+// Every check reads /proc and is FAIL-CLOSED: anything we cannot positively
+// verify (missing/unreadable proc file, unparseable content) rejects admission.
+// ───────────────────────────────────────────────────────────────
+
+/// Syscall numbers (x86-64) that mean "blocked waiting for input" — i.e. the
+/// process is idle at a command boundary, not running a command. Kept in sync
+/// with the x86-64 syscall ABI (this daemon is x86-64 only).
+const INPUT_WAIT_SYSCALLS: &[i64] = &[
+    0,   // read
+    17,  // pread64
+    19,  // readv
+    295, // preadv
+    45,  // recvfrom
+    47,  // recvmsg
+    299, // recvmmsg
+    7,   // poll
+    271, // ppoll
+    23,  // select
+    270, // pselect6
+    232, // epoll_wait
+    281, // epoll_pwait
+];
+
+/// Run all persistent-session admission checks for `pid`. Returns Ok(()) only
+/// if every check positively passes.
+fn admission_check(pid: u32) -> Result<()> {
+    // 1. Single-threaded.
+    let status = fs::read_to_string(format!("/proc/{}/status", pid))
+        .with_context(|| format!("read /proc/{}/status", pid))?;
+    match parse_threads(&status) {
+        Some(1) => {}
+        Some(n) => anyhow::bail!("process is multi-threaded ({} threads)", n),
+        None => anyhow::bail!("could not determine thread count"),
+    }
+
+    // 2. At the input gate / no in-flight command.
+    let syscall = fs::read_to_string(format!("/proc/{}/syscall", pid))
+        .with_context(|| format!("read /proc/{}/syscall", pid))?;
+    if !parse_syscall_is_input_gate(&syscall) {
+        anyhow::bail!(
+            "process is not idle at an input gate (/proc/{}/syscall = {:?}); \
+             a command may be in flight",
+            pid,
+            syscall.trim()
+        );
+    }
+
+    // 3. No pre-existing descendants.
+    let child_count = count_descendants(pid)?;
+    if child_count > 0 {
+        anyhow::bail!(
+            "process has {} pre-existing descendant(s) that would need \
+             independent versioning",
+            child_count
+        );
+    }
+
+    // 4. No writable MAP_SHARED mapping.
+    let maps = fs::read_to_string(format!("/proc/{}/maps", pid))
+        .with_context(|| format!("read /proc/{}/maps", pid))?;
+    if let Some(region) = maps_first_writable_shared(&maps) {
+        anyhow::bail!(
+            "process holds a writable MAP_SHARED mapping ({}) that clone() \
+             cannot version",
+            region
+        );
+    }
+
+    Ok(())
+}
+
+/// Parse the `Threads:` field from /proc/<pid>/status. Returns None if absent.
+fn parse_threads(status: &str) -> Option<u32> {
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Threads:") {
+            return rest.trim().parse::<u32>().ok();
+        }
+    }
+    None
+}
+
+/// Decide whether a /proc/<pid>/syscall line means the process is blocked in an
+/// input-wait syscall (idle at a command boundary). The file is either the word
+/// `running` (in userspace — NOT a gate) or `SYSNUM ARG0 ... SP PC` where
+/// SYSNUM is a decimal syscall number and the args are 0x-hex. `-1` means no
+/// syscall info, which we treat as not-a-gate (fail-closed).
+fn parse_syscall_is_input_gate(line: &str) -> bool {
+    let mut it = line.split_whitespace();
+    let first = match it.next() {
+        Some(t) => t,
+        None => return false,
+    };
+    let num: i64 = match first.parse() {
+        Ok(n) => n,
+        Err(_) => return false, // "running" or unexpected -> not a gate
+    };
+    INPUT_WAIT_SYSCALLS.contains(&num)
+}
+
+/// Count a process's direct children. Prefers the kernel
+/// /proc/<pid>/task/<pid>/children list (CONFIG_PROC_CHILDREN); if that file is
+/// unavailable, falls back to scanning /proc for tasks whose PPid == pid.
+/// Fail-closed: if neither source can be read, returns an error.
+fn count_descendants(pid: u32) -> Result<usize> {
+    let children_path = format!("/proc/{}/task/{}/children", pid, pid);
+    if let Ok(s) = fs::read_to_string(&children_path) {
+        return Ok(s.split_whitespace().count());
+    }
+    // Fallback: scan /proc for children (PPid line in each status).
+    let entries = fs::read_dir("/proc").context("scan /proc for children")?;
+    let mut count = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(st) = fs::read_to_string(format!("/proc/{}/status", name)) {
+            if let Some(ppid) = parse_ppid(&st) {
+                if ppid == pid {
+                    count += 1;
+                }
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Parse the `PPid:` field from a /proc/<pid>/status blob.
+fn parse_ppid(status: &str) -> Option<u32> {
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("PPid:") {
+            return rest.trim().parse::<u32>().ok();
+        }
+    }
+    None
+}
+
+/// Scan /proc/<pid>/maps for the first writable MAP_SHARED region and return a
+/// short description of it (for the error message), or None if there is none.
+/// A maps line looks like `start-end perms offset dev inode pathname`; the
+/// perms field is `rwxs`/`rwxp` where the 4th char is `s` (shared) or `p`
+/// (private). We flag any region that is both writable (`w`) and shared (`s`).
+fn maps_first_writable_shared(maps: &str) -> Option<String> {
+    for line in maps.lines() {
+        let mut it = line.split_whitespace();
+        let range = it.next().unwrap_or("");
+        let perms = match it.next() {
+            Some(p) => p,
+            None => continue,
+        };
+        let b = perms.as_bytes();
+        if b.len() >= 4 && b[1] == b'w' && b[3] == b's' {
+            // Include the pathname (last field) if present for context.
+            let path = line.split_whitespace().nth(5).unwrap_or("[anon]");
+            return Some(format!("{} {} {}", range, perms, path));
+        }
+    }
+    None
+}
 
 /// Wait for a state change on `pid` but NEVER block forever.
 ///
@@ -791,4 +983,61 @@ fn find_syscall_instruction(pid: u32, regs: &libc::user_regs_struct) -> Result<u
     }
 
     anyhow::bail!("Could not find syscall instruction in pid {}", pid)
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn threads_parsed() {
+        let status = "Name:\tbash\nThreads:\t1\nPPid:\t42\n";
+        assert_eq!(parse_threads(status), Some(1));
+        assert_eq!(parse_ppid(status), Some(42));
+    }
+
+    #[test]
+    fn threads_multi_rejected_shape() {
+        let status = "Threads:\t8\n";
+        assert_eq!(parse_threads(status), Some(8));
+        assert_eq!(parse_threads("no threads field"), None);
+    }
+
+    #[test]
+    fn input_gate_accepts_read_family() {
+        // read() blocked on stdin: "0 0x0 0x... ..."
+        assert!(parse_syscall_is_input_gate("0 0x0 0x7 fff 0x100 0x0 0x0 0x0 0x7fff 0x44"));
+        // pselect6 (readline line editing) is still an input wait.
+        assert!(parse_syscall_is_input_gate("270 0x1 0x0 0x0 0x0 0x0 0x0 0x7fff 0x55"));
+        // epoll_wait.
+        assert!(parse_syscall_is_input_gate("232 0x3 0x0 0x0 0x0"));
+    }
+
+    #[test]
+    fn input_gate_rejects_running_and_other() {
+        assert!(!parse_syscall_is_input_gate("running"));
+        assert!(!parse_syscall_is_input_gate("-1 0x0 0x0"));
+        // nanosleep (35) means a command is in flight -> not a gate.
+        assert!(!parse_syscall_is_input_gate("35 0x0 0x0"));
+        // write (1) -> not a gate.
+        assert!(!parse_syscall_is_input_gate("1 0x1 0x0"));
+        assert!(!parse_syscall_is_input_gate(""));
+    }
+
+    #[test]
+    fn writable_shared_mapping_detected() {
+        let maps = concat!(
+            "55e0-55e1 r-xp 00000000 fd:00 100 /usr/bin/bash\n",
+            "7f00-7f01 rw-p 00000000 00:00 0 \n",
+            "7f10-7f11 r--s 00000000 fd:00 200 /some/ro-shared\n",
+        );
+        assert!(maps_first_writable_shared(maps).is_none());
+
+        let shared = concat!(
+            "7f20-7f21 rw-s 00000000 00:05 12 /dev/shm/seg\n",
+        );
+        let hit = maps_first_writable_shared(shared).expect("should flag rw-s");
+        assert!(hit.contains("rw-s"));
+        assert!(hit.contains("/dev/shm/seg"));
+    }
 }

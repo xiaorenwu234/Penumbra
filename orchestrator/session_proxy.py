@@ -316,6 +316,19 @@ class SessionProxy:
         sess = self.sessions[sid]
         return "\n".join(sess.committed_output)
 
+    def peek_epoch_output(self, sid):
+        """Return the transcript that WOULD become committed for the currently
+        active epoch: the durable committed transcript PLUS the in-flight
+        epoch_buffer, joined as text. Used by the orchestrator to snapshot the
+        committed result durably at the file-layer commit decision point (so a
+        crash before finalize_commit still yields a deterministic result on
+        recovery). Returns "" for an unknown session.
+        """
+        sess = self.sessions.get(sid)
+        if sess is None:
+            return ""
+        return "\n".join(sess.committed_output + sess.epoch_buffer)
+
     # ---- speculative epoch -------------------------------------------------
     def begin_epoch(self, sid, retries=3):
         """Freeze the live shell as baseline and fork+resume a speculative

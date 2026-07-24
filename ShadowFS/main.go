@@ -1009,6 +1009,10 @@ func main() {
 	}
 	fmt.Printf("Mounted! orig=%q overlay=%q\n", origDir, shadowBackend.OverlayDir())
 
+	// Tell the backend the mountpoint so commit-time writable-MAP_SHARED
+	// quiescence can match an agent's /proc/<pid>/maps entries to overlay copies.
+	shadowBackend.SetMountDir(mntDir)
+
 	// Rollback removes overlay files out-of-band (via the control socket, not
 	// through the FUSE data path), so the kernel's dentry cache (EntryTimeout)
 	// keeps serving stale positive entries for paths whose overlay copy was

@@ -89,6 +89,120 @@ class SocketClient:
         self.close()
 
 
+class _OrchestratorJournal:
+    """Append-only durable journal of session-finalization decisions.
+
+    The orchestrator's session map, pending-release set and committed output
+    live only in memory. A crash BETWEEN the file layer finalizing an epoch and
+    the process/output being released would otherwise leave the caller's result
+    undetermined on restart. This journal records the decision points so restart
+    recovery resolves every epoch to a DETERMINISTIC outcome:
+
+      op=open           {sid, cgroup}          a session exists
+      op=close          {sid}                  session torn down
+      op=commit_intent  {sid, cgroup}          commit started; FS not yet confirmed
+      op=fs_committed   {sid, cgroup, output}  DECISION POINT: the file layer
+                        finalized durably, so the canonical outcome is COMMITTED
+                        and the committed transcript is captured here.
+      op=commit_done    {sid, cgroup}          process committed + output released
+      op=rollback       {sid, cgroup}          epoch rolled back (not committed)
+
+    Records are newline-delimited JSON, fsync'd on append so a record is durable
+    BEFORE the corresponding externally-visible step proceeds (write-ahead).
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._lock = threading.Lock()
+
+    def append(self, op: str, **fields) -> None:
+        rec = {"op": op, "ts": time.time()}
+        rec.update(fields)
+        line = json.dumps(rec) + "\n"
+        with self._lock:
+            # Open/append/fsync per record: the journal is low-frequency
+            # (session lifecycle + commit decisions), so per-record fsync is
+            # affordable and gives strict write-ahead durability.
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.write(fd, line.encode())
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+    def load(self) -> list:
+        try:
+            with open(self.path, "r") as f:
+                out = []
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        # A torn last record (crash mid-write) is ignored.
+                        continue
+                return out
+        except FileNotFoundError:
+            return []
+
+    @staticmethod
+    def replay(records: list) -> dict:
+        """Fold the journal into recovery state. Returns a dict with:
+            sessions:  {sid: cgroup}             currently-open sessions
+            committed: {sid: (cgroup, output)}   epochs whose FS layer committed
+                       durably but whose release was never journaled done
+            undecided: {sid: cgroup}             commit_intent w/o fs_committed
+        """
+        sessions: Dict[str, Any] = {}
+        stage: Dict[str, str] = {}       # sid -> intent|fs|done|rollback
+        cgroup: Dict[str, Any] = {}
+        output: Dict[str, str] = {}
+        for rec in records:
+            op = rec.get("op")
+            sid = rec.get("sid")
+            cg = rec.get("cgroup")
+            if not sid:
+                continue
+            if op == "open":
+                sessions[sid] = cg
+            elif op == "close":
+                sessions.pop(sid, None)
+                stage.pop(sid, None)
+                cgroup.pop(sid, None)
+                output.pop(sid, None)
+            elif op == "commit_intent":
+                stage[sid] = "intent"
+                cgroup[sid] = cg
+            elif op == "fs_committed":
+                stage[sid] = "fs"
+                cgroup[sid] = cg
+                output[sid] = rec.get("output", "")
+            elif op == "commit_done":
+                stage[sid] = "done"
+            elif op == "rollback":
+                stage[sid] = "rollback"
+                output.pop(sid, None)
+        committed = {sid: (cgroup.get(sid), output.get(sid, ""))
+                     for sid, st in stage.items() if st == "fs"}
+        undecided = {sid: cgroup.get(sid)
+                     for sid, st in stage.items() if st == "intent"}
+        return {"sessions": sessions, "committed": committed, "undecided": undecided}
+
+    def rewrite(self, records: list) -> None:
+        """Atomically replace the journal with `records` (compaction on clean
+        shutdown, to bound growth)."""
+        tmp = self.path + ".tmp"
+        with self._lock:
+            with open(tmp, "w") as f:
+                for rec in records:
+                    f.write(json.dumps(rec) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
+
+
 class ShadowOrchestrator:
     """
     Orchestrates ShadowFS (file layer), ShadowProc (process layer),
@@ -101,7 +215,8 @@ class ShadowOrchestrator:
     """
 
     def __init__(self, shadowfs_sock: str, shadowproc_sock: str,
-                 shadowobserve_sock: Optional[str] = None):
+                 shadowobserve_sock: Optional[str] = None,
+                 journal_path: Optional[str] = None):
         self.fs_client = SocketClient(shadowfs_sock)
         self.proc_client = SocketClient(shadowproc_sock)
         self.observe_client = None
@@ -175,13 +290,81 @@ class ShadowOrchestrator:
         self._sessions: Dict[str, str] = {}  # session_id → cgroup_id
         self._sessions_lock = threading.Lock()
 
+        # ── Durable finalization journal + crash recovery ──
+        # Records session lifecycle and the epoch-commit decision points so a
+        # crash between 'file layer finalized' and 'process/output released'
+        # resolves to a DETERMINISTIC result on restart (recovered committed
+        # transcripts remain retrievable; see _recover_from_journal).
+        if journal_path is None:
+            journal_path = os.path.join(tempfile.gettempdir(),
+                                        "shadow-orchestrator.journal")
+        self._journal = _OrchestratorJournal(journal_path)
+        # sid → committed transcript recovered from the journal (delivered by
+        # session_get_output when the live session did not survive the crash).
+        self._recovered_outputs: Dict[str, str] = {}
+        self._recover_from_journal()
+
     def close(self):
         """Close connections to all services."""
         self._retry_stop.set()
+        # Compact the journal to only the sessions still open, bounding its
+        # growth on a clean shutdown. Best-effort: a failure just leaves the
+        # append-only journal, which recovery reconciles against ShadowFS anyway.
+        try:
+            with self._sessions_lock:
+                open_recs = [{"op": "open", "sid": sid, "cgroup": cg}
+                             for sid, cg in self._sessions.items()]
+            self._journal.rewrite(open_recs)
+        except Exception as e:  # noqa: BLE001
+            log.warning("journal compaction on close failed: %s", e)
         self.fs_client.close()
         self.proc_client.close()
         if self.observe_client:
             self.observe_client.close()
+
+    def _recover_from_journal(self) -> None:
+        """Replay the durable journal at startup and resolve every epoch to a
+        deterministic outcome. Reconstructs the session→cgroup map, makes the
+        committed transcript of any FS-committed-but-unreleased epoch
+        retrievable, and reconciles undecided commits against ShadowFS (the
+        authoritative WAL-backed layer). Fail-open on a corrupt journal: start
+        fresh rather than refuse to boot.
+        """
+        try:
+            records = self._journal.load()
+        except Exception as e:  # noqa: BLE001
+            log.warning("journal load failed: %s -- starting fresh", e)
+            return
+        if not records:
+            return
+        state = _OrchestratorJournal.replay(records)
+        with self._sessions_lock:
+            self._sessions.update(state["sessions"])
+        # FS-committed but release not confirmed: canonical outcome is COMMITTED.
+        for sid, (cg, output) in state["committed"].items():
+            self._recovered_outputs[sid] = output
+            log.warning("RECOVERY sid=%s cgroup=%s: epoch was FS-committed before "
+                        "crash -> resolving as COMMITTED (transcript recovered, "
+                        "%d bytes)", sid, cg, len(output or ""))
+            if cg:
+                try:
+                    # Nudge ShadowFS to (idempotently) finish finalizing the
+                    # committed file state it already durably accepted.
+                    self.fs_client.request({"action": "retry_finalize",
+                                            "cgroup_id": cg})
+                except Exception as e:  # noqa: BLE001
+                    log.warning("  retry_finalize(%s) during recovery: %s", cg, e)
+            self._journal.append("commit_done", sid=sid, cgroup=cg)
+        # Commit started but FS decision never confirmed durable: reconcile with
+        # ShadowFS. If it reports the epoch finalized, treat as committed; else
+        # the epoch is NOT committed and no output is released (fail-closed).
+        for sid, cg in state["undecided"].items():
+            finalized = self._fs_can_release(cg) if cg else False
+            log.warning("RECOVERY sid=%s cgroup=%s: undecided commit; ShadowFS "
+                        "finalized=%s -> resolving as %s", sid, cg, finalized,
+                        "COMMITTED" if finalized else "NOT committed (output withheld)")
+        log.info("Journal recovery: %d session(s), %d committed-pending, %d undecided",
+                 len(state["sessions"]), len(state["committed"]), len(state["undecided"]))
 
     def add_cgroup(self, cgroup_path: str) -> dict:
         """
@@ -841,6 +1024,7 @@ class ShadowOrchestrator:
         cgroup_id = proxy.sessions[sid].cgroup_id
         with self._sessions_lock:
             self._sessions[sid] = cgroup_id
+        self._journal.append("open", sid=sid, cgroup=cgroup_id)
         log.info("SESSION_OPEN sid=%s cgroup=%s", sid, cgroup_id)
         return {"status": "ok", "session_id": sid, "cgroup_id": cgroup_id}
 
@@ -909,6 +1093,9 @@ class ShadowOrchestrator:
             return {"status": "error", "message": f"unknown session {session_id}"}
         log.info("SESSION_COMMIT_EPOCH sid=%s cgroup=%s", session_id, cgroup_id)
         proxy = self._get_proxy()
+        # Journal the intent BEFORE touching either layer, so recovery knows a
+        # commit was in progress for this session even if we crash immediately.
+        self._journal.append("commit_intent", sid=session_id, cgroup=cgroup_id)
         # FS-FIRST finalization. Phase 1 is REVERSIBLE: quiesce the candidate to
         # a stopped boundary WITHOUT discarding the baseline, so if the file
         # layer cannot finalize we can still roll the epoch back losslessly.
@@ -929,6 +1116,12 @@ class ShadowOrchestrator:
             log.error("  ShadowFS commit_epoch failed: %s -- baseline preserved",
                       fs_resp.get("message"))
             return fs_resp
+        # DECISION POINT: the file layer finalized durably, so the canonical
+        # outcome is now COMMITTED. Snapshot the committed transcript into the
+        # journal BEFORE the destructive process commit, so a crash here still
+        # yields a deterministic (committed) result with retrievable output.
+        self._journal.append("fs_committed", sid=session_id, cgroup=cgroup_id,
+                             output=proxy.peek_epoch_output(session_id))
         # FS finalized: perform the DESTRUCTIVE process commit (discard baseline,
         # keep candidate canonical) and release the buffered speculative output.
         try:
@@ -936,6 +1129,8 @@ class ShadowOrchestrator:
         except Exception as e:  # noqa: BLE001
             log.error("  finalize_commit (process layer) failed: %s", e)
             return {"status": "error", "message": str(e)}
+        self._journal.append("commit_done", sid=session_id, cgroup=cgroup_id)
+        self._recovered_outputs.pop(session_id, None)
         return {"status": "ok", "output": proxy.get_output(session_id)}
 
     def session_rollback_epoch(self, session_id: str) -> dict:
@@ -979,14 +1174,25 @@ class ShadowOrchestrator:
         except Exception as e:  # noqa: BLE001
             log.error("  rollback_epoch (process layer) failed after FS undo: %s", e)
             return {"status": "error", "message": str(e)}
+        self._journal.append("rollback", sid=session_id, cgroup=cgroup_id)
+        self._recovered_outputs.pop(session_id, None)
         return {"status": "ok"}
 
     def session_get_output(self, session_id: str) -> dict:
-        """Return the session's committed (commit-gated) transcript."""
+        """Return the session's committed (commit-gated) transcript.
+
+        Falls back to the journal-recovered committed transcript when the live
+        session did not survive a crash but its epoch was durably committed, so
+        the caller still gets the deterministic committed result.
+        """
         proxy = self._get_proxy()
         try:
             return {"status": "ok", "output": proxy.get_output(session_id)}
         except KeyError:
+            if session_id in self._recovered_outputs:
+                return {"status": "ok",
+                        "output": self._recovered_outputs[session_id],
+                        "recovered": True}
             return {"status": "error", "message": f"unknown session {session_id}"}
 
     def session_close(self, session_id: str) -> dict:
@@ -995,6 +1201,8 @@ class ShadowOrchestrator:
         proxy.close_session(session_id)
         with self._sessions_lock:
             self._sessions.pop(session_id, None)
+        self._recovered_outputs.pop(session_id, None)
+        self._journal.append("close", sid=session_id)
         log.info("SESSION_CLOSE sid=%s", session_id)
         return {"status": "ok"}
 

@@ -145,8 +145,19 @@ class FakeProxy:
         self.calls.append("get_output")
         return self._output
 
+    def peek_epoch_output(self, sid):
+        self.calls.append("peek_epoch_output")
+        return self._output
+
     def run(self, sid, command):
         raise AssertionError("run() not exercised in these tests")
+
+
+class _NullJournal:
+    """No-op durable journal stub for the session-orchestrator unit tests."""
+
+    def append(self, *args, **kwargs):
+        pass
 
 
 def _session_orch(proxy, fs_handler):
@@ -155,6 +166,8 @@ def _session_orch(proxy, fs_handler):
     orch._proxy = proxy
     orch._sessions = {"sid1": "/cg-sess"}
     orch._sessions_lock = threading.Lock()
+    orch._journal = _NullJournal()
+    orch._recovered_outputs = {}
     return orch
 
 
