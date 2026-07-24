@@ -25,14 +25,15 @@ internal-vs-external decision is made, and how an authorized effect is released.
 | AF_UNIX connect/send | `lsm/socket_connect` / `sendmsg` | `sun_path` (incl. abstract) | runtime system-socket whitelist exempt; else intercept | full release |
 | Exit-hold sentinel | `lsm/socket_connect` | `192.0.2.255:65535` | held until full release (`allowed_pids == 2`) | full release |
 | SysV shm | `lsm/shm_alloc_security`, `shm_associate`, `shm_shmat`, `shm_shmctl`, `fmod_ret shmdt` | IPC object | always external (cross-process) | full release |
-| POSIX shm (mmap) | `lsm/mmap_file` | file + prot + flags | writable file-backed `MAP_SHARED` intercept; RO or anon exempt | full release |
+| POSIX shm (mmap) | `lsm/mmap_file` | file + prot + flags + owning cgroup | writable file-backed `MAP_SHARED` intercept unless positively **same-epoch** (same cgroup already owns the inode); RO or anon exempt; first map fail-closed | full release |
 | SysV msg queues | `lsm/msg_queue_*` | IPC object | always external | full release |
 | SysV semaphores | `lsm/sem_*` | IPC object | always external | full release |
 | POSIX msg queues | `fmod_ret mq_open/mq_timedsend/mq_timedreceive/mq_notify` | mq object | always external | full release |
-| Signals to other procs | `lsm/task_kill` | target `task_struct` | same thread-group / same session exempt; else intercept | full release |
+| Signals to other procs | `lsm/task_kill` | target `task_struct` + cgroup id | same thread-group / same **cgroup (epoch)** exempt; else intercept | full release |
 | ptrace | `lsm/ptrace_access_check` | target task | always external | full release |
 | Pipe/socket write | `fmod_ret __x64_sys_write`, `writev` | fd → inode `i_mode` | FIFO/socket intercept; regular file exempt; **un-inspectable fd fails closed** | full release |
 | Zero-copy exfil | `fmod_ret sendfile64`, `splice`, `vmsplice`, `tee` | (no byte inspection) | **default-deny** while armed (frozen at first use) | full release |
+| Async I/O (io_uring) | `fmod_ret io_uring_setup`, `io_uring_enter`, `io_uring_register` | (no SQE inspection) | **default-deny** while armed (frozen at first use) | full release |
 | setuid/setgid binary exec | `lsm/bprm_check_security` | inode `S_ISUID`/`S_ISGID` | setuid/setgid binaries intercept | full release |
 | UID/GID/groups change | `lsm/task_fix_setuid/setgid/setgroups` | credential change | always intercept | full release |
 | capset | `lsm/capset` | capability change | always intercept | full release |
@@ -54,10 +55,12 @@ internal-vs-external decision is made, and how an authorized effect is released.
 
 Any mechanism **not** in the matrix above is not individually classified. Where
 a syscall that can move data out is reachable but un-inspectable, the fence
-fails closed (see the `write`/`sendfile` rows). The following are explicitly
-**out of scope** for the current fence and are deferred hardening:
+fails closed (see the `write`/`sendfile`/`io_uring` rows). The following are
+explicitly **out of scope** for the current fence and are deferred hardening:
 
-- `io_uring` submission paths (async network/file effects).
 - `AF_NETLINK` / D-Bus fine-grained admission (currently exempt as kernel/system peers).
-- Per-epoch/per-cgroup signal internal-check (currently session-scoped).
-- Same-epoch verification of `MAP_SHARED` writable mappings.
+- io_uring SQE-level inspection (currently whole-syscall default-deny).
+- Reclaiming `shared_map_owner` entries on last-unmap / inode-free (a reused
+  inode pointer could carry a stale owner; the first map is always fail-closed).
+- UID/GID drop, capability drop, and mount-namespace isolation for the daemons
+  (this pass adds `no_new_privs` + cgroupfs-path confinement only).

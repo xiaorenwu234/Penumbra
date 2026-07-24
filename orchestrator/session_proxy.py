@@ -40,6 +40,7 @@ import argparse
 import itertools
 import json
 import os
+import re
 import signal
 import socket
 import sys
@@ -175,6 +176,13 @@ class SessionProxy:
         """Launch a bash session inside a fresh monitored cgroup. Returns sid."""
         sid = uuid.uuid4().hex[:8]
         cgroup_name = cgroup_name or f"shadow-session-{sid}"
+        # cgroupfs write restriction (issue #2): the cgroup name must be a single
+        # benign path component so the session's cgroup can never escape the
+        # managed cgroup root (no "/", "..", leading dot, etc.). This bounds both
+        # the makedirs below and the cgroup_id we hand to ShadowProc.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", cgroup_name):
+            raise ValueError(f"invalid cgroup name (must be a single benign "
+                             f"path component): {cgroup_name!r}")
         sess = _Session(sid, cgroup_name, self.cgroup_root)
 
         os.makedirs(sess.cgroup_path, exist_ok=True)

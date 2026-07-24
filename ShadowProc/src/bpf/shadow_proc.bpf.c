@@ -113,6 +113,20 @@ struct {
     __type(value, __u32);
 } cow_enabled SEC(".maps");
 
+// Owner cgroup of each writable file-backed MAP_SHARED mapping, keyed by the
+// inode pointer (stable while any mapping holds the inode alive). Used for
+// same-epoch verification of shared memory (issue #5): a mapping is internal
+// only if the SAME cgroup already owns the inode.
+// NOTE (deferred): entries are not reclaimed on last-unmap / inode-free, so a
+// reused inode pointer could carry a stale owner; runtime cleanup is future
+// work. The first mapping is always fail-closed, bounding the residual risk.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u64);
+    __type(value, __u64);
+} shared_map_owner SEC(".maps");
+
 static __always_inline int check_cgroup(void)
 {
     __u32 count_key = 0;
@@ -541,6 +555,28 @@ int BPF_PROG(shadow_mmap_file, struct file *file,
     if (!((reqprot | prot) & PROT_WRITE))
         return 0;
 
+    // Same-epoch verification (issue #5): a writable file-backed MAP_SHARED is
+    // internal only if another process in the SAME cgroup (epoch) already owns
+    // this inode. The FIRST monitored mapping is fail-closed (intercepted)
+    // because a host peer may already share the file; once it is authorized and
+    // released, later same-cgroup mappers are exempt while a DIFFERENT cgroup
+    // is still intercepted as a cross-epoch channel.
+    struct inode *ino_p = BPF_CORE_READ(file, f_inode);
+    if (!ino_p) {
+        do_intercept(9, EVENT_IPC);
+        return -ERESTARTSYS;
+    }
+    __u64 ino_key = (__u64)(unsigned long)ino_p;
+    __u64 cur_cg = bpf_get_current_cgroup_id();
+    __u64 *owner = bpf_map_lookup_elem(&shared_map_owner, &ino_key);
+    if (owner) {
+        if (*owner == cur_cg)
+            return 0;  // same epoch -> internal shared memory, exempt
+        // different cgroup -> cross-epoch shared mapping, fall through to block
+    } else {
+        // First monitored mapping: claim ownership for this cgroup, then block.
+        bpf_map_update_elem(&shared_map_owner, &ino_key, &cur_cg, BPF_ANY);
+    }
     do_intercept(9, EVENT_IPC); // 9 = mmap syscall number
     return -ERESTARTSYS;
 }
@@ -662,13 +698,15 @@ int BPF_PROG(shadow_task_kill, struct task_struct *p,
     if (target_tgid == my_tgid)
         return 0;
 
-    // 2. Same session -> exempt.
-    // Compare the PIDTYPE_SID struct pid pointers directly; identical pointers
-    // mean the same session (no need to resolve the numeric sid). This covers
-    // the whole session: ancestors/descendants and sibling processes alike.
-    struct pid *my_sid = BPF_CORE_READ(cur, signal, pids[PIDTYPE_SID]);
-    struct pid *target_sid = BPF_CORE_READ(p, signal, pids[PIDTYPE_SID]);
-    if (my_sid && my_sid == target_sid)
+    // 2. Same monitored cgroup (== same speculative epoch) -> exempt.
+    // Tightened from the old same-session test (issue #5): a session can span
+    // processes OUTSIDE this epoch's cgroup, so signalling them is an external
+    // effect that must be fenced. Comparing the cgroup v2 id confines
+    // "internal" to the epoch's own cgroup. self via the fast helper; target
+    // via its default cgroup's kernfs id.
+    __u64 my_cg = bpf_get_current_cgroup_id();
+    __u64 tgt_cg = BPF_CORE_READ(p, cgroups, dfl_cgrp, kn, id);
+    if (my_cg && my_cg == tgt_cg)
         return 0;
 
     do_intercept(62, EVENT_SIGNAL);
@@ -864,6 +902,37 @@ int BPF_PROG(shadow_sys_tee, struct pt_regs *regs)
     if (!should_intercept())
         return 0;
     do_intercept(276, EVENT_WRITE_OUT); // 276 = tee
+    return -ERESTARTSYS;
+}
+
+// io_uring: async submission of network/file I/O can move data out WITHOUT the
+// per-syscall write/sendmsg hooks ever firing. Default-deny while armed: block
+// setup/enter/register so a monitored process is frozen at its first io_uring
+// use (issue #5). Fine-grained SQE inspection is deferred.
+SEC("fmod_ret/__x64_sys_io_uring_setup")
+int BPF_PROG(shadow_sys_io_uring_setup, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(425, EVENT_WRITE_OUT); // 425 = io_uring_setup
+    return -ERESTARTSYS;
+}
+
+SEC("fmod_ret/__x64_sys_io_uring_enter")
+int BPF_PROG(shadow_sys_io_uring_enter, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(426, EVENT_WRITE_OUT); // 426 = io_uring_enter
+    return -ERESTARTSYS;
+}
+
+SEC("fmod_ret/__x64_sys_io_uring_register")
+int BPF_PROG(shadow_sys_io_uring_register, struct pt_regs *regs)
+{
+    if (!should_intercept())
+        return 0;
+    do_intercept(427, EVENT_WRITE_OUT); // 427 = io_uring_register
     return -ERESTARTSYS;
 }
 
