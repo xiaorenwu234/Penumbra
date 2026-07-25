@@ -54,6 +54,7 @@ set(BPF_OBJ ${CMAKE_CURRENT_BINARY_DIR}/observ.bpf.o)
 set(BPF_HDRS
     ${CMAKE_CURRENT_SOURCE_DIR}/bpf/cri.bpf.h
     ${CMAKE_CURRENT_SOURCE_DIR}/bpf/observ_common.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/bpf/effect_schema.h
 )
 
 add_custom_command(

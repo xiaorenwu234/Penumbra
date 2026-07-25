@@ -295,9 +295,10 @@ std::string ObserveDaemon::handle_request(const std::string &json_line) {
     if (action == "start_observe") {
         uint64_t cgroup_id = json_get_uint64(json_line, "cgroup_id");
         std::string log_path = json_get_string(json_line, "log_path");
+        std::string epoch_id = json_get_string(json_line, "epoch_id");
         if (cgroup_id == 0) return json_error("cgroup_id required");
         if (log_path.empty()) return json_error("log_path required");
-        return handle_start_observe(cgroup_id, log_path);
+        return handle_start_observe(cgroup_id, log_path, epoch_id);
     }
     else if (action == "stop_observe") {
         uint64_t cgroup_id = json_get_uint64(json_line, "cgroup_id");
@@ -332,7 +333,8 @@ std::string ObserveDaemon::handle_request(const std::string &json_line) {
     }
 }
 
-std::string ObserveDaemon::handle_start_observe(uint64_t cgroup_id, const std::string &log_path) {
+std::string ObserveDaemon::handle_start_observe(uint64_t cgroup_id, const std::string &log_path,
+                                   const std::string &epoch_id) {
     std::lock_guard<std::mutex> lock(sessions_mu_);
 
     /* Stop existing session if any */
@@ -347,13 +349,13 @@ std::string ObserveDaemon::handle_start_observe(uint64_t cgroup_id, const std::s
     session.log_path = log_path;
     session.observer = std::make_unique<Observer>();
 
-    if (!session.observer->start(cgroup_id, log_path)) {
+    if (!session.observer->start(cgroup_id, log_path, epoch_id)) {
         return json_error("failed to start observer for cgroup");
     }
 
     sessions_[cgroup_id] = std::move(session);
-    fprintf(stderr, "[ObserveDaemon] Started observing cgroup %lu → %s\n",
-            cgroup_id, log_path.c_str());
+    fprintf(stderr, "[ObserveDaemon] Started observing cgroup %lu → %s (epoch=%s)\n",
+            cgroup_id, log_path.c_str(), epoch_id.c_str());
     return json_ok("\"log_path\":\"" + json_escape_str(log_path) + "\"");
 }
 
@@ -370,18 +372,25 @@ std::string ObserveDaemon::handle_stop_observe(uint64_t cgroup_id) {
     sessions_.erase(it);
 
     fprintf(stderr, "[ObserveDaemon] Stopped observing cgroup %lu (complete=%d "
-            "dropped=%lu write_err=%d drain_err=%d)\n",
+            "dropped=%lu path_err=%lu write_err=%d drain_err=%d)\n",
             cgroup_id, rep.complete, (unsigned long)rep.dropped_events,
-            rep.write_error, rep.drain_error);
+            (unsigned long)rep.path_errors, rep.write_error, rep.drain_error);
 
     /* Surface the log-integrity status so the orchestrator can fail the epoch
-     * closed when the recorded log is known to be incomplete. */
+     * closed when the recorded log is known to be incomplete. Includes the
+     * monotonic end_seq, total event count, and FNV-1a digest so the caller
+     * can verify log completeness and integrity. path_errors counts events
+     * whose canonical path could not be represented (resource unknown). */
     std::ostringstream extra;
     extra << "\"log_path\":\"" << json_escape_str(log_path) << "\""
           << ",\"complete\":"       << (rep.complete ? "true" : "false")
           << ",\"dropped_events\":" << rep.dropped_events
+          << ",\"path_errors\":"    << rep.path_errors
           << ",\"write_error\":"    << (rep.write_error ? "true" : "false")
-          << ",\"drain_error\":"    << (rep.drain_error ? "true" : "false");
+          << ",\"drain_error\":"    << (rep.drain_error ? "true" : "false")
+          << ",\"end_seq\":"        << rep.end_seq
+          << ",\"total_events\":"   << rep.total_events
+          << ",\"digest\":\""        << json_escape_str(rep.digest) << "\"";
     if (!rep.complete)
         extra << ",\"reason\":\"" << json_escape_str(rep.reason) << "\"";
     return json_ok(extra.str());
@@ -456,27 +465,36 @@ std::string ObserveDaemon::handle_install_whitelist(uint64_t cgroup_id, const st
         return json_error("enforcer not available (BPF LSM may not be supported)");
     }
 
-    /* Enable enforcement for this cgroup */
-    if (!enforcer_->enable(cgroup_id)) {
-        return json_error("failed to enable enforcement for cgroup");
-    }
-
-    /* Parse allowed_ops and add rules */
+    /* Parse allowed_ops into a rule vector first (fail before touching state). */
     auto ops = json_parse_array_objects(ops_json);
-    size_t added = 0;
+    std::vector<WhitelistRule> rules;
+    rules.reserve(ops.size());
     for (const auto &op : ops) {
         WhitelistRule rule;
         rule.cgroup_id = cgroup_id;
         rule.event_type = static_cast<uint16_t>(json_get_int(op, "event_type", 0xFFFF));
         rule.path_prefix = json_get_string(op, "path_prefix");
-        if (enforcer_->add_rule(rule)) added++;
+        rules.push_back(rule);
+    }
+
+    /* Enable enforcement, then install ALL rules atomically. If add_rules
+     * fails, roll back enforcement too so the cgroup is not left in a
+     * partial state. */
+    if (!enforcer_->enable(cgroup_id)) {
+        return json_error("failed to enable enforcement for cgroup");
+    }
+
+    if (!enforcer_->add_rules(rules)) {
+        enforcer_->disable(cgroup_id);
+        return json_error("whitelist install failed (atomic rollback: all rules "
+                          "and enforcement removed)");
     }
 
     fprintf(stderr, "[ObserveDaemon] Installed whitelist for cgroup %lu: %zu rules\n",
-            cgroup_id, added);
+            cgroup_id, rules.size());
 
     std::ostringstream extra;
-    extra << "\"rules_added\":" << added;
+    extra << "\"rules_added\":" << rules.size();
     return json_ok(extra.str());
 }
 

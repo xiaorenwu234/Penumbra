@@ -7,9 +7,28 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::fs;
 
-use crate::bpf_loader::BpfManager;
+use crate::bpf_loader::{BpfManager, IpcPolicyEntry, NetPolicyEntry, ProcPolicy, SigPolicyEntry};
 use crate::event_handler::InterceptEvent;
 use crate::memory_tracker::MemoryTracker;
+
+/// Map an InterceptEvent's event_type to the unified effect_class.
+/// This is used when granting restart tokens: the token must carry the
+/// same effect_class that check_policy() will compute for the syscall.
+fn effect_class_from_event(event: &InterceptEvent) -> u8 {
+    use crate::policy_generated::*;
+    // FORK (101) is a process-lifecycle event, not an effect encoded via
+    // ENCODE_EVENT; its low byte (101) is not a valid effect_class. Fork is
+    // never intercepted (it is emitted directly by the sched_process_fork
+    // tracepoint, bypassing do_intercept), so no restart token is granted for
+    // it — this branch is defensive only.
+    if event.event_type == 101 {
+        return CLASS_NETWORK;
+    }
+    // All intercepted events carry the unified (class | op<<8) encoding; the
+    // low byte is exactly the effect_class check_policy() will compute for the
+    // same syscall, so the restart token and the policy lookup agree.
+    event_class_of(event.event_type as u16)
+}
 
 /// State of a frozen process
 #[derive(Debug, Clone)]
@@ -87,23 +106,31 @@ impl ProcessManager {
         self.frozen.values().collect()
     }
 
-    /// Continue a frozen process to completion:
-    /// 1. Fully release in allowed_pids (value 2, so even the exit-hold sentinel
-    ///    passes and the process can actually exit)
-    /// 2. Send SIGCONT (kernel auto-restarts the syscall via -ERESTARTSYS)
+    /// Continue a frozen process to completion (full release).
+    ///
+    /// In the three-state model, this transitions the cgroup to ENFORCED mode
+    /// with allow-all class policies: every effect class is permitted, so the
+    /// process runs to completion and exits (including the exit-hold sentinel,
+    /// which is a network connect that passes under allow-all NETWORK policy).
+    /// The pending syscall is allowed by policy_allows() on restart — no
+    /// restart token is needed since ENFORCED + allow-all already permits it.
     pub fn continue_process(&mut self, pid: u32) -> Result<()> {
         let pid = self.resolve_pid(pid);
-        if !self.frozen.contains_key(&pid) {
-            anyhow::bail!("Process {} is not in frozen list", pid);
+        let frozen = self.frozen.get(&pid)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Process {} is not in frozen list", pid))?;
+
+        // Transition to ENFORCED + allow-all: every effect class is permitted.
+        if let Ok(cg_id) = self.bpf_manager.cgroup_id_from_path(&frozen.cgroup_path) {
+            self.bpf_manager.enforce_allow_all(cg_id)?;
         }
 
-        // MUST clear the map entry BEFORE sending SIGCONT
-        // Otherwise the restarted syscall will be intercepted again.
-        // clear_stopped_full grants a FULL release (value 2): unlike resume's
-        // normal allow (value 1), this also lets the exit-hold sentinel pass so
-        // the process runs to completion and exits.
-        self.bpf_manager.clear_stopped_full(pid)?;
+        // Clear the stopped mark BEFORE SIGCONT so the restarted syscall
+        // is not treated as an in-flight stop dedup.
+        self.bpf_manager.clear_stopped_mark(pid)?;
 
+        // SIGCONT: kernel auto-restarts the syscall via -ERESTARTSYS.
+        // In ENFORCED + allow-all mode, check_policy returns DECISION_ALLOW.
         signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT)
             .with_context(|| format!("Failed to send SIGCONT to pid {}", pid))?;
 
@@ -111,25 +138,38 @@ impl ProcessManager {
         Ok(())
     }
 
-    /// Resume a frozen process with a PERMANENT per-epoch allow (allowed_pids=1):
-    /// the process passes all interception for the rest of the epoch.
+    /// Resume a frozen process with a ONE-SHOT restart token (SPECULATIVE
+    /// phase authorization): the token authorizes exactly ONE pending syscall
+    /// pass. After the token is consumed, the next intercepted syscall is
+    /// fenced again (SPECULATIVE mode) — no permanent bypass.
     ///
-    /// NOTE: this is NOT used to start a speculative candidate at the input gate
-    /// -- doing so would let the candidate's whole epoch of external effects
-    /// bypass the fence. Candidate startup uses `resume_candidate_raw` (armed,
-    /// no allow pass); authorized effects are released only AFTER finalization
-    /// via `continue_process`/`commit_process` (full release, allowed_pids=2).
+    /// This is the correct primitive for authorizing a single reviewed effect
+    /// without releasing the whole epoch. For full release (run to completion),
+    /// use `continue_process` (transitions to ENFORCED + allow-all).
     pub fn resume_process(&mut self, pid: u32) -> Result<()> {
         let pid = self.resolve_pid(pid);
-        if !self.frozen.contains_key(&pid) {
-            anyhow::bail!("Process {} is not in frozen list", pid);
+        let frozen = self.frozen.get(&pid)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Process {} is not in frozen list", pid))?;
+
+        // Grant a one-shot restart token for the pending syscall (if any).
+        // The token is consumed on the next matching syscall_nr, then deleted.
+        if frozen.event.syscall_nr != 0 {
+            let effect_class = effect_class_from_event(&frozen.event);
+            self.bpf_manager.grant_restart_token(
+                frozen.event.pid,  // tid (thread that was intercepted)
+                frozen.event.syscall_nr,
+                effect_class,
+            )?;
         }
 
-        // Use clear_stopped which permanently allows the candidate to run the
-        // whole epoch uninterrupted (per-epoch granularity). Interception is
-        // re-armed at the next epoch boundary (finish_speculative).
-        self.bpf_manager.clear_stopped(pid)?;
+        // Clear the stopped mark BEFORE SIGCONT so the restarted syscall
+        // is not treated as an in-flight stop dedup.
+        self.bpf_manager.clear_stopped_mark(pid)?;
 
+        // SIGCONT: kernel auto-restarts the syscall via -ERESTARTSYS.
+        // check_policy finds the token, consumes it, returns DECISION_ALLOW.
+        // The next intercepted syscall gets DECISION_FENCE (SPECULATIVE mode).
         signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT)
             .with_context(|| format!("Failed to send SIGCONT to pid {}", pid))?;
 
@@ -322,6 +362,161 @@ impl ProcessManager {
         Ok(resumed)
     }
 
+    /// Continue all frozen processes in a cgroup under a FINE-GRAINED
+    /// process-layer policy (P0-5) instead of the allow-all class policy
+    /// installed by continue_process().
+    ///
+    /// Fail-closed on BOTH axes:
+    ///   * policy installation failure  -> nobody is SIGCONT'd;
+    ///   * partial SIGCONT failure      -> Err naming the failures.
+    ///
+    /// `policy == None` keeps the legacy allow-all behavior.
+    pub fn continue_by_cgroup_with_policy(
+        &mut self,
+        cgroup_path: &str,
+        policy: Option<&ProcPolicy>,
+    ) -> Result<Vec<u32>> {
+        let Some(pol) = policy else {
+            return self.continue_by_cgroup(cgroup_path);
+        };
+
+        let pids: Vec<u32> = self.frozen.values()
+            .filter(|p| p.cgroup_path == cgroup_path)
+            .map(|p| p.tgid)
+            .collect();
+
+        // Install the fine-grained policy BEFORE releasing anyone. If this
+        // fails the cgroup stays in its previous mode and no process is
+        // resumed (fail-closed).
+        let cg_id = self.bpf_manager.cgroup_id_from_path(cgroup_path)
+            .with_context(|| format!(
+                "continue_by_cgroup_with_policy: cannot resolve cgroup id for {}",
+                cgroup_path
+            ))?;
+        self.bpf_manager.enforce_policy(cg_id, pol)
+            .context("continue_by_cgroup_with_policy: policy installation failed; not releasing")?;
+
+        let mut resumed = Vec::new();
+        let mut failed: Vec<u32> = Vec::new();
+        for pid in pids {
+            match self.sigcont_enforced(pid) {
+                Ok(()) => resumed.push(pid),
+                Err(_) => failed.push(pid),
+            }
+        }
+        if !failed.is_empty() {
+            anyhow::bail!(
+                "continue_by_cgroup_with_policy partial failure in {}: resumed {:?}, failed {:?}",
+                cgroup_path, resumed, failed
+            );
+        }
+        Ok(resumed)
+    }
+
+    /// SIGCONT a frozen process whose cgroup is ALREADY in ENFORCED mode
+    /// with its policy installed by the caller. Unlike continue_process(),
+    /// this does NOT install the allow-all class policy.
+    fn sigcont_enforced(&mut self, pid: u32) -> Result<()> {
+        let pid = self.resolve_pid(pid);
+        if !self.frozen.contains_key(&pid) {
+            anyhow::bail!("Process {} is not in frozen list", pid);
+        }
+        // Clear the stopped mark BEFORE SIGCONT so the restarted syscall
+        // is not treated as an in-flight stop dedup.
+        self.bpf_manager.clear_stopped_mark(pid)?;
+        signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT)
+            .with_context(|| format!("Failed to send SIGCONT to pid {}", pid))?;
+        self.frozen.remove(&pid);
+        Ok(())
+    }
+
+    /// Parse a JSON fine-grained process policy into a ProcPolicy (P0-5).
+    /// Fail-closed: any malformed entry aborts the whole parse so a partial
+    /// policy can never reach the BPF maps.
+    ///
+    /// Schema (all integer fields; addr/port HOST order, 0 = wildcard):
+    ///   {
+    ///     "classes": [{"effect_class": 2, "mode": 2}, ...],  // mode 1=allow-all, 2=fine
+    ///     "network": [{"family": 2, "addr": u32, "port": u16, "allow": 1}, ...],
+    ///     "ipc":     [{"ipc_type": 1, "target": u64, "allow": 1}, ...],
+    ///     "signal":  [{"target_cgroup": u64, "allow": 1}, ...]
+    ///   }
+    pub fn parse_proc_policy(v: &serde_json::Value) -> Result<ProcPolicy> {
+        fn req_u64(obj: &serde_json::Value, field: &str, max: u64) -> Result<u64> {
+            let n = obj.get(field)
+                .and_then(|x| x.as_u64())
+                .ok_or_else(|| anyhow::anyhow!("policy entry missing/invalid '{}'", field))?;
+            if n > max {
+                anyhow::bail!("policy field '{}' = {} out of range (max {})", field, n, max);
+            }
+            Ok(n)
+        }
+        fn req_allow(obj: &serde_json::Value) -> Result<u8> {
+            let n = req_u64(obj, "allow", 1)?;
+            Ok(n as u8)
+        }
+
+        let mut out = ProcPolicy::default();
+
+        if let Some(classes) = v.get("classes") {
+            let arr = classes.as_array()
+                .ok_or_else(|| anyhow::anyhow!("'classes' must be an array"))?;
+            for c in arr {
+                let cls = req_u64(c, "effect_class", 7)?;
+                if cls < 1 {
+                    anyhow::bail!("effect_class must be >= 1");
+                }
+                let mode = req_u64(c, "mode", 2)?;
+                if mode < 1 {
+                    anyhow::bail!("class mode must be 1 (allow-all) or 2 (fine-grained)");
+                }
+                out.classes.push((cls as u8, mode as u8));
+            }
+        }
+
+        if let Some(net) = v.get("network") {
+            let arr = net.as_array()
+                .ok_or_else(|| anyhow::anyhow!("'network' must be an array"))?;
+            for e in arr {
+                out.network.push(NetPolicyEntry {
+                    family: req_u64(e, "family", u8::MAX as u64)? as u8,
+                    addr: req_u64(e, "addr", u32::MAX as u64)? as u32,
+                    port: req_u64(e, "port", u16::MAX as u64)? as u16,
+                    allow: req_allow(e)?,
+                });
+            }
+        }
+
+        if let Some(ipc) = v.get("ipc") {
+            let arr = ipc.as_array()
+                .ok_or_else(|| anyhow::anyhow!("'ipc' must be an array"))?;
+            for e in arr {
+                let ipc_type = req_u64(e, "ipc_type", 5)?;
+                if ipc_type < 1 {
+                    anyhow::bail!("ipc_type must be >= 1");
+                }
+                out.ipc.push(IpcPolicyEntry {
+                    ipc_type: ipc_type as u8,
+                    target: req_u64(e, "target", u64::MAX)?,
+                    allow: req_allow(e)?,
+                });
+            }
+        }
+
+        if let Some(sig) = v.get("signal") {
+            let arr = sig.as_array()
+                .ok_or_else(|| anyhow::anyhow!("'signal' must be an array"))?;
+            for e in arr {
+                out.signal.push(SigPolicyEntry {
+                    target_cgroup: req_u64(e, "target_cgroup", u64::MAX)?,
+                    allow: req_allow(e)?,
+                });
+            }
+        }
+
+        Ok(out)
+    }
+
     /// Kill all frozen processes in a given cgroup
     pub fn kill_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
         let pids: Vec<u32> = self.frozen.values()
@@ -431,11 +626,16 @@ impl ProcessManager {
         self.memory_tracker
             .finish_tracking(baseline, candidate, orig_regs);
         self.register_candidate(baseline, candidate);
-        // Re-arm interception at this epoch boundary: revoke any PERMANENT allow
-        // the baseline carried from a prior epoch's resume/commit, so if it is
-        // later resumed (on reject) it is guarded again. The freshly cloned
-        // candidate has a new tgid and is armed by default until it is resumed.
-        let _ = self.bpf_manager.rearm_intercept(baseline);
+        // Reset the cgroup to SPECULATIVE mode for the new epoch.
+        // This clears any ENFORCED mode + allow-all policies left from a prior
+        // epoch's continue/commit, so the candidate starts fenced (not
+        // pre-authorized). The freshly cloned candidate has a new tgid and is
+        // armed by default (SPECULATIVE = fence all external effects).
+        if let Some(fp) = self.frozen.get(&candidate) {
+            if let Ok(cg_id) = self.bpf_manager.cgroup_id_from_path(&fp.cgroup_path) {
+                let _ = self.bpf_manager.clear_all_policies(cg_id);
+            }
+        }
         candidate
     }
 
@@ -512,11 +712,23 @@ impl ProcessManager {
         self.frozen.remove(&live);
 
         // The baseline was rewound onto its interrupted boundary syscall by
-        // memory_tracker::reject_to_checkpoint and left group-stopped. Permit it
-        // (clear_stopped: permanent allow) and SIGCONT it so it re-executes that
-        // syscall and continues as the canonical process. Interception is
-        // re-armed at the next epoch boundary (finish_speculative).
-        let _ = self.bpf_manager.clear_stopped(baseline);
+        // memory_tracker::reject_to_checkpoint and left group-stopped. Grant a
+        // one-shot restart token for the pending syscall (if it was frozen at
+        // an intercepted boundary), clear the stopped mark, and SIGCONT so it
+        // re-executes that syscall and continues as the canonical process.
+        // The token is consumed on restart; the next intercepted syscall is
+        // fenced again (SPECULATIVE mode — no permanent bypass).
+        if let Some(fp) = self.frozen.get(&baseline) {
+            if fp.event.syscall_nr != 0 {
+                let effect_class = effect_class_from_event(&fp.event);
+                let _ = self.bpf_manager.grant_restart_token(
+                    fp.event.pid,
+                    fp.event.syscall_nr,
+                    effect_class,
+                );
+            }
+        }
+        let _ = self.bpf_manager.clear_stopped_mark(baseline);
         let _ = signal::kill(Pid::from_raw(baseline as i32), Signal::SIGCONT);
 
         // The baseline is live again under its own pid: drop the promotion that
@@ -660,11 +872,12 @@ impl ProcessManager {
         // commit() kills the baseline and keeps the candidate live; it returns
         // the discarded baseline pid.
         let baseline = self.memory_tracker.commit(live)?;
-        // The baseline is gone; drop its frozen record and stale eBPF state. The
-        // candidate stays as-is (still frozen at its boundary, resumable via
+        // The baseline is gone (killed by memory_tracker.commit); drop its
+        // frozen record and clean up its stopped_pids entry. The candidate
+        // stays as-is (still frozen at its boundary, resumable via
         // continue_pid). The promotion baseline -> candidate is kept so any
         // lingering reference to the old pid resolves to the canonical candidate.
-        let _ = self.bpf_manager.clear_stopped(baseline);
+        let _ = self.bpf_manager.clear_stopped_mark(baseline);
         self.frozen.remove(&baseline);
         Ok(())
     }
@@ -847,7 +1060,7 @@ impl ProcessManager {
         //    left dangling in the maps, then SIGKILL.
         let pids: Vec<u32> = self.frozen.keys().copied().collect();
         for pid in pids {
-            let _ = self.bpf_manager.clear_stopped(pid);
+            let _ = self.bpf_manager.clear_stopped_mark(pid);
             if signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok() {
                 handled += 1;
             }

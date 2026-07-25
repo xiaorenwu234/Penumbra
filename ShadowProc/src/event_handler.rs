@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::policy_generated::{encode_event_type, CLASS_NETWORK, OP_CONNECT};
+
 /// Event received from the eBPF ring buffer, matching the kernel-side struct
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -25,22 +27,33 @@ pub enum EventType {
     ExitHold,
     PrivExec,
     PrivSetuid,
+    System,
     Unknown,
 }
 
 impl From<u32> for EventType {
     fn from(val: u32) -> Self {
-        match val {
-            1 => EventType::Network,
-            2 => EventType::Ipc,
-            3 => EventType::WriteOutput,
-            4 => EventType::Signal,
-            5 => EventType::Ptrace,
-            6 => EventType::PipeWrite,
-            7 => EventType::Fork,
-            8 => EventType::ExitHold,
-            9 => EventType::PrivExec,
-            10 => EventType::PrivSetuid,
+        // FORK is a process lifecycle event (legacy_unmapped=101), not an
+        // auditable effect, so it is handled before the (class|op<<8) decode.
+        if val == 101 {
+            return EventType::Fork;
+        }
+        let cls = (val & 0xFF) as u8;
+        let op = ((val >> 8) & 0xFF) as u8;
+        match cls {
+            2 => EventType::Network,  // EFFECT_CLASS_NETWORK (incl. EXIT_HOLD sentinel; see is_exit_hold)
+            3 => EventType::Ipc,
+            6 => EventType::WriteOutput,
+            4 => match op {
+                1 => EventType::Signal,   // OP_KILL
+                2 => EventType::Ptrace,   // OP_PTRACE
+                _ => EventType::Unknown,
+            },
+            5 => match op {
+                1 => EventType::PrivExec,         // OP_EXEC_PRIV
+                _ => EventType::PrivSetuid,       // OP_SETUID/SETGID/SETGROUPS/CAPSET
+            },
+            7 => EventType::System,
             _ => EventType::Unknown,
         }
     }
@@ -59,6 +72,7 @@ impl fmt::Display for EventType {
             EventType::ExitHold => write!(f, "EXIT_HOLD"),
             EventType::PrivExec => write!(f, "PRIV_EXEC"),
             EventType::PrivSetuid => write!(f, "PRIV_SETUID"),
+            EventType::System => write!(f, "SYSTEM"),
             EventType::Unknown => write!(f, "UNKNOWN"),
         }
     }
@@ -83,9 +97,22 @@ impl InterceptEvent {
         }
     }
 
-    /// Get the event type enum
+    /// Get the event type enum. ExitHold is detected first because it
+    /// reuses the NETWORK/CONNECT encoding (distinguished by syscall_nr).
     pub fn event_type_enum(&self) -> EventType {
+        if self.is_exit_hold() {
+            return EventType::ExitHold;
+        }
         EventType::from(self.event_type)
+    }
+
+    /// EXIT_HOLD sentinel: a cooperative connect() to 192.0.2.255:65535 from
+    /// libexithold.so signalling process completion. It reuses the
+    /// NETWORK/CONNECT event_type encoding; syscall_nr==231 (exit_group)
+    /// distinguishes it from a real connect (syscall_nr==42).
+    pub fn is_exit_hold(&self) -> bool {
+        self.event_type == encode_event_type(CLASS_NETWORK, OP_CONNECT) as u32
+            && self.syscall_nr == 231
     }
 
     /// Get syscall name
@@ -125,10 +152,22 @@ impl InterceptEvent {
             106 => "setgid",
             116 => "setgroups",
             126 => "capset",
+            165 => "mount",
+            166 => "umount2",
+            248 => "add_key",
+            249 => "request_key",
+            250 => "keyctl",
+            272 => "unshare",
+            298 => "perf_event_open",
+            308 => "setns",
+            310 => "process_vm_readv",
+            311 => "process_vm_writev",
+            321 => "bpf",
+            16 => "ioctl",
             231 => "exit_group",
             _ => {
                 // For fork events, syscall_nr stores parent tgid
-                if self.event_type == 7 {
+                if self.event_type == 101 {
                     "fork"
                 } else {
                     "unknown"
@@ -139,7 +178,7 @@ impl InterceptEvent {
 
     /// For fork events: get the parent tgid (stored in syscall_nr field)
     pub fn parent_tgid(&self) -> Option<u32> {
-        if self.event_type == 7 {
+        if self.event_type == 101 {
             Some(self.syscall_nr)
         } else {
             None

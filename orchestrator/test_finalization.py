@@ -25,8 +25,11 @@ import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Also add project root for policy.policy_ir
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shadow_orchestrator import ShadowOrchestrator
+from policy.policy_ir import PolicyIR
 
 
 class FakeClient:
@@ -167,9 +170,12 @@ def _session_orch(proxy, fs_handler):
     orch._proxy = proxy
     orch._sessions = {"sid1": "/cg-sess"}
     orch._sessions_lock = threading.Lock()
+    orch._session_epochs = {}
     orch._journal = _NullJournal()
     orch._recovered_outputs = {}
     orch._release_lock = threading.RLock()
+    orch._pending_release = set()
+    orch._pending_lock = threading.Lock()
     orch._pending_ack = set()
     orch._pending_ack_lock = threading.Lock()
     return orch
@@ -177,13 +183,21 @@ def _session_orch(proxy, fs_handler):
 
 class TestSessionCommitEpochFSFirst(unittest.TestCase):
     def test_fs_success_finalizes_and_releases(self):
-        """FS commit ok + Finalized => quiesce THEN finalize; marker closed,
-        release acked, transcript released."""
+        """Group-level finalize ok + Finalized => quiesce THEN finalize;
+        group acked, transcript released."""
         proxy = FakeProxy(output="OUT")
 
         def fs(req):
-            if req["action"] in ("commit", "can_release"):
-                return {"status": "ok", "releasable": True}
+            a = req["action"]
+            if a == "prepare_resolution":
+                return {"status": "ok", "group_id": 1,
+                        "members": ["epoch-1"], "graph_generation": 1}
+            if a == "begin_finalize":
+                return {"status": "ok", "state": "finalized"}
+            if a == "get_finalize_status":
+                return {"status": "ok", "state": "finalized"}
+            if a == "ack_release_group":
+                return {"status": "ok"}
             return {"status": "ok"}
 
         orch = _session_orch(proxy, fs)
@@ -196,19 +210,20 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
         self.assertIn("finalize_commit", proxy.calls)
         self.assertLess(proxy.calls.index("quiesce_for_commit"),
                         proxy.calls.index("finalize_commit"))
-        # The REAL finalization path was driven: whole-agent commit + the
-        # fail-closed release gate, then the marker close and the release ack.
+        # Group-level finalization path: prepare_resolution -> begin_finalize
+        # -> ack_release_group, in that order.
         acts = orch.fs_client.actions()
-        self.assertIn("commit", acts)
-        self.assertIn("can_release", acts)
-        self.assertIn("commit_epoch", acts)
-        self.assertIn("ack_release", acts)
-        self.assertLess(acts.index("commit"), acts.index("can_release"))
-        self.assertLess(acts.index("can_release"), acts.index("ack_release"))
+        self.assertIn("prepare_resolution", acts)
+        self.assertIn("begin_finalize", acts)
+        self.assertIn("ack_release_group", acts)
+        self.assertLess(acts.index("prepare_resolution"),
+                        acts.index("begin_finalize"))
+        self.assertLess(acts.index("begin_finalize"),
+                        acts.index("ack_release_group"))
 
     def test_fs_failure_preserves_baseline(self):
-        """FS commit fail => quiesce ran but finalize_commit NEVER called
-        (baseline preserved so the epoch can still be rolled back)."""
+        """prepare_resolution fail => quiesce ran but finalize_commit NEVER
+        called (baseline preserved so the epoch can still be rolled back)."""
         proxy = FakeProxy()
 
         def fs(req):
@@ -221,18 +236,22 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
         self.assertIn("quiesce_for_commit", proxy.calls)
         self.assertNotIn("finalize_commit", proxy.calls,
                          "baseline must NOT be discarded when FS fails")
-        self.assertNotIn("ack_release", orch.fs_client.actions())
+        self.assertNotIn("ack_release_group", orch.fs_client.actions())
 
     def test_not_finalized_preserves_baseline(self):
-        """FS commit ok but agent NOT Finalized (deferred promotion/upstream)
+        """begin_finalize ok but agent NOT Finalized (deferred promotion/upstream)
         => authorized_pending, baseline preserved, nothing acked."""
         proxy = FakeProxy()
 
         def fs(req):
-            if req["action"] == "commit":
-                return {"status": "ok", "releasable": False}
-            if req["action"] == "can_release":
-                return {"status": "ok", "releasable": False}
+            a = req["action"]
+            if a == "prepare_resolution":
+                return {"status": "ok", "group_id": 1,
+                        "members": ["epoch-1"], "graph_generation": 1}
+            if a == "begin_finalize":
+                return {"status": "ok", "state": "authorized_pending"}
+            if a == "get_finalize_status":
+                return {"status": "ok", "state": "authorized_pending"}
             return {"status": "ok"}
 
         orch = _session_orch(proxy, fs)
@@ -243,8 +262,7 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
         self.assertNotIn("finalize_commit", proxy.calls,
                          "baseline must NOT be discarded before Finalized")
         acts = orch.fs_client.actions()
-        self.assertNotIn("commit_epoch", acts, "marker must stay open")
-        self.assertNotIn("ack_release", acts)
+        self.assertNotIn("ack_release_group", acts)
 
 
 class RunProxy:
@@ -286,25 +304,29 @@ class TestSessionRunPending(unittest.TestCase):
 class TestPolicyFailClosed(unittest.TestCase):
     def test_audit_rules_unknown_event_raises(self):
         with self.assertRaises(ValueError):
-            ShadowOrchestrator._convert_policy_to_audit_rules(
+            ir = PolicyIR.from_allowed_ops(
                 [{"event_type": "NOT_A_REAL_EVENT", "action": "allow",
                   "path_pattern": "/tmp/"}])
+            ir.to_audit_rules()
 
     def test_whitelist_unknown_event_raises(self):
         with self.assertRaises(ValueError):
-            ShadowOrchestrator._convert_policy_to_whitelist(
+            ir = PolicyIR.from_allowed_ops(
                 [{"event_type": "BOGUS", "action": "allow",
                   "path_pattern": "/tmp/"}], 12345)
+            ir.to_bpf_whitelist()
 
     def test_known_and_wildcard_events_accepted(self):
-        rules = ShadowOrchestrator._convert_policy_to_audit_rules(
+        ir = PolicyIR.from_allowed_ops(
             [{"event_type": "CREATE", "action": "allow", "path_pattern": "/tmp/"},
              {"event_type": "*", "action": "allow", "path_pattern": "/tmp/"}])
-        self.assertEqual(rules[0]["event_type"], 2)
+        rules = ir.to_audit_rules()
+        # CREATE = CLASS_FILESYSTEM(1) | (OP_CREATE(3) << 8) = 769
+        self.assertEqual(rules[0]["event_type"], 769)
         self.assertEqual(rules[1]["event_type"], -1)
-        wl = ShadowOrchestrator._convert_policy_to_whitelist(
+        wl = PolicyIR.from_allowed_ops(
             [{"event_type": "ANY", "action": "allow", "path_pattern": "/tmp/"}],
-            1)
+            1).to_bpf_whitelist()
         self.assertEqual(wl[0]["event_type"], 0xFFFF)
 
 

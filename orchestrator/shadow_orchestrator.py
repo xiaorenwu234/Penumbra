@@ -32,9 +32,16 @@ import threading
 import signal
 import tempfile
 import time
+import uuid
 from typing import Optional, List, Dict, Any, Tuple
 
-from session_proxy import SessionProxy
+# Add project root to path so policy.policy_ir is importable.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from policy.policy_ir import PolicyIR
+from session_proxy import SessionProxy, NotAdmissibleError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -113,6 +120,10 @@ class _OrchestratorJournal:
                         finalized durably, so the canonical outcome is COMMITTED
                         and the committed transcript is captured here.
       op=commit_done    {sid, cgroup}          process committed + output released
+      op=release_intent {sid, cgroup,          group-level release intent (Phase 3):
+                        group_id, members,     the group was finalized and the
+                        graph_generation,      intent to release all members was
+                        epoch}                 durably recorded.
       op=rollback       {sid, cgroup}          epoch rolled back (not committed)
 
     Records are newline-delimited JSON, fsync'd on append so a record is durable
@@ -171,19 +182,35 @@ class _OrchestratorJournal:
     @staticmethod
     def replay(records: list) -> dict:
         """Fold the journal into recovery state. Returns a dict with:
-            sessions:  {sid: cgroup}             currently-open sessions
-            committed: {sid: (cgroup, output)}   epochs whose FS layer committed
-                       durably but whose release was never journaled done
-            undecided: {sid: cgroup}             commit_intent w/o fs_committed
+            sessions:       {sid: cgroup}             currently-open sessions
+            committed:      {sid: (cgroup, output)}   epochs whose FS layer committed
+                            durably but whose release was never journaled done
+            undecided:      {sid: cgroup}             commit_intent w/o fs_committed
+            release_groups: {group_id: {members,      group-level release intents
+                            graph_generation, cgroup,  (Phase 3): a group whose
+                            epoch, sid}}              finalization was durably
+                                                     recorded.
         """
         sessions: Dict[str, Any] = {}
         stage: Dict[str, str] = {}       # sid -> intent|fs|done|rollback
         cgroup: Dict[str, Any] = {}
         output: Dict[str, str] = {}
+        release_groups: Dict[int, Any] = {}
         for rec in records:
             op = rec.get("op")
             sid = rec.get("sid")
             cg = rec.get("cgroup")
+            if op == "release_intent":
+                gid = rec.get("group_id")
+                if gid is not None:
+                    release_groups[gid] = {
+                        "members": rec.get("members", []),
+                        "graph_generation": rec.get("graph_generation", 0),
+                        "cgroup": cg,
+                        "epoch": rec.get("epoch", ""),
+                        "sid": sid,
+                    }
+                continue
             if not sid:
                 continue
             if op == "open":
@@ -209,7 +236,8 @@ class _OrchestratorJournal:
                      for sid, st in stage.items() if st == "fs"}
         undecided = {sid: cgroup.get(sid)
                      for sid, st in stage.items() if st == "intent"}
-        return {"sessions": sessions, "committed": committed, "undecided": undecided}
+        return {"sessions": sessions, "committed": committed,
+                "undecided": undecided, "release_groups": release_groups}
 
     def rewrite(self, records: list) -> None:
         """Atomically replace the journal with `records` (compaction on clean
@@ -237,12 +265,19 @@ class ShadowOrchestrator:
 
     def __init__(self, shadowfs_sock: str, shadowproc_sock: str,
                  shadowobserve_sock: Optional[str] = None,
-                 journal_path: Optional[str] = None):
+                 journal_path: Optional[str] = None,
+                 shadowfs_mount: Optional[str] = None,
+                 backing_dir: Optional[str] = None):
         self.fs_client = SocketClient(shadowfs_sock)
         self.proc_client = SocketClient(shadowproc_sock)
         self.observe_client = None
         self.fs_client.connect()
         self.proc_client.connect()
+        # Speculation domain isolation parameters (passed to SessionProxy so
+        # each candidate bash runs inside its own mount namespace with a
+        # read-only root, per-candidate tmpfs, and blocked backing dir).
+        self._shadowfs_mount = shadowfs_mount
+        self._backing_dir = backing_dir
 
         if shadowobserve_sock:
             self.observe_client = SocketClient(shadowobserve_sock)
@@ -309,6 +344,11 @@ class ShadowOrchestrator:
         self._shadowproc_sock = shadowproc_sock
         self._proxy: Optional[SessionProxy] = None
         self._sessions: Dict[str, str] = {}  # session_id → cgroup_id
+        # session_id → ShadowFS epoch_id of the session's CURRENT open epoch.
+        # The epoch (not the cgroup) is the ShadowFS unit of versioning /
+        # authorization / finalization; the cgroup only provides kernel
+        # attribution. Cleared on commit/rollback of the epoch.
+        self._session_epochs: Dict[str, str] = {}
         self._sessions_lock = threading.Lock()
 
         # ── Durable finalization journal + crash recovery ──
@@ -381,6 +421,11 @@ class ShadowOrchestrator:
             log.warning("RECOVERY sid=%s cgroup=%s: undecided commit; ShadowFS "
                         "finalized=%s -> resolving as %s", sid, cg, finalized,
                         "COMMITTED" if finalized else "NOT committed (output withheld)")
+        for gid, info in state.get("release_groups", {}).items():
+            log.info("RECOVERY group_id=%d: release_intent recorded (members=%s "
+                     "graph_gen=%d) -- group was finalized; members should be "
+                     "released or re-acked", gid, info.get("members", []),
+                     info.get("graph_generation", 0))
         log.info("Journal recovery: %d session(s), %d committed-pending, %d undecided",
                  len(state["sessions"]), len(state["committed"]), len(state["undecided"]))
 
@@ -473,7 +518,7 @@ class ShadowOrchestrator:
         except OSError as e:
             return {"status": "error", "message": str(e)}
 
-    def _fs_can_release(self, cgroup_id: str) -> bool:
+    def _fs_can_release(self, cgroup_id: str, epoch_id: Optional[str] = None) -> bool:
         """Ask ShadowFS whether a cgroup's external side effects are safe to
         release. Safe == the agent has reached the Finalized lifecycle state
         (all file promotions durable, all upstreams finalized).
@@ -486,10 +531,10 @@ class ShadowOrchestrator:
         Never defaults to True.
         """
         try:
-            resp = self.fs_client.request({
-                "action": "can_release",
-                "cgroup_id": cgroup_id,
-            })
+            req = {"action": "can_release", "cgroup_id": cgroup_id}
+            if epoch_id:
+                req["epoch_id"] = epoch_id
+            resp = self.fs_client.request(req)
         except Exception as e:  # noqa: BLE001 - any socket/JSON error = fail closed
             log.warning("  can_release(%s): ShadowFS unreachable (%s) -- "
                         "NOT releasing (fail closed)", cgroup_id, e)
@@ -504,19 +549,19 @@ class ShadowOrchestrator:
             return False
         return bool(resp.get("releasable"))
 
-    def _fs_retry_finalize(self, cgroup_id: str) -> dict:
-        """Ask ShadowFS to re-run promotion/finalization for a stuck agent.
+    def _fs_retry_finalize(self, cgroup_id: str, epoch_id: Optional[str] = None) -> dict:
+        """Ask ShadowFS to re-run promotion/finalization for a stuck epoch.
         Returns the response dict (or an error dict on failure). Idempotent.
         """
         try:
-            return self.fs_client.request({
-                "action": "retry_finalize",
-                "cgroup_id": cgroup_id,
-            })
+            req = {"action": "retry_finalize", "cgroup_id": cgroup_id}
+            if epoch_id:
+                req["epoch_id"] = epoch_id
+            return self.fs_client.request(req)
         except Exception as e:  # noqa: BLE001
             return {"status": "error", "message": str(e)}
 
-    def _fs_ack_release(self, cgroup_id: str) -> bool:
+    def _fs_ack_release(self, cgroup_id: str, epoch_id: Optional[str] = None) -> bool:
         """Tell ShadowFS the external effects for a Finalized agent have been
         released, so it may drop the terminal record. AckRelease is idempotent
         on the ShadowFS side (unknown agent -> ok), so retrying is safe.
@@ -527,10 +572,10 @@ class ShadowOrchestrator:
         Finalized record in ShadowFS).
         """
         try:
-            resp = self.fs_client.request({
-                "action": "ack_release",
-                "cgroup_id": cgroup_id,
-            })
+            req = {"action": "ack_release", "cgroup_id": cgroup_id}
+            if epoch_id:
+                req["epoch_id"] = epoch_id
+            resp = self.fs_client.request(req)
         except Exception as e:  # noqa: BLE001
             log.warning("  ack_release(%s) failed: %s", cgroup_id, e)
             return False
@@ -539,6 +584,247 @@ class ShadowOrchestrator:
                       resp.get("message") if isinstance(resp, dict) else resp)
             return False
         return True
+
+    def _fs_group_finalize(self, epoch_id: str, cgroup_id: str) -> dict:
+        """Group-level ShadowFS finalization: prepare_resolution → begin_finalize →
+        poll get_finalize_status. Replaces the single-epoch "commit" +
+        "can_release" pair with the group-aware flow (Phase 3).
+
+        Returns dict with:
+          - status: "ok" or "error"
+          - group_id: int (on success)
+          - members: list[str] epoch IDs (on success)
+          - graph_generation: int64 (on success)
+          - state: "finalized", "failed", or "pending" (on success)
+          - finalize_err: str (on failure)
+          - message: str (on error)
+        """
+        # Step 1: prepare_resolution — compute the SCC, get group_id + graph_gen.
+        prep_req = {"action": "prepare_resolution", "cgroup_id": cgroup_id}
+        if epoch_id:
+            prep_req["epoch_id"] = epoch_id
+        try:
+            prep = self.fs_client.request(prep_req)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": f"prepare_resolution: {e}"}
+        if prep.get("status") != "ok":
+            return prep
+
+        group_id = prep["group_id"]
+        members = prep["members"]
+        graph_gen = prep["graph_generation"]
+        log.info("  prepare_resolution: group_id=%d members=%s graph_gen=%d",
+                 group_id, members, graph_gen)
+
+        # Step 2: begin_finalize — authorize + promote all members as a group.
+        # The graph_generation is checked by ShadowFS for TOCTOU: if the
+        # dependency graph changed between prepare and begin, it refuses.
+        try:
+            fin = self.fs_client.request({
+                "action": "begin_finalize",
+                "group_id": group_id,
+                "graph_generation": graph_gen,
+            })
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": f"begin_finalize: {e}"}
+        if fin.get("status") != "ok":
+            return fin
+
+        # Step 3: poll get_finalize_status until finalized or failed.
+        state = fin.get("state", "pending")
+        poll_count = 0
+        while state == "pending":
+            poll_count += 1
+            if poll_count > 300:  # 30s timeout
+                log.warning("  finalize poll timeout (30s) for group %d", group_id)
+                return {"status": "ok", "group_id": group_id, "members": members,
+                        "graph_generation": graph_gen, "state": "pending",
+                        "finalize_err": "poll timeout"}
+            time.sleep(0.1)
+            try:
+                status = self.fs_client.request({
+                    "action": "get_finalize_status",
+                    "group_id": group_id,
+                })
+            except Exception as e:  # noqa: BLE001
+                return {"status": "error", "message": f"get_finalize_status: {e}"}
+            if status.get("status") != "ok":
+                return status
+            state = status.get("state", "pending")
+
+        finalize_err = ""
+        if state == "failed":
+            try:
+                status = self.fs_client.request({
+                    "action": "get_finalize_status",
+                    "group_id": group_id,
+                })
+                finalize_err = status.get("finalize_err", "") if isinstance(status, dict) else ""
+            except Exception:
+                pass
+
+        return {"status": "ok", "group_id": group_id, "members": members,
+                "graph_generation": graph_gen, "state": state,
+                "finalize_err": finalize_err}
+
+    def _fs_group_ack(self, group_id: int, cgroup_id: str,
+                      epoch_id: str = "") -> bool:
+        """Group-level ack_release: tells ShadowFS to drop the terminal records
+        for ALL finalized members of a group. Returns True on success, False on
+        failure (caller parks for ack-only retry)."""
+        try:
+            resp = self.fs_client.request({
+                "action": "ack_release_group",
+                "group_id": group_id,
+            })
+        except Exception as e:  # noqa: BLE001
+            log.warning("  ack_release_group(%d) failed: %s", group_id, e)
+            return False
+        if not isinstance(resp, dict) or resp.get("status") != "ok":
+            log.warning("  ack_release_group(%d): %s", group_id,
+                        resp.get("message") if isinstance(resp, dict) else resp)
+            return False
+        return True
+
+    def _resolve_member_cgroups(self, members: List[str],
+                                primary_cgroup: str) -> List[str]:
+        """Map epoch IDs to cgroup IDs for group members. Uses ShadowFS
+        list_agents for non-primary members. Falls back to [primary_cgroup]
+        if the query fails or returns no mappings."""
+        if len(members) <= 1:
+            return [primary_cgroup]
+        try:
+            agents = self.fs_client.request({"action": "list_agents"})
+        except Exception:
+            return [primary_cgroup]
+        if not isinstance(agents, dict) or agents.get("status") != "ok":
+            return [primary_cgroup]
+        cgroup_map = {}
+        for info in agents.get("agents_info", []):
+            eid = info.get("epoch_id", "")
+            cg = info.get("cgroup_id", "")
+            if eid and cg:
+                cgroup_map[eid] = cg
+        result = []
+        for epoch in members:
+            cg = cgroup_map.get(epoch)
+            if cg:
+                result.append(cg)
+        if not result:
+            result = [primary_cgroup]
+        return result
+
+    def _release_group_members(self, group_id: int, members: List[str],
+                               graph_generation: int,
+                               primary_cgroup: str,
+                               proc_policy: Optional[Dict] = None,
+                               journal_release_intent: bool = False,
+                               journal_sid: str = None,
+                               epoch_id: str = "") -> Tuple[Dict[str, str], bool]:
+        """Release ALL members of a finalized SCC group (P0-7).
+
+        Previously commit / submit_policy / resolve_epoch each inlined a
+        release sequence that touched only the PRIMARY cgroup, leaving the
+        group's other members frozen and un-acked — a leak that could stall
+        dependent downstream cgroups and skip their process-layer release.
+        This shared helper releases every member cgroup, optionally writes a
+        durable release_intent, issues a single group ack_release, then
+        re-evaluates deferred downstream cgroups.
+
+        Members whose _release_proc fails are parked in _pending_release for
+        the background retry loop (fail-closed: they stay fenced).
+
+        Returns (output_by_cgroup, primary_released).
+        """
+        member_cgroups = self._resolve_member_cgroups(members, primary_cgroup)
+        all_output: Dict[str, str] = {}
+        primary_ok = False
+        for mcg in member_cgroups:
+            ok, stdout = self._release_proc(mcg, skip_ack=True,
+                                            proc_policy=proc_policy)
+            if ok:
+                all_output[mcg] = stdout
+                if mcg == primary_cgroup:
+                    primary_ok = True
+            else:
+                with self._pending_lock:
+                    self._pending_release.add(mcg)
+                log.warning("  Release of member cgroup=%s failed -- deferred", mcg)
+
+        # Durable release_intent (only when the caller asks for it).
+        if journal_release_intent:
+            entry = {"cgroup": primary_cgroup, "group_id": group_id,
+                     "members": members, "graph_generation": graph_generation,
+                     "epoch": epoch_id}
+            if journal_sid:
+                entry["sid"] = journal_sid
+            self._journal.append("release_intent", **entry)
+
+        # Single group ack_release for all members.
+        if not self._fs_group_ack(group_id, primary_cgroup, epoch_id):
+            with self._pending_ack_lock:
+                self._pending_ack.add((primary_cgroup, epoch_id))
+            log.warning("  ack_release_group(%d) failed -- parked for retry",
+                        group_id)
+
+        # This group may unblock deferred downstream cgroups.
+        self._try_release_pending()
+        return all_output, primary_ok
+
+    def resolve_epoch(self, epoch_id: str, cgroup_id: str,
+                      allowed_ops: List[Dict] = None,
+                      session_id: str = None,
+                      proc_policy: Optional[Dict] = None) -> dict:
+        """Group-level finalization state machine (Phase 3) — the SINGLE
+        convergence point for commit / session_commit_epoch / submit_policy.
+
+        Implements the resolution flow:
+          1. prepare_resolution → group_id, members, graph_gen
+          2. (caller has already frozen the primary cgroup)
+          3. TOCTOU check by begin_finalize (graph_generation must match)
+          6. begin_finalize(group_id, graph_gen)
+          7. poll get_finalize_status until finalized/failed
+          8-12. release ALL members (process commit + output + resume)
+         10. write durable release_intent to journal (session-scoped only)
+         13. group ack_release
+
+        ``proc_policy`` (P0-5): optional fine-grained process-layer policy
+        forwarded to every member's continue_by_cgroup; None = allow-all.
+
+        On any failure: returns error (caller handles rollback).
+        Group members whose release fails are parked for retry.
+        """
+        log.info("RESOLVE_EPOCH epoch=%s cgroup=%s rules=%d session=%s",
+                 epoch_id or "<active>", cgroup_id,
+                 len(allowed_ops or []), session_id or "<none>")
+
+        # Steps 1, 3, 6-7: group-level FS finalization.
+        fs_result = self._fs_group_finalize(epoch_id, cgroup_id)
+        if fs_result.get("status") != "ok":
+            return fs_result
+        if fs_result.get("state") != "finalized":
+            return {"status": "error", "decision": "authorized_pending",
+                    "message": "file layer not finalized",
+                    "finalize_err": fs_result.get("finalize_err", "")}
+
+        group_id = fs_result["group_id"]
+        members = fs_result["members"]
+        graph_gen = fs_result["graph_generation"]
+
+        # Steps 8-13: release ALL members + journal + group ack (P0-7).
+        # journal release_intent only for session-scoped resolves.
+        all_output, primary_ok = self._release_group_members(
+            group_id, members, graph_gen, cgroup_id,
+            proc_policy=proc_policy,
+            journal_release_intent=bool(session_id),
+            journal_sid=session_id,
+            epoch_id=epoch_id or "")
+
+        primary_output = all_output.get(cgroup_id, "")
+        return {"status": "ok", "decision": "finalized",
+                "group_id": group_id, "members": members,
+                "graph_generation": graph_gen,
+                "stdout": primary_output, "released": primary_ok}
 
     def _finalize_retry_loop(self) -> None:
         """Background loop: periodically retry finalization for deferred
@@ -578,19 +864,29 @@ class ShadowOrchestrator:
         """
         with self._pending_ack_lock:
             acks = list(self._pending_ack)
-        for cg in acks:
-            if self._fs_ack_release(cg):
+        for cg, ep in acks:
+            if self._fs_ack_release(cg, ep or None):
                 with self._pending_ack_lock:
-                    self._pending_ack.discard(cg)
-                log.info("  ack-retry: cgroup=%s acked -- ShadowFS record dropped",
-                         cg)
+                    self._pending_ack.discard((cg, ep))
+                log.info("  ack-retry: cgroup=%s epoch=%s acked -- ShadowFS record dropped",
+                         cg, ep or "<active>")
 
-    def _release_proc(self, cgroup_id: str) -> Tuple[bool, str]:
+    def _release_proc(self, cgroup_id: str,
+                      skip_ack: bool = False,
+                      proc_policy: Optional[Dict] = None) -> Tuple[bool, str]:
         """
         Resume ShadowProc's frozen processes for a cgroup (letting their
         held IPC / network / exit operations proceed), flush the cgroup's
         buffered stdout to the caller, and finally ACK the release to ShadowFS
         so it can drop the finalized agent's terminal record.
+
+        ``proc_policy`` (P0-5): an optional fine-grained process-layer policy
+        dict (see PolicyIR.to_proc_policy) forwarded to ShadowProc's
+        continue_by_cgroup. When None, the cgroup is released allow-all
+        (legacy full-release semantics). When present, ShadowProc installs
+        the policy atomically and switches to MODE_ENFORCED *before* any
+        process is resumed (fail-closed: a policy-install failure leaves the
+        processes frozen).
 
         MUST only be called for a cgroup ShadowFS has confirmed Finalized
         (see _fs_can_release).
@@ -664,10 +960,15 @@ class ShadowOrchestrator:
             log.info("  Releasing %d frozen process(es) for cgroup=%s",
                      len(frozen), cgroup_id)
             try:
-                resume_resp = self.proc_client.request({
+                resume_req = {
                     "action": "continue_by_cgroup",
                     "cgroup_id": cgroup_id,
-                })
+                }
+                # Forward the fine-grained policy so ShadowProc enforces it
+                # instead of the default allow-all (P0-5).
+                if proc_policy is not None:
+                    resume_req["policy"] = proc_policy
+                resume_resp = self.proc_client.request(resume_req)
             except Exception as e:  # noqa: BLE001 - fail closed
                 log.error("  Resume(%s) unreachable: %s -- NOT acking "
                           "(processes stay frozen; will retry)", cgroup_id, e)
@@ -688,10 +989,14 @@ class ShadowOrchestrator:
 
         # Step 6: external effects are OUT -- ack so ShadowFS drops the record.
         # A failed ack does NOT re-fence (effects already released); park it
-        # for an ack-only retry instead.
+        # for an ack-only retry instead. When skip_ack is set (group-level
+        # release), the caller performs a single group ack_release_group after
+        # all members are released.
+        if skip_ack:
+            return True, buffered
         if not self._fs_ack_release(cgroup_id):
             with self._pending_ack_lock:
-                self._pending_ack.add(cgroup_id)
+                self._pending_ack.add((cgroup_id, ""))
             log.warning("  ack_release(%s) failed -- external effects already "
                         "released; parked for ack-only retry", cgroup_id)
         return True, buffered
@@ -746,66 +1051,55 @@ class ShadowOrchestrator:
         log.info("COMMIT cgroup=%s", cgroup_id)
 
         with self._release_lock:
-            # Step 1: Authorize + attempt finalization in ShadowFS.
-            try:
-                fs_resp = self.fs_client.request({
-                    "action": "commit",
-                    "cgroup_id": cgroup_id,
-                })
-            except Exception as e:  # noqa: BLE001 - fail closed: keep fenced
-                log.error("  ShadowFS commit unreachable: %s -- keeping fenced", e)
+            # Step 1: GROUP-LEVEL file finalization (Phase 3).
+            fs_result = self._fs_group_finalize(None, cgroup_id)
+            if fs_result.get("status") != "ok":
+                log.error("  ShadowFS group finalize failed: %s",
+                          fs_result.get("message"))
                 with self._pending_lock:
                     self._pending_release.add(cgroup_id)
                 return {"status": "error", "decision": "authorized_pending",
                         "released": False, "deferred": True,
-                        "message": str(e), "stdout": ""}
-            if fs_resp.get("status") != "ok":
-                log.error("  ShadowFS commit failed: %s", fs_resp.get("message"))
-                return fs_resp
-            log.info("  ShadowFS commit: state=%s releasable=%s%s",
-                     fs_resp.get("state"), fs_resp.get("releasable"),
-                     (" finalize_err=" + fs_resp["finalize_err"])
-                     if fs_resp.get("finalize_err") else "")
-
-            # Step 2: Release ONLY if the agent reached Finalized. The gate is
-            # re-queried (fail-closed) rather than trusting the commit echo.
-            if self._fs_can_release(cgroup_id):
-                released_ok, stdout = self._release_proc(cgroup_id)
-                if released_ok:
-                    fs_resp["decision"] = "finalized"
-                    fs_resp["stdout"] = stdout
-                    fs_resp["released"] = True
-                    with self._pending_lock:
-                        self._pending_release.discard(cgroup_id)
-                else:
-                    # ShadowFS finalized the agent, but ShadowProc could not be
-                    # queried/resumed or the output could not be read. Nothing
-                    # was acked and the output buffer is intact; keep the cgroup
-                    # fenced and parked so the retry loop finishes the release.
-                    with self._pending_lock:
-                        self._pending_release.add(cgroup_id)
-                    log.warning("  cgroup=%s finalized but process/output release "
-                                "failed -- keeping fenced, deferred for retry",
-                                cgroup_id)
-                    fs_resp["decision"] = "authorized_pending"
-                    fs_resp["stdout"] = ""
-                    fs_resp["released"] = False
-                    fs_resp["deferred"] = True
-            else:
+                        "message": fs_result.get("message", ""), "stdout": ""}
+            if fs_result.get("state") != "finalized":
                 with self._pending_lock:
                     self._pending_release.add(cgroup_id)
                 log.info("  cgroup=%s authorized but NOT finalized -- keeping "
                          "processes frozen, network fenced, stdout buffered "
                          "(background retry will finalize)", cgroup_id)
-                fs_resp["decision"] = "authorized_pending"
-                fs_resp["stdout"] = ""
-                fs_resp["released"] = False
-                fs_resp["deferred"] = True
+                return {"status": "ok", "decision": "authorized_pending",
+                        "released": False, "deferred": True,
+                        "message": fs_result.get("finalize_err", ""),
+                        "stdout": ""}
+            log.info("  ShadowFS group %d finalized: %d members",
+                     fs_result["group_id"], len(fs_result["members"]))
 
-            # Step 3: This commit may have unblocked deferred downstream cgroups.
-            self._try_release_pending()
+            # Step 2: Release ALL group members + group ack (P0-7). The group
+            # finalization already confirmed Finalized; _release_group_members
+            # resumes every SCC member (not just the primary cgroup), issues
+            # the group ack, and re-evaluates deferred downstream cgroups.
+            all_output, released_ok = self._release_group_members(
+                fs_result["group_id"], fs_result["members"],
+                fs_result["graph_generation"], cgroup_id,
+                journal_release_intent=False)
+            stdout = all_output.get(cgroup_id, "")
+            if released_ok:
+                with self._pending_lock:
+                    self._pending_release.discard(cgroup_id)
+                result = {"status": "ok", "decision": "finalized",
+                          "released": True, "stdout": stdout,
+                          "group_id": fs_result["group_id"],
+                          "members": fs_result["members"]}
+            else:
+                with self._pending_lock:
+                    self._pending_release.add(cgroup_id)
+                log.warning("  cgroup=%s finalized but process/output release "
+                            "failed -- keeping fenced, deferred for retry",
+                            cgroup_id)
+                result = {"status": "ok", "decision": "authorized_pending",
+                          "released": False, "deferred": True, "stdout": ""}
 
-        return fs_resp
+        return result
 
     def _rollback_proc(self, cgroup_id: str) -> dict:
         """
@@ -1024,7 +1318,11 @@ class ShadowOrchestrator:
     def _get_proxy(self) -> SessionProxy:
         """Lazily construct the SessionProxy (needs root + cgroup_exec)."""
         if self._proxy is None:
-            self._proxy = SessionProxy(self._shadowproc_sock, verbose=True)
+            self._proxy = SessionProxy(
+                self._shadowproc_sock, verbose=True,
+                shadowfs_mount=self._shadowfs_mount,
+                backing_dir=self._backing_dir,
+            )
         return self._proxy
 
     def session_open(self, cgroup_name: Optional[str] = None) -> dict:
@@ -1069,6 +1367,10 @@ class ShadowOrchestrator:
         with self._sessions_lock:
             return self._sessions.get(session_id)
 
+    def _session_epoch(self, session_id: str) -> Optional[str]:
+        with self._sessions_lock:
+            return self._session_epochs.get(session_id)
+
     def session_begin_epoch(self, session_id: str) -> dict:
         """
         Open a unified speculative epoch for the session.
@@ -1080,26 +1382,52 @@ class ShadowOrchestrator:
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
             return {"status": "error", "message": f"unknown session {session_id}"}
-        log.info("SESSION_BEGIN_EPOCH sid=%s cgroup=%s", session_id, cgroup_id)
-        # Step 1: ShadowFS epoch marker.
+        # The orchestrator (not ShadowFS) mints the EpochID: the epoch -- not
+        # the cgroup -- is the ShadowFS unit of versioning/finalization, and
+        # every later commit/rollback/can_release call routes by this id.
+        epoch_id = f"ep-{uuid.uuid4().hex[:12]}"
+        log.info("SESSION_BEGIN_EPOCH sid=%s cgroup=%s epoch=%s",
+                 session_id, cgroup_id, epoch_id)
+        # Step 1: ShadowFS epoch registration (epoch_id -> cgroup attribution).
         fs_resp = self.fs_client.request({
             "action": "begin_epoch",
+            "epoch_id": epoch_id,
             "cgroup_id": cgroup_id,
+            "session_id": session_id,
         })
         if fs_resp.get("status") != "ok":
             log.error("  ShadowFS begin_epoch failed: %s", fs_resp.get("message"))
             return fs_resp
+        with self._sessions_lock:
+            self._session_epochs[session_id] = epoch_id
         # Step 2: ShadowProc baseline/candidate fork.
         try:
             self._get_proxy().begin_epoch(session_id)
+        except NotAdmissibleError as e:
+            # The baseline process is not snapshot-safe (multi-threaded, has
+            # children, writable MAP_SHARED, pending signals, or non-regular
+            # fds).  Degrade to non-speculative mode: unwind the FS epoch and
+            # return an error so the caller runs commands directly.
+            self.fs_client.request({"action": "rollback_epoch",
+                                    "epoch_id": epoch_id,
+                                    "cgroup_id": cgroup_id})
+            with self._sessions_lock:
+                self._session_epochs.pop(session_id, None)
+            log.warning("  begin_epoch not admissible: %s -- degrading to "
+                        "non-speculative mode", e)
+            return {"status": "error", "reason": "not_admissible",
+                    "message": str(e)}
         except Exception as e:  # noqa: BLE001
-            # Best-effort unwind of the FS marker so the agent is not left
+            # Best-effort unwind of the FS epoch so the agent is not left
             # with a dangling open epoch.
             self.fs_client.request({"action": "rollback_epoch",
+                                    "epoch_id": epoch_id,
                                     "cgroup_id": cgroup_id})
+            with self._sessions_lock:
+                self._session_epochs.pop(session_id, None)
             log.error("  begin_epoch (process layer) failed: %s", e)
             return {"status": "error", "message": str(e)}
-        return {"status": "ok", "cgroup_id": cgroup_id}
+        return {"status": "ok", "cgroup_id": cgroup_id, "epoch_id": epoch_id}
 
     def session_commit_epoch(self, session_id: str) -> dict:
         """
@@ -1118,11 +1446,17 @@ class ShadowOrchestrator:
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
             return {"status": "error", "message": f"unknown session {session_id}"}
-        log.info("SESSION_COMMIT_EPOCH sid=%s cgroup=%s", session_id, cgroup_id)
+        # Route by the session's own epoch_id when we minted one; fall back to
+        # cgroup-only routing (ShadowFS resolves the active epoch) for sessions
+        # opened before the epoch model.
+        epoch_id = self._session_epoch(session_id)
+        log.info("SESSION_COMMIT_EPOCH sid=%s cgroup=%s epoch=%s",
+                 session_id, cgroup_id, epoch_id or "<active>")
         proxy = self._get_proxy()
         # Journal the intent BEFORE touching either layer, so recovery knows a
         # commit was in progress for this session even if we crash immediately.
-        self._journal.append("commit_intent", sid=session_id, cgroup=cgroup_id)
+        self._journal.append("commit_intent", sid=session_id, cgroup=cgroup_id,
+                             epoch=epoch_id or "")
         # FS-FIRST finalization. Phase 1 is REVERSIBLE: quiesce the candidate to
         # a stopped boundary WITHOUT discarding the baseline, so if the file
         # layer cannot finalize we can still roll the epoch back losslessly.
@@ -1132,37 +1466,23 @@ class ShadowOrchestrator:
             log.error("  quiesce_for_commit (process layer) failed: %s", e)
             return {"status": "error", "message": str(e)}
         with self._release_lock:
-            # Step 1: REAL file finalization -- authorize + promote every dirty
-            # path durably onto orig (the same path the whole-agent commit
-            # uses), not just close the epoch marker.
-            try:
-                fs_resp = self.fs_client.request({
-                    "action": "commit",
-                    "cgroup_id": cgroup_id,
-                })
-            except Exception as e:  # noqa: BLE001 - fail closed, baseline kept
-                log.error("  ShadowFS commit unreachable: %s -- baseline "
-                          "preserved", e)
-                return {"status": "error", "message": str(e)}
-            if fs_resp.get("status") != "ok":
-                # FS did NOT finalize: do NOT discard the baseline. The epoch
-                # stays intact (candidate still frozen) so it can be rolled
-                # back later.
-                log.error("  ShadowFS commit failed: %s -- baseline preserved",
-                          fs_resp.get("message"))
-                return fs_resp
-            # Step 2: fail-closed gate -- only proceed to the destructive
-            # process commit once ShadowFS confirms the agent reached Finalized
-            # (all promotions durable, all upstreams finalized). The gate is
-            # re-queried rather than trusting the commit echo.
-            if not self._fs_can_release(cgroup_id):
+            # Step 1: GROUP-LEVEL file finalization -- prepare_resolution →
+            # begin_finalize → poll get_finalize_status. This replaces the
+            # single-epoch "commit" + "can_release" with the group-aware
+            # finalization flow (Phase 3).
+            fs_result = self._fs_group_finalize(epoch_id, cgroup_id)
+            if fs_result.get("status") != "ok":
+                log.error("  ShadowFS group finalize failed: %s -- baseline "
+                          "preserved", fs_result.get("message"))
+                return fs_result
+            if fs_result.get("state") != "finalized":
                 log.error("  cgroup=%s authorized but NOT finalized -- baseline "
                           "preserved (epoch stays fenced; retry the commit)",
                           cgroup_id)
                 return {"status": "error", "decision": "authorized_pending",
                         "message": "file layer not finalized; epoch kept "
                                    "intact for retry",
-                        "finalize_err": fs_resp.get("finalize_err") or ""}
+                        "finalize_err": fs_result.get("finalize_err", "")}
             # DECISION POINT: the file layer finalized durably, so the
             # canonical outcome is now COMMITTED. Snapshot the committed
             # transcript into the journal BEFORE the destructive process
@@ -1170,14 +1490,7 @@ class ShadowOrchestrator:
             # result with retrievable output.
             self._journal.append("fs_committed", sid=session_id, cgroup=cgroup_id,
                                  output=proxy.peek_epoch_output(session_id))
-            # Close the (now-moot) epoch marker so the agent's next epoch
-            # starts clean. Best-effort: the files are already promoted.
-            try:
-                self.fs_client.request({"action": "commit_epoch",
-                                        "cgroup_id": cgroup_id})
-            except Exception as e:  # noqa: BLE001
-                log.warning("  commit_epoch marker close failed: %s", e)
-            # Step 3: FS finalized -> perform the DESTRUCTIVE process commit
+            # Step 2: FS finalized -> perform the DESTRUCTIVE process commit
             # (discard baseline, keep candidate canonical) and release the
             # buffered speculative output.
             try:
@@ -1187,16 +1500,40 @@ class ShadowOrchestrator:
                 # session_commit_epoch / restart recovery finishes the release.
                 log.error("  finalize_commit (process layer) failed: %s", e)
                 return {"status": "error", "message": str(e)}
-            # Step 4: external effects are out -- ack so ShadowFS drops the
-            # finalized record (otherwise the session's NEXT epoch would write
-            # onto a terminal Finalized agent). A failed ack is parked for the
-            # ack-only retry loop, never re-fenced.
-            if not self._fs_ack_release(cgroup_id):
+            # Release any OTHER SCC members (P0-7): the primary session was
+            # just committed via the proxy, but a finalized group may include
+            # sibling cgroups whose frozen processes also need resuming +
+            # output flushing. The primary is skipped (proxy handled it) and
+            # the group ack is issued once below.
+            for mcg in self._resolve_member_cgroups(
+                    fs_result["members"], cgroup_id):
+                if mcg == cgroup_id:
+                    continue
+                ok, _ = self._release_proc(mcg, skip_ack=True)
+                if not ok:
+                    with self._pending_lock:
+                        self._pending_release.add(mcg)
+                    log.warning("  Release of sibling member cgroup=%s failed "
+                                "-- deferred", mcg)
+            # Step 3a: write durable release_intent to journal (Phase 3).
+            self._journal.append("release_intent",
+                                sid=session_id, cgroup=cgroup_id,
+                                group_id=fs_result["group_id"],
+                                members=fs_result["members"],
+                                graph_generation=fs_result["graph_generation"],
+                                epoch=epoch_id or "")
+            # Step 3: external effects are out -- group ack so ShadowFS drops
+            # all finalized records in the group. A failed ack is parked for
+            # the ack-only retry loop, never re-fenced.
+            if not self._fs_group_ack(fs_result["group_id"], cgroup_id,
+                                      epoch_id or ""):
                 with self._pending_ack_lock:
-                    self._pending_ack.add(cgroup_id)
-                log.warning("  ack_release(%s) failed -- parked for ack-only "
-                            "retry", cgroup_id)
+                    self._pending_ack.add((cgroup_id, epoch_id or ""))
+                log.warning("  ack_release_group(%d) failed -- parked for "
+                            "ack-only retry", fs_result["group_id"])
         self._journal.append("commit_done", sid=session_id, cgroup=cgroup_id)
+        with self._sessions_lock:
+            self._session_epochs.pop(session_id, None)
         self._recovered_outputs.pop(session_id, None)
         return {"status": "ok", "output": proxy.get_output(session_id)}
 
@@ -1215,14 +1552,16 @@ class ShadowOrchestrator:
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
             return {"status": "error", "message": f"unknown session {session_id}"}
-        log.info("SESSION_ROLLBACK_EPOCH sid=%s cgroup=%s", session_id, cgroup_id)
+        epoch_id = self._session_epoch(session_id)
+        log.info("SESSION_ROLLBACK_EPOCH sid=%s cgroup=%s epoch=%s",
+                 session_id, cgroup_id, epoch_id or "<active>")
 
         # Step 1: roll back the file layer FIRST and gate on its success.
         try:
-            fs_resp = self.fs_client.request({
-                "action": "rollback_epoch",
-                "cgroup_id": cgroup_id,
-            })
+            rb_req = {"action": "rollback_epoch", "cgroup_id": cgroup_id}
+            if epoch_id:
+                rb_req["epoch_id"] = epoch_id
+            fs_resp = self.fs_client.request(rb_req)
         except Exception as e:  # noqa: BLE001 - fail closed: do not touch procs
             log.error("  ShadowFS rollback_epoch unreachable: %s -- "
                       "NOT rolling back the process layer", e)
@@ -1242,6 +1581,8 @@ class ShadowOrchestrator:
             log.error("  rollback_epoch (process layer) failed after FS undo: %s", e)
             return {"status": "error", "message": str(e)}
         self._journal.append("rollback", sid=session_id, cgroup=cgroup_id)
+        with self._sessions_lock:
+            self._session_epochs.pop(session_id, None)
         self._recovered_outputs.pop(session_id, None)
         return {"status": "ok"}
 
@@ -1268,6 +1609,7 @@ class ShadowOrchestrator:
         proxy.close_session(session_id)
         with self._sessions_lock:
             self._sessions.pop(session_id, None)
+            self._session_epochs.pop(session_id, None)
         self._recovered_outputs.pop(session_id, None)
         self._journal.append("close", sid=session_id)
         log.info("SESSION_CLOSE sid=%s", session_id)
@@ -1278,7 +1620,8 @@ class ShadowOrchestrator:
     # ──────────────────────────────────────────────────────────────────────
 
     def start_observe(self, cgroup_id: str, cgroup_inode: int,
-                      log_path: Optional[str] = None) -> dict:
+                      log_path: Optional[str] = None,
+                      epoch_id: Optional[str] = None) -> dict:
         """
         Start observing a cgroup via ShadowObserve.
 
@@ -1286,24 +1629,29 @@ class ShadowOrchestrator:
             cgroup_id: The cgroup identifier (e.g., "/shadow-demo")
             cgroup_inode: The cgroup directory inode number (uint64)
             log_path: Path for JSONL event log (auto-generated if None)
+            epoch_id: Optional epoch identifier written to the log header
         """
         if not self.observe_client:
             return {"status": "error", "message": "ShadowObserve not configured"}
 
         if log_path is None:
-            log_path = tempfile.mkstemp(
+            fd, log_path = tempfile.mkstemp(
                 prefix=f"observ_{cgroup_id.strip('/').replace('/', '_')}_",
-                suffix=".jsonl"
+                suffix=".jsonl",
             )
+            os.close(fd)  # mkstemp returns (fd, path); we only need the path
 
-        log.info("START_OBSERVE cgroup=%s inode=%d log=%s",
-                 cgroup_id, cgroup_inode, log_path)
+        log.info("START_OBSERVE cgroup=%s inode=%d log=%s epoch=%s",
+                 cgroup_id, cgroup_inode, log_path, epoch_id or "<none>")
 
-        resp = self.observe_client.request({
+        req = {
             "action": "start_observe",
             "cgroup_id": cgroup_inode,
             "log_path": log_path,
-        })
+        }
+        if epoch_id:
+            req["epoch_id"] = epoch_id
+        resp = self.observe_client.request(req)
 
         if resp.get("status") == "ok":
             self._observe_state[cgroup_id] = {
@@ -1402,9 +1750,13 @@ class ShadowOrchestrator:
         # drained, then the recorded log is NOT a faithful record of what the
         # frozen workload did -- auditing it could pass unaudited effects. The
         # `complete` field defaults to False when absent (unknown => fail closed).
+        # path_errors counts events whose canonical path could not be built
+        # (too deep / oversized component): their resource identity is unknown,
+        # so they cannot be audited against any path-scoped rule.
         if (stop_resp.get("status") != "ok"
                 or not stop_resp.get("complete", False)
                 or stop_resp.get("dropped_events", 0) > 0
+                or stop_resp.get("path_errors", 0) > 0
                 or stop_resp.get("write_error", False)
                 or stop_resp.get("drain_error", False)):
             return self._fail_closed(
@@ -1412,6 +1764,7 @@ class ShadowOrchestrator:
                 "observation log incomplete at stop "
                 f"(complete={stop_resp.get('complete')}, "
                 f"dropped={stop_resp.get('dropped_events')}, "
+                f"path_errors={stop_resp.get('path_errors')}, "
                 f"write_error={stop_resp.get('write_error')}, "
                 f"drain_error={stop_resp.get('drain_error')}, "
                 f"status={stop_resp.get('status')})",
@@ -1423,7 +1776,8 @@ class ShadowOrchestrator:
         # silently widened to ANY. Contain the cgroup instead of auditing
         # against a permissive rule set.
         try:
-            audit_rules = self._convert_policy_to_audit_rules(allowed_ops)
+            ir = PolicyIR.from_allowed_ops(allowed_ops)
+            audit_rules = ir.to_audit_rules()
         except ValueError as e:
             return self._fail_closed(
                 cgroup_id, state,
@@ -1469,8 +1823,8 @@ class ShadowOrchestrator:
             # be silently widened to the 0xFFFF wildcard, which would admit
             # every event once the workload is released.
             try:
-                whitelist_ops = self._convert_policy_to_whitelist(
-                    allowed_ops, state["cgroup_inode"])
+                ir = PolicyIR.from_allowed_ops(allowed_ops, state["cgroup_inode"])
+                whitelist_ops = ir.to_bpf_whitelist()
             except ValueError as e:
                 return self._fail_closed(
                     cgroup_id, state,
@@ -1496,51 +1850,72 @@ class ShadowOrchestrator:
                     total_events=total_events,
                 )
 
-            # Commit filesystem changes
+            # Compile the fine-grained process-layer policy (P0-5) that will
+            # govern the workload once released. Fail CLOSED on a malformed
+            # policy: releasing under a partial policy could admit unaudited
+            # effects. `ir` was built above for the whitelist; reuse it.
+            try:
+                proc_policy = ir.to_proc_policy()
+            except ValueError as e:
+                return self._fail_closed(
+                    cgroup_id, state,
+                    f"invalid policy (proc_policy): {e}",
+                    total_events=total_events,
+                )
+
+            # Group-level filesystem finalization (Phase 3).
             buffered = ""
-            fs_resp = self.fs_client.request({
-                "action": "commit",
-                "cgroup_id": cgroup_id,
-            })
-            if fs_resp.get("status") != "ok":
-                # FAIL CLOSED: if the filesystem changes did not commit, the
+            fs_result = self._fs_group_finalize(None, cgroup_id)
+            if fs_result.get("status") != "ok":
+                # FAIL CLOSED: if the filesystem finalization failed, the
                 # on-disk state is not the audited state. Releasing the frozen
                 # processes to run against it would be fail-open, so abort and
                 # contain: roll back the filesystem and the process layer.
                 return self._fail_closed(
                     cgroup_id, state,
-                    f"ShadowFS commit failed: {fs_resp.get('message')}",
+                    f"ShadowFS group finalize failed: {fs_result.get('message')}",
                     total_events=total_events,
                 )
-            log.info("  ShadowFS commit successful")
-
-            # Release frozen processes only when all upstream dependencies
-            # are committed; otherwise defer until a later upstream commit
-            # unblocks this cgroup (keeps IPC / stdout held).
-            released = False
-            if self._fs_can_release(cgroup_id):
-                released, buffered = self._release_proc(cgroup_id)
-                if not released:
-                    # Finalized in ShadowFS but ShadowProc query/resume or the
-                    # output read failed: nothing acked, buffer preserved. Keep
-                    # the cgroup fenced and parked so the retry loop finishes.
-                    buffered = ""
-                    with self._pending_lock:
-                        self._pending_release.add(cgroup_id)
-                    log.warning("  cgroup=%s finalized but process/output release "
-                                "failed -- keeping fenced, deferred for retry",
-                                cgroup_id)
-            else:
+            if fs_result.get("state") != "finalized":
                 with self._pending_lock:
                     self._pending_release.add(cgroup_id)
-                log.info("  Deferring release of cgroup=%s: upstream "
-                         "dependencies not fully committed yet", cgroup_id)
+                log.info("  Deferring release of cgroup=%s: not yet finalized "
+                         "(%s)", cgroup_id, fs_result.get("finalize_err", ""))
+                del self._observe_state[cgroup_id]
+                self._try_release_pending()
+                return {
+                    "status": "ok",
+                    "decision": "authorized_pending",
+                    "total_events": total_events,
+                    "total_violations": 0,
+                    "stdout": "",
+                    "released": False,
+                    "deferred": True,
+                }
+            log.info("  ShadowFS group %d finalized: %d members",
+                     fs_result["group_id"], len(fs_result["members"]))
+
+            # Release ALL group members + group ack (P0-7). The fine-grained
+            # proc_policy (P0-5) is forwarded to every member's
+            # continue_by_cgroup so ShadowProc enforces it instead of
+            # allow-all. _release_group_members also writes the durable
+            # release_intent and re-evaluates deferred downstream cgroups.
+            all_output, released = self._release_group_members(
+                fs_result["group_id"], fs_result["members"],
+                fs_result["graph_generation"], cgroup_id,
+                proc_policy=proc_policy,
+                journal_release_intent=True)
+            buffered = all_output.get(cgroup_id, "")
+            if not released:
+                buffered = ""
+                with self._pending_lock:
+                    self._pending_release.add(cgroup_id)
+                log.warning("  cgroup=%s finalized but process/output release "
+                            "failed -- keeping fenced, deferred for retry",
+                            cgroup_id)
 
             # Cleanup observation state
             del self._observe_state[cgroup_id]
-
-            # This commit may unblock previously-deferred downstream cgroups.
-            self._try_release_pending()
 
             return {
                 "status": "ok",
@@ -1608,99 +1983,6 @@ class ShadowOrchestrator:
                 "killed_pids": total_killed,
                 "resumed_pids": total_resumed,
             }
-
-    @staticmethod
-    def _normalize_fs_prefix(pattern: str) -> str:
-        """Normalize a policy path prefix to the canonical form used by both the
-        audit engine and the BPF enforcer.
-
-        The enforcer probes prefixes of the resolved absolute path at '/'
-        boundaries (see bpf/cri.bpf.h), so an installed key / audit pattern must
-        match those candidates byte-for-byte. We strip trailing slashes (a lone
-        "/" is left as the root marker) so "/tmp/" and "/tmp" both become
-        "/tmp". Empty patterns (match-any) are preserved. Relative patterns are
-        left unchanged; since canonical paths are absolute they simply will not
-        match (fail-closed).
-        """
-        if not pattern:
-            return ""
-        p = pattern
-        while len(p) > 1 and p.endswith("/"):
-            p = p[:-1]
-        return p
-
-    @staticmethod
-    def _convert_policy_to_audit_rules(allowed_ops: List[Dict]) -> List[Dict]:
-        """
-        Convert user-facing policy format to ShadowObserve audit rules.
-
-        Allowed ops format:
-            [{"event_type": "CREATE", "action": "allow", "path_pattern": "/tmp/"}]
-
-        Audit rules format:
-            [{"event_type": 2, "action": "allow", "path_pattern": "/tmp/"}]
-
-        Fails CLOSED: an unrecognized event_type raises ValueError instead of
-        defaulting to ANY (-1), so a typo can never widen a rule to match every
-        event. The only wildcards are the explicit "*"/"ANY".
-        """
-        EVENT_TYPE_MAP = {
-            "OPEN": 1, "CREATE": 2, "DELETE": 3, "RENAME": 4,
-            "CHMOD": 5, "CHOWN": 6, "MKDIR": 7, "RMDIR": 8,
-            "LINK": 9, "SYMLINK": 10, "TRUNCATE": 11,
-            "EXEC": 100, "FORK": 101, "EXIT": 102, "KILL": 103,
-            "SETUID": 106, "CAPSET": 107, "EXEC_PRIV": 108,
-            "*": -1, "ANY": -1,
-        }
-        rules = []
-        for op in allowed_ops:
-            event_str = op.get("event_type", "*").upper()
-            if event_str not in EVENT_TYPE_MAP:
-                raise ValueError(f"unknown policy event_type: {event_str}")
-            event_num = EVENT_TYPE_MAP[event_str]
-            rules.append({
-                "event_type": event_num,
-                "action": op.get("action", "allow"),
-                "path_pattern": ShadowOrchestrator._normalize_fs_prefix(
-                    op.get("path_pattern", "")),
-            })
-        return rules
-
-    @staticmethod
-    def _convert_policy_to_whitelist(allowed_ops: List[Dict],
-                                     cgroup_inode: int) -> List[Dict]:
-        """
-        Convert allowed_ops to whitelist format for eBPF enforcer.
-
-        Whitelist format:
-            [{"event_type": 2, "path_prefix": "/tmp/"}]
-
-        Fails CLOSED: an unrecognized event_type raises ValueError instead of
-        defaulting to the 0xFFFF wildcard, so a typo can never install a rule
-        that admits every event. The only wildcards are the explicit "*"/"ANY".
-        """
-        EVENT_TYPE_MAP = {
-            "OPEN": 1, "CREATE": 2, "DELETE": 3, "RENAME": 4,
-            "CHMOD": 5, "CHOWN": 6, "MKDIR": 7, "RMDIR": 8,
-            "LINK": 9, "SYMLINK": 10, "TRUNCATE": 11,
-            "EXEC": 100, "FORK": 101, "EXIT": 102, "KILL": 103,
-            "SETUID": 106, "CAPSET": 107, "EXEC_PRIV": 108,
-            "*": 0xFFFF, "ANY": 0xFFFF,
-        }
-        whitelist = []
-        for op in allowed_ops:
-            if op.get("action", "allow").lower() != "allow":
-                continue
-            event_str = op.get("event_type", "*").upper()
-            if event_str not in EVENT_TYPE_MAP:
-                raise ValueError(f"unknown policy event_type: {event_str}")
-            event_num = EVENT_TYPE_MAP[event_str]
-            whitelist.append({
-                "event_type": event_num,
-                "path_prefix": ShadowOrchestrator._normalize_fs_prefix(
-                    op.get("path_pattern", "")),
-            })
-        return whitelist
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1836,7 +2118,8 @@ class OrchestratorServer:
                 if not cgroup_inode:
                     return {"status": "error", "message": "cgroup_inode required"}
                 log_path = req.get("log_path", None)
-                return self.orch.start_observe(cgroup_id, int(cgroup_inode), log_path)
+                epoch_id = req.get("epoch_id", None)
+                return self.orch.start_observe(cgroup_id, int(cgroup_inode), log_path, epoch_id)
 
             elif action == "stop_observe":
                 if not cgroup_id:
@@ -1914,10 +2197,22 @@ def main():
                         help="Unix socket path to ShadowObserve (optional)")
     parser.add_argument("--listen", required=True,
                         help="Unix socket path for orchestrator API")
+    parser.add_argument("--shadowfs-mount", default=None,
+                        help="Path where ShadowFS FUSE is mounted (for domain isolation). "
+                             "If set, each candidate bash runs inside a mount namespace "
+                             "with read-only root and this mount preserved.")
+    parser.add_argument("--backing-dir", default=None,
+                        help="ShadowFS backing directory to block (staging/lower). "
+                             "May be a colon-separated list. Prevents direct access bypassing ShadowFS.")
     args = parser.parse_args()
 
+    # Parse colon-separated backing_dir list.
+    backing_dir = args.backing_dir.split(":") if args.backing_dir else None
+
     orch = ShadowOrchestrator(args.shadowfs_sock, args.shadowproc_sock,
-                              args.shadowobserve_sock)
+                              args.shadowobserve_sock,
+                              shadowfs_mount=args.shadowfs_mount,
+                              backing_dir=backing_dir)
     server = OrchestratorServer(orch, args.listen)
 
     def sig_handler(signum, frame):

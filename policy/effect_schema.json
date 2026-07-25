@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "description": "Unified effect event schema for Speculative Shadow. Replaces the two colliding event numbering schemes (ShadowObserve FS_EVENT_*/PROC_EVENT_* and ShadowProc EVENT_*) with a single (effect_class, operation) model.",
+
+  "effect_classes": {
+    "FILESYSTEM": {
+      "id": 1,
+      "operations": {
+        "READ": 1,
+        "WRITE": 2,
+        "CREATE": 3,
+        "DELETE": 4,
+        "RENAME": 5,
+        "LINK": 6,
+        "SYMLINK": 7,
+        "TRUNCATE": 8,
+        "CHMOD": 9,
+        "CHOWN": 10,
+        "MKDIR": 11,
+        "RMDIR": 12
+      }
+    },
+    "NETWORK": {
+      "id": 2,
+      "operations": {
+        "CONNECT": 1,
+        "BIND": 2,
+        "SEND": 3
+      }
+    },
+    "IPC": {
+      "id": 3,
+      "operations": {
+        "PIPE_WRITE": 1,
+        "UNIX_WRITE": 2,
+        "SYSV_SHM": 3,
+        "SYSV_MSG": 4,
+        "SYSV_SEM": 5,
+        "POSIX_MQ": 6,
+        "SHARED_MAPPING": 7
+      }
+    },
+    "SIGNAL": {
+      "id": 4,
+      "operations": {
+        "KILL": 1,
+        "PTRACE": 2
+      }
+    },
+    "PRIVILEGE": {
+      "id": 5,
+      "operations": {
+        "EXEC_PRIV": 1,
+        "SETUID": 2,
+        "SETGID": 3,
+        "SETGROUPS": 4,
+        "CAPSET": 5
+      }
+    },
+    "OUTPUT": {
+      "id": 6,
+      "operations": {
+        "WRITE_OUT": 1,
+        "SENDFILE": 2,
+        "SPLICE": 3,
+        "IO_URING": 4
+      }
+    },
+    "SYSTEM": {
+      "id": 7,
+      "operations": {
+        "MOUNT": 1,
+        "NAMESPACE": 2,
+        "KEYRING": 3,
+        "BPF": 4,
+        "PERF": 5,
+        "TTY_IOCTL": 6,
+        "PROCESS_VM": 7
+      }
+    }
+  },
+
+  "sources": {
+    "FS": 0,
+    "PROC": 1,
+    "NET": 2,
+    "IPC": 3,
+    "PRIVILEGE": 4,
+    "OUTPUT": 5,
+    "SYSTEM": 6
+  },
+
+  "legacy_event_map": {
+    "OPEN":      {"class": "FILESYSTEM", "op": "READ"},
+    "CREATE":    {"class": "FILESYSTEM", "op": "CREATE"},
+    "DELETE":    {"class": "FILESYSTEM", "op": "DELETE"},
+    "RENAME":    {"class": "FILESYSTEM", "op": "RENAME"},
+    "CHMOD":     {"class": "FILESYSTEM", "op": "CHMOD"},
+    "CHOWN":     {"class": "FILESYSTEM", "op": "CHOWN"},
+    "MKDIR":     {"class": "FILESYSTEM", "op": "MKDIR"},
+    "RMDIR":     {"class": "FILESYSTEM", "op": "RMDIR"},
+    "LINK":      {"class": "FILESYSTEM", "op": "LINK"},
+    "SYMLINK":   {"class": "FILESYSTEM", "op": "SYMLINK"},
+    "TRUNCATE":  {"class": "FILESYSTEM", "op": "TRUNCATE"},
+    "EXEC":      {"class": "PRIVILEGE", "op": "EXEC_PRIV"},
+    "EXEC_PRIV": {"class": "PRIVILEGE", "op": "EXEC_PRIV"},
+    "KILL":      {"class": "SIGNAL", "op": "KILL"},
+    "PTRACE":    {"class": "SIGNAL", "op": "PTRACE"},
+    "SETUID":    {"class": "PRIVILEGE", "op": "SETUID"},
+    "SETGID":    {"class": "PRIVILEGE", "op": "SETGID"},
+    "SETGROUPS": {"class": "PRIVILEGE", "op": "SETGROUPS"},
+    "CAPSET":    {"class": "PRIVILEGE", "op": "CAPSET"},
+    "CONNECT":   {"class": "NETWORK", "op": "CONNECT"},
+    "BIND":      {"class": "NETWORK", "op": "BIND"},
+    "SEND":      {"class": "NETWORK", "op": "SEND"},
+    "PIPE_WRITE": {"class": "IPC", "op": "PIPE_WRITE"},
+    "UNIX_WRITE": {"class": "IPC", "op": "UNIX_WRITE"},
+    "SHM":       {"class": "IPC", "op": "SYSV_SHM"},
+    "MSG":       {"class": "IPC", "op": "SYSV_MSG"},
+    "SEM":       {"class": "IPC", "op": "SYSV_SEM"},
+    "MQ":        {"class": "IPC", "op": "POSIX_MQ"},
+    "SHARED_MAPPING": {"class": "IPC", "op": "SHARED_MAPPING"},
+    "WRITE_OUT": {"class": "OUTPUT", "op": "WRITE_OUT"},
+    "SENDFILE":  {"class": "OUTPUT", "op": "SENDFILE"},
+    "SPLICE":    {"class": "OUTPUT", "op": "SPLICE"},
+    "IO_URING":  {"class": "OUTPUT", "op": "IO_URING"},
+    "MOUNT":     {"class": "SYSTEM", "op": "MOUNT"},
+    "UMOUNT":    {"class": "SYSTEM", "op": "MOUNT"},
+    "UNSHARE":   {"class": "SYSTEM", "op": "NAMESPACE"},
+    "SETNS":     {"class": "SYSTEM", "op": "NAMESPACE"},
+    "KEYCTL":    {"class": "SYSTEM", "op": "KEYRING"},
+    "ADD_KEY":   {"class": "SYSTEM", "op": "KEYRING"},
+    "REQUEST_KEY": {"class": "SYSTEM", "op": "KEYRING"},
+    "BPF":       {"class": "SYSTEM", "op": "BPF"},
+    "PERF_EVENT_OPEN": {"class": "SYSTEM", "op": "PERF"},
+    "TTY_IOCTL": {"class": "SYSTEM", "op": "TTY_IOCTL"},
+    "PROCESS_VM_READV": {"class": "SYSTEM", "op": "PROCESS_VM"},
+    "PROCESS_VM_WRITEV": {"class": "SYSTEM", "op": "PROCESS_VM"}
+  },
+
+  "legacy_unmapped": {
+    "FORK":  101,
+    "EXIT":  102,
+    "PRCTL": 104
+  }
+}

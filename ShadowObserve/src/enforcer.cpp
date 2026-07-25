@@ -11,6 +11,7 @@
 #include <cstring>
 #include <set>
 #include <stdexcept>
+#include <vector>
 
 namespace ghostbpf_observ {
 
@@ -93,9 +94,13 @@ bool Enforcer::add_rule(const WhitelistRule &rule) {
     key._pad = 0;
 
     if (!rule.path_prefix.empty()) {
-        size_t copy_len = rule.path_prefix.size();
-        if (copy_len >= MAX_PREFIX_LEN) copy_len = MAX_PREFIX_LEN - 1;
-        std::memcpy(key.path_prefix, rule.path_prefix.c_str(), copy_len);
+        if (rule.path_prefix.size() >= MAX_PREFIX_LEN) {
+            fprintf(stderr, "[Enforcer] add_rule rejected: path prefix too long "
+                    "(%zu >= %d)\n", rule.path_prefix.size(), MAX_PREFIX_LEN);
+            return false;
+        }
+        std::memcpy(key.path_prefix, rule.path_prefix.c_str(),
+                    rule.path_prefix.size());
     }
 
     uint8_t one = 1;
@@ -109,12 +114,45 @@ bool Enforcer::add_rule(const WhitelistRule &rule) {
     return true;
 }
 
-size_t Enforcer::add_rules(const std::vector<WhitelistRule> &rules) {
-    size_t count = 0;
+bool Enforcer::add_rules(const std::vector<WhitelistRule> &rules) {
+    std::vector<struct bpf_whitelist_key> installed;
+    installed.reserve(rules.size());
+
     for (const auto &rule : rules) {
-        if (add_rule(rule)) count++;
+        struct bpf_whitelist_key key = {};
+        key.cgroup_id = rule.cgroup_id;
+        key.event_type = rule.event_type;
+        key._pad = 0;
+
+        if (!rule.path_prefix.empty()) {
+            if (rule.path_prefix.size() >= MAX_PREFIX_LEN) {
+                fprintf(stderr, "[Enforcer] add_rules rejected: path prefix too "
+                        "long (%zu >= %d) -- rolling back %zu installed rules\n",
+                        rule.path_prefix.size(), MAX_PREFIX_LEN, installed.size());
+                for (const auto &k : installed)
+                    bpf_map__delete_elem(impl_->skel->maps.whitelist_rules,
+                                         &k, sizeof(k), 0);
+                return false;
+            }
+            std::memcpy(key.path_prefix, rule.path_prefix.c_str(),
+                        rule.path_prefix.size());
+        }
+
+        uint8_t one = 1;
+        int err = bpf_map__update_elem(impl_->skel->maps.whitelist_rules,
+                                       &key, sizeof(key),
+                                       &one, sizeof(one), BPF_ANY);
+        if (err) {
+            fprintf(stderr, "[Enforcer] add_rules failed on rule (err=%d) -- "
+                    "rolling back %zu installed rules\n", err, installed.size());
+            for (const auto &k : installed)
+                bpf_map__delete_elem(impl_->skel->maps.whitelist_rules,
+                                     &k, sizeof(k), 0);
+            return false;
+        }
+        installed.push_back(key);
     }
-    return count;
+    return true;
 }
 
 bool Enforcer::clear_rules(uint64_t cgroup_id) {

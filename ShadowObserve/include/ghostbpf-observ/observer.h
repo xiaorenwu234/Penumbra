@@ -22,6 +22,11 @@ struct IntegrityReport {
     uint64_t    dropped_events = 0;      ///< ring-buffer overflow losses (BPF)
     bool        write_error    = false;  ///< a log write/flush failed
     bool        drain_error    = false;  ///< could not drain the ring at stop
+    uint64_t    path_errors    = 0;      ///< events whose canonical path could
+                                         ///< not be built (resource unknown)
+    uint64_t    end_seq        = 0;      ///< final per-cgroup sequence number
+    uint64_t    total_events   = 0;      ///< count of events written to the log
+    std::string digest;                  ///< FNV-1a 64-bit hex of all event lines
     std::string reason;                  ///< summary when !complete
 };
 
@@ -49,9 +54,11 @@ public:
      * Start recording for a specific cgroup.
      * @param cgroup_id   cgroup inode number (from /sys/fs/cgroup/...)
      * @param output_path where to write the JSONL event log
+     * @param epoch_id    optional epoch identifier written to the log header
      * @return true on success
      */
-    bool start(uint64_t cgroup_id, const std::string &output_path);
+    bool start(uint64_t cgroup_id, const std::string &output_path,
+               const std::string &epoch_id = "");
 
     /**
      * Stop recording, drain any events still queued in the ring buffer to the

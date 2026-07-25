@@ -3,27 +3,47 @@ package backend
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 )
 
-// whiteoutPrefix marks a file or directory as deleted in the overlay view.
-// A whiteout is an empty regular file at <staging parent>/.shadow.wh.<basename>.
-const whiteoutPrefix = ".shadow.wh."
-
-// overlayKind enumerates the possible states of a path in the overlay view.
-type overlayKind int
+// Staging layout (v2, per-epoch MVCC):
+//
+//	staging/
+//	  epochs/<escaped-epoch-id>/files/<rel-path>   # private version files
+//	  epochs/<escaped-epoch-id>/files/<dir>/.shadow.wh.<name>
+//	                                               # debug whiteout markers
+//	  metadata/.shadow_state.json                  # v2 checkpoint
+//	  metadata/.shadow_wal                         # v2 WAL
+//
+// Visibility is decided by the in-memory version graph (visibleHead +
+// Resolve), NOT by probing the staging tree; the per-epoch files are only
+// version payload carriers. Whiteout markers are written for debuggability
+// but are never consulted for visibility.
 
 const (
-	kindNotPresent overlayKind = iota // overlay has neither a copy nor a whiteout
-	kindFile                          // overlay holds a regular file
-	kindDir                           // overlay holds a directory
-	kindSymlink                       // overlay holds a symlink
-	kindWhiteout                      // overlay parent has a whiteout for this name
+	epochsDirName   = "epochs"
+	metadataDirName = "metadata"
+	epochFilesDir   = "files"
+	// whiteoutPrefix names the debug marker recorded next to a whiteout
+	// version's would-be stage path.
+	whiteoutPrefix = ".shadow.wh."
 )
+
+// metadataDir returns the staging metadata directory (checkpoint + WAL).
+func metadataDir(stagingDir string) string {
+	return filepath.Join(stagingDir, metadataDirName)
+}
+
+// epochDirFor maps an epoch to its private staging directory. Epoch IDs may
+// contain path separators (e.g. "implicit:/sys/fs/cgroup/..."), so the ID is
+// path-escaped to a single component.
+func epochDirFor(stagingDir string, epochID EpochID) string {
+	return filepath.Join(stagingDir, epochsDirName, url.PathEscape(string(epochID)))
+}
 
 // relFromTracked returns origPath relative to trackedDir. Returns "" for the
 // root itself. The result uses filepath.Separator and is "Clean".
@@ -45,19 +65,20 @@ func relFromTracked(trackedDir, origPath string) (string, error) {
 	return rel, nil
 }
 
-// overlayPathFor maps an orig path to its staging (overlay) copy path.
-// stagingDir IS the overlay root — no intermediate subdirectory.
-func overlayPathFor(stagingDir, trackedDir, origPath string) (string, error) {
+// stagePathFor maps an orig path to the given epoch's private version file.
+func stagePathFor(stagingDir, trackedDir string, epochID EpochID, origPath string) (string, error) {
 	rel, err := relFromTracked(trackedDir, origPath)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(stagingDir, rel), nil
+	if rel == "" {
+		return "", fmt.Errorf("cannot version the tracked root itself")
+	}
+	return filepath.Join(epochDirFor(stagingDir, epochID), epochFilesDir, rel), nil
 }
 
-// whiteoutPathFor maps an orig path to the whiteout marker path that would
-// hide it in the overlay view.
-func whiteoutPathFor(stagingDir, trackedDir, origPath string) (string, error) {
+// whiteoutMarkerFor maps an orig path to the epoch's debug whiteout marker.
+func whiteoutMarkerFor(stagingDir, trackedDir string, epochID EpochID, origPath string) (string, error) {
 	rel, err := relFromTracked(trackedDir, origPath)
 	if err != nil {
 		return "", err
@@ -66,276 +87,179 @@ func whiteoutPathFor(stagingDir, trackedDir, origPath string) (string, error) {
 		return "", fmt.Errorf("cannot whiteout the tracked root itself")
 	}
 	dir, base := filepath.Split(rel)
-	return filepath.Join(stagingDir, dir, whiteoutPrefix+base), nil
+	return filepath.Join(epochDirFor(stagingDir, epochID), epochFilesDir, dir, whiteoutPrefix+base), nil
 }
 
-// hasWhiteout reports whether the given orig path is hidden by a whiteout.
-func hasWhiteout(stagingDir, trackedDir, origPath string) bool {
-	wp, err := whiteoutPathFor(stagingDir, trackedDir, origPath)
-	if err != nil {
-		return false
-	}
-	_, err = os.Lstat(wp)
-	return err == nil
+// ensureParentDir makes sure the parent directory of path exists.
+func ensureParentDir(path string) error {
+	return os.MkdirAll(filepath.Dir(path), 0o755)
 }
 
-// writeWhiteout creates an empty whiteout marker for origPath. The parent
-// overlay directory is created on demand. Idempotent.
-func writeWhiteout(stagingDir, trackedDir, origPath string) error {
-	wp, err := whiteoutPathFor(stagingDir, trackedDir, origPath)
-	if err != nil {
-		return err
+// writeWhiteoutMarker creates the epoch's debug whiteout marker. Idempotent;
+// best-effort callers may ignore the error.
+func writeWhiteoutMarker(markerPath string) error {
+	if err := ensureParentDir(markerPath); err != nil {
+		return fmt.Errorf("whiteout marker mkdirs: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(wp), 0o755); err != nil {
-		return fmt.Errorf("whiteout mkdirs: %w", err)
-	}
-	f, err := os.OpenFile(wp, os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(markerPath, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return fmt.Errorf("whiteout create %q: %w", wp, err)
+		return fmt.Errorf("whiteout marker create %q: %w", markerPath, err)
 	}
 	return f.Close()
 }
 
-// removeWhiteout removes the whiteout marker for origPath, if present.
-// Returns (true, nil) if it removed an existing marker, (false, nil) if
-// none existed, (false, err) on unexpected errors.
-func removeWhiteout(stagingDir, trackedDir, origPath string) (bool, error) {
-	wp, err := whiteoutPathFor(stagingDir, trackedDir, origPath)
-	if err != nil {
-		return false, err
-	}
-	if err := os.Remove(wp); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-// ensureOverlayParent makes sure the parent directory of overlayPath exists.
-func ensureOverlayParent(overlayPath string) error {
-	return os.MkdirAll(filepath.Dir(overlayPath), 0o755)
-}
-
-// copyUpFile copies the contents of orig to overlay, creating intermediate
-// directories as needed. The destination's mode and timestamps mirror the
-// source. Symlinks are preserved verbatim. Special files (device / pipe /
-// socket) are rejected with syscall.EOPNOTSUPP because io.Copy on them
-// would block indefinitely or produce a meaningless overlay copy.
-func copyUpFile(orig, overlay string) error {
+// copyUpFile copies the contents of src (a backing file or another version's
+// stage file) to dst, creating intermediate directories as needed. The
+// destination's mode and timestamps mirror the source. Symlinks are preserved
+// verbatim. Special files (device / pipe / socket) are rejected with
+// syscall.EOPNOTSUPP because io.Copy on them would block indefinitely or
+// produce a meaningless copy.
+//
+// ATOMIC: the payload is written to a temp name and rename(2)d onto dst, so
+// dst either does not exist or is a COMPLETE copy. WAL-replay redo relies on
+// this: "stage file exists" means "copy-up finished", and user writes made
+// after the copy-up are never clobbered by a re-copy.
+func copyUpFile(src, dst string) error {
 	// Use Lstat to detect symlinks without following them.
-	st, err := os.Lstat(orig)
+	st, err := os.Lstat(src)
 	if err != nil {
 		return err
 	}
-	if err := ensureOverlayParent(overlay); err != nil {
+	if err := ensureParentDir(dst); err != nil {
 		return err
 	}
 	mode := st.Mode()
 	// Preserve symlinks instead of following them.
 	if mode&os.ModeSymlink != 0 {
-		target, err := os.Readlink(orig)
+		target, err := os.Readlink(src)
 		if err != nil {
 			return err
 		}
-		if err := os.Symlink(target, overlay); err != nil {
+		// Replace any stale dst (idempotent redo may re-run the copy).
+		os.Remove(dst)
+		if err := os.Symlink(target, dst); err != nil {
 			return err
 		}
 		// Best-effort ownership preservation on the symlink itself.
 		if st, ok := st.Sys().(*syscall.Stat_t); ok {
-			_ = syscall.Lchown(overlay, int(st.Uid), int(st.Gid))
+			_ = syscall.Lchown(dst, int(st.Uid), int(st.Gid))
 		}
 		return nil
 	}
 	// Reject anything that is not a regular file. Devices, pipes, sockets,
 	// etc. cannot be meaningfully copied via read/write and would either
-	// block io.Copy forever or silently produce an empty overlay copy.
+	// block io.Copy forever or silently produce an empty copy.
 	if !mode.IsRegular() {
 		return fmt.Errorf("copy-up unsupported file type for %q (mode %v): %w",
-			orig, mode, syscall.EOPNOTSUPP)
+			src, mode, syscall.EOPNOTSUPP)
 	}
-	src, err := os.Open(orig)
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer src.Close()
-	dst, err := os.OpenFile(overlay, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm())
+	defer in.Close()
+	tmp := dst + ".shadow-cptmp"
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm())
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(dst, src); err != nil {
-		dst.Close()
-		os.Remove(overlay)
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
 		return err
 	}
-	// fsync BEFORE close so the data is durable on disk. Without this a
-	// crash after WAL fsync but before the OS flushes the page cache can
-	// leave the overlay file empty or truncated, and redoEntry would skip
-	// the copy-up because the file already exists.
-	if err := dst.Sync(); err != nil {
-		dst.Close()
-		return fmt.Errorf("fsync overlay %q: %w", overlay, err)
+	// fsync BEFORE the rename so the payload is durable when the atomic
+	// rename publishes it. A crash mid-copy leaves only the temp file, which
+	// the redo path ignores (dst absent -> re-copy).
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("fsync stage copy %q: %w", tmp, err)
 	}
-	if err := dst.Close(); err != nil {
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	// Preserve ownership so promote (rename overlay→orig) does not silently
-	// change the file's uid/gid to the FUSE process's identity.
+	// Preserve ownership so promotion does not silently change the file's
+	// uid/gid to the FUSE process's identity.
 	if st, ok := st.Sys().(*syscall.Stat_t); ok {
-		if err := syscall.Lchown(overlay, int(st.Uid), int(st.Gid)); err != nil && err != syscall.EPERM {
-			return fmt.Errorf("lchown overlay %q: %w", overlay, err)
+		if err := syscall.Lchown(tmp, int(st.Uid), int(st.Gid)); err != nil && err != syscall.EPERM {
+			os.Remove(tmp)
+			return fmt.Errorf("lchown stage copy %q: %w", tmp, err)
 		}
 	}
-	// Preserve atime/mtime so that a subsequent commit-promote (which
-	// rename(2)s the overlay copy back over orig) does not silently bump
-	// the user-visible modification time. We set timestamps AFTER close
-	// so they reflect the final post-copy state, not the page-cache flush.
-	if err := os.Chtimes(overlay, atimeOf(st), st.ModTime()); err != nil {
-		// Non-fatal: log via returned error so caller can decide. We do
-		// not delete the overlay since the data copy itself succeeded;
-		// callers that strictly require timestamp fidelity will surface
-		// this error.
-		return fmt.Errorf("chtimes overlay %q: %w", overlay, err)
+	// Preserve atime/mtime so that a subsequent promotion does not silently
+	// bump the user-visible modification time.
+	if err := os.Chtimes(tmp, atimeOf(st), st.ModTime()); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("chtimes stage copy %q: %w", tmp, err)
 	}
 	// Copy extended attributes (SELinux labels, file caps, ACLs, user.*).
-	// Without this, promote rename'd the overlay over orig and silently
-	// stripped every xattr the orig file carried.
-	if err := copyXattrs(orig, overlay); err != nil {
-		return fmt.Errorf("copy xattrs %q -> %q: %w", orig, overlay, err)
+	// Without this, promotion would install a file stripped of every xattr
+	// the source carried.
+	if err := copyXattrs(src, tmp); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("copy xattrs %q -> %q: %w", src, tmp, err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("publish stage copy %q: %w", dst, err)
 	}
 	return nil
 }
 
-// lookupOverlay returns the overlay state for origPath: whether it has a
-// whiteout, an overlay copy (file/dir/symlink), or nothing.
-func lookupOverlay(stagingDir, trackedDir, origPath string) (overlayKind, error) {
-	if hasWhiteout(stagingDir, trackedDir, origPath) {
-		return kindWhiteout, nil
-	}
-	op, err := overlayPathFor(stagingDir, trackedDir, origPath)
+// copyUpDir recursively copies the directory tree rooted at src into dst.
+// Symlinks are recreated; regular files are copied; directories preserve
+// their mode. Used to materialize a rename of a directory into the acting
+// epoch's stage tree.
+func copyUpDir(src, dst string) error {
+	stat, err := os.Lstat(src)
 	if err != nil {
-		return kindNotPresent, err
+		return err
 	}
-	st, err := os.Lstat(op)
+	if !stat.IsDir() {
+		return fmt.Errorf("copyUpDir: %q is not a directory", src)
+	}
+	if err := os.MkdirAll(dst, stat.Mode().Perm()); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return kindNotPresent, nil
+		return err
+	}
+	for _, e := range entries {
+		s := filepath.Join(src, e.Name())
+		d := filepath.Join(dst, e.Name())
+		info, err := e.Info()
+		if err != nil {
+			return err
 		}
-		return kindNotPresent, err
+		switch {
+		case info.IsDir():
+			if err := copyUpDir(s, d); err != nil {
+				return err
+			}
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(s)
+			if err != nil {
+				return err
+			}
+			os.Remove(d)
+			if err := os.Symlink(target, d); err != nil {
+				return err
+			}
+		default:
+			if err := copyUpFile(s, d); err != nil {
+				return err
+			}
+		}
 	}
-	mode := st.Mode()
-	switch {
-	case mode.IsDir():
-		return kindDir, nil
-	case mode&os.ModeSymlink != 0:
-		return kindSymlink, nil
-	default:
-		return kindFile, nil
-	}
+	return nil
 }
 
-// MergedDirEntry describes a single entry in the merged overlay+orig view.
+// MergedDirEntry describes a single entry in the merged version+backing view.
 type MergedDirEntry struct {
 	Name string
 	Mode os.FileMode
 	Ino  uint64
-}
-
-// MergeReaddir lists entries in origDir overlaid with overlayDir. Whiteouts
-// hide entries from origDir. Overlay entries replace orig entries with the
-// same name. Whiteout marker files themselves are not returned.
-func MergeReaddir(origDir, overlayDir string) ([]MergedDirEntry, error) {
-	whiteouts := make(map[string]struct{})
-	overlayEntries := make(map[string]MergedDirEntry)
-
-	if oents, err := os.ReadDir(overlayDir); err == nil {
-		for _, e := range oents {
-			name := e.Name()
-			// Skip internal state file so it never leaks into the merged view.
-			if name == stateFileName || name == stateFileName+".tmp" || name == walFileName {
-				continue
-			}
-			if strings.HasPrefix(name, whiteoutPrefix) {
-				whiteouts[strings.TrimPrefix(name, whiteoutPrefix)] = struct{}{}
-				continue
-			}
-			info, ierr := e.Info()
-			if ierr != nil {
-				continue
-			}
-			overlayEntries[name] = MergedDirEntry{
-				Name: name,
-				Mode: info.Mode(),
-				Ino:  inodeOf(info),
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-
-	result := make([]MergedDirEntry, 0, len(overlayEntries))
-	if oents, err := os.ReadDir(origDir); err == nil {
-		for _, e := range oents {
-			name := e.Name()
-			if _, hidden := whiteouts[name]; hidden {
-				continue
-			}
-			if _, replaced := overlayEntries[name]; replaced {
-				continue
-			}
-			info, ierr := e.Info()
-			if ierr != nil {
-				continue
-			}
-			result = append(result, MergedDirEntry{
-				Name: name,
-				Mode: info.Mode(),
-				Ino:  inodeOf(info),
-			})
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-
-	for _, e := range overlayEntries {
-		if _, hidden := whiteouts[e.Name]; hidden {
-			continue
-		}
-		result = append(result, e)
-	}
-	// Sort by name so the merged result has a deterministic, stable order
-	// (os.ReadDir sorts orig entries, but the overlay map iteration is
-	// unordered).
-	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
-	return result, nil
-}
-
-// removeOverlayState deletes any overlay artefacts (file, dir, whiteout)
-// associated with origPath. Best-effort: missing files are ignored.
-//
-// When removeWh is false, the whiteout marker is preserved. This is used
-// during promote to avoid deleting a whiteout that belongs to another
-// agent's active UnlinkEntry — that entry's own Promote() will clean up
-// the whiteout when it runs.
-func removeOverlayState(stagingDir, trackedDir, origPath string, removeWh bool) error {
-	if op, err := overlayPathFor(stagingDir, trackedDir, origPath); err == nil {
-		if st, statErr := os.Lstat(op); statErr == nil {
-			if st.IsDir() {
-				if err := os.RemoveAll(op); err != nil {
-					return err
-				}
-			} else {
-				if err := os.Remove(op); err != nil && !os.IsNotExist(err) {
-					return err
-				}
-			}
-		}
-	}
-	if removeWh {
-		if _, err := removeWhiteout(stagingDir, trackedDir, origPath); err != nil {
-			return err
-		}
-	}
-	return nil
 }

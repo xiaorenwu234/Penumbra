@@ -33,6 +33,10 @@ ShadowFS/tests/__pycache__/
 ShadowObserve/build/
 ShadowObserve/third_party/
 
+# ===== Build cache =====
+tmp/
+.gotmp/
+
 # ===== OS =====
 .DS_Store
 Thumbs.db

@@ -3,7 +3,6 @@ package backend
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,12 +15,9 @@ import (
 	"time"
 )
 
-// AgentLifecycle is the explicit finalization state of an agent's session.
-// It replaces the old single `Committed bool` so callers can distinguish
-// "policy approved but not yet safe to release" from "file state durably
-// promoted and safe to release". External side effects (fs promotion,
-// ShadowProc release, network un-fencing, stdout/tool output) may ONLY be
-// released once the agent reaches Finalized.
+// AgentLifecycle is the explicit finalization state of an epoch. External
+// side effects (fs promotion, ShadowProc release, network un-fencing,
+// stdout/tool output) may ONLY be released once the epoch reaches Finalized.
 type AgentLifecycle int32
 
 const (
@@ -31,11 +27,11 @@ const (
 	// AuthorizedPending: policy approved, but promotions and/or upstream
 	// dependencies are not all finalized yet. STILL fully fenced.
 	AuthorizedPending
-	// Finalizing: promotion has started for this agent. Only completion or
+	// Finalizing: promotion has started for this epoch. Only completion or
 	// retry is allowed from here; a normal rollback must NOT run.
 	Finalizing
 	// Finalized: every promotion succeeded and every upstream is Finalized.
-	// This is the ONLY state in which CanRelease returns true. The agent is
+	// This is the ONLY state in which CanRelease returns true. The epoch is
 	// retained (not deleted) until the orchestrator calls AckRelease.
 	Finalized
 )
@@ -55,39 +51,6 @@ func (s AgentLifecycle) String() string {
 	}
 }
 
-// AgentState holds the undo log and dirty file set for a single agent.
-type AgentState struct {
-	CgroupID   string
-	UndoLog    []LogEntry
-	DirtyFiles map[string]struct{} // logical orig paths touched by this agent
-	// State is the explicit lifecycle position (see AgentLifecycle). It
-	// supersedes the old `Committed bool`: `approved()` (>= AuthorizedPending)
-	// is the predicate the promotion/finalization logic uses where it used to
-	// read `Committed`. An upstream rollback still cascades and undoes this
-	// agent's changes UNLESS it has reached Finalizing/Finalized (durable).
-	State AgentLifecycle
-	// FinalizeErr records the most recent promotion failure (path/op/error)
-	// so retry_finalize / get_lifecycle can report why an agent is stuck in
-	// Finalizing instead of Finalized. Cleared on a fully successful finalize.
-	FinalizeErr string
-	// EpochOpen indicates a speculative epoch is currently active for this
-	// agent (see BeginEpoch/CommitEpoch/RollbackEpoch). While open, every
-	// undo entry whose Seq() > EpochStartSeq belongs to the epoch and can be
-	// undone in isolation by RollbackEpoch, WITHOUT touching pre-epoch state
-	// or cascading to other agents.
-	EpochOpen bool
-	// EpochStartSeq is the control-op seq allocated by BeginEpoch. Undo
-	// entries recorded after the epoch began carry a strictly greater seq,
-	// which is how RollbackEpoch distinguishes epoch work from prior state.
-	EpochStartSeq int64
-}
-
-// approved reports whether the agent's policy has been approved, i.e. it has
-// reached AuthorizedPending or beyond. This is the exact predicate the old
-// code expressed as `agent.Committed`, so promotion/finalization/release logic
-// reads it in place of the removed bool.
-func (a *AgentState) approved() bool { return a.State >= AuthorizedPending }
-
 // WAL tuning parameters.
 const (
 	checkpointInterval     = 5 * time.Second // full snapshot interval
@@ -96,7 +59,7 @@ const (
 
 // walPending is one submission unit handed off to the WAL worker. A single
 // submission may carry multiple records that should be fsync'd atomically
-// (e.g. a rename produces two undo entries). The worker writes accumulated
+// (e.g. a rename produces two version records). The worker writes accumulated
 // pending units in a single appendWAL+fsync and acks every waiter with the
 // shared error result.
 type walPending struct {
@@ -104,48 +67,57 @@ type walPending struct {
 	done chan error
 }
 
-// Backend tracks overlay operations per-agent and supports rollback with
-// contamination detection via a directed dependency graph. See the package
-// comment in operations.go for high-level semantics.
+// finalizeGroup tracks a group of epochs (an SCC) between BeginFinalize and
+// AckReleaseGroup, so the orchestrator can drive the whole group atomically.
+type finalizeGroup struct {
+	id          int
+	members     []EpochID
+	graphGen    int64
+	state       string // "pending", "finalized", "failed"
+	finalizeErr string
+}
+
+// Backend tracks per-epoch MVCC file versions and supports rollback with
+// contamination detection via a directed dependency graph whose nodes are
+// EPOCHS (not cgroups). See version.go for the data model.
 //
-// Concurrency model (group-commit WAL):
+// Concurrency model (group-commit WAL, unchanged from the pre-MVCC design):
 //
 //   - opRW: every mutating operation acquires opRW.RLock() for its full
 //     duration. Checkpoint takes opRW.Lock() to wait until all in-flight
 //     operations have completed AND all their WAL records have been
 //     fsync'd, guaranteeing snapshot consistency.
-//   - mu: protects in-memory state (agents, fileDirty, dependency graph,
-//     seq counter, walCount, walPending, applyCond state). Held briefly
-//     during compute and apply phases.
-//   - WAL fsync runs in a dedicated walWorker goroutine. Multiple callers
-//     submit records concurrently and each waits on its own done channel.
-//     The worker coalesces all submissions accumulated between fsyncs into
-//     a single appendWAL+fsync, achieving group commit.
+//   - mu: protects in-memory state (epochs, version graph, dependency
+//     graph, seq counter, walCount, walPending, applyCond state).
+//   - WAL fsync runs in a dedicated walWorker goroutine (group commit).
 //   - applyCond enforces seq-order on the post-fsync apply phase so that
-//     dependency-graph edges and overlay mutations observe the same
-//     ordering as the WAL on disk.
+//     the version graph observes the same ordering as the WAL on disk.
 type Backend struct {
 	stagingDir string
 	trackedDir string
-	agents     map[string]*AgentState
-	dependents map[string]map[string]struct{}
-	dependsOn  map[string]map[string]struct{}
-	fileDirty  map[string]map[string]struct{} // orig path -> set of agents that have dirtied it
-	// publishDirs accumulates the orig parent directories of paths promoted
+
+	// MVCC state (protected by mu).
+	epochs              map[EpochID]*EpochState
+	activeEpochByCgroup map[string]EpochID
+	versionsByObject    map[ObjectID][]VersionID // seq-ascending version chain
+	versionByID         map[VersionID]*FileVersion
+	visibleHead         map[ObjectID]VersionID
+	dependents          map[EpochID]map[EpochID]struct{}
+	dependsOn           map[EpochID]map[EpochID]struct{}
+	nextVersion         uint64 // next VersionID to allocate
+	implicitCtr         int64  // uniquifier for successor implicit epochs
+
+	// publishDirs accumulates the orig parent directories of objects promoted
 	// during the current settle. They are fsync'd as ONE group barrier before
-	// any agent in the group is marked Finalized, so the whole commit group's
-	// externally-visible publish is crash-atomic (all-or-nothing after
-	// recovery). Protected by mu.
+	// any epoch in the group is marked Finalized, so the whole commit group's
+	// externally-visible publish is crash-atomic. Protected by mu.
 	publishDirs map[string]struct{}
 	seq         int64
 	mu          sync.Mutex
 	persistPath string
 	walPath     string
 
-	// opRW gates concurrent mutating operations against checkpoint. All
-	// Record*/Rollback*/Commit operations hold RLock for their full
-	// duration; checkpoint takes the writer lock so it observes a
-	// quiescent state before snapshotting+truncating the WAL.
+	// opRW gates concurrent mutating operations against checkpoint.
 	opRW sync.RWMutex
 
 	walCount int64 // total WAL records since last checkpoint (protected by mu)
@@ -159,7 +131,7 @@ type Backend struct {
 	// Seq-ordered apply coordination.
 	nextApply  int64          // next seq allowed to enter the apply phase (protected by mu)
 	applyCond  *sync.Cond     // signalled when nextApply advances
-	abortedSeq map[int64]bool // seqs that failed before apply (must be skipped) (protected by mu)
+	abortedSeq map[int64]bool // seqs that failed before apply (protected by mu)
 
 	// Signalling
 	chkptTrigger chan struct{} // poked when WAL exceeds checkpointWALThreshold
@@ -167,30 +139,35 @@ type Backend struct {
 	chkptDone    chan struct{} // closed when checkpointLoop exits
 	closeOnce    sync.Once
 
-	// Open FD tracking: cgroupID → list of tracked fds.
-	// When a cascade rollback cleans up an agent, all its tracked fds are
-	// force-closed so the agent's process gets EBADF on the next I/O
-	// instead of silently reading stale overlay data.
-	openFDs   map[string][]*TrackedFD
+	// Open FD tracking: epochID → list of tracked fds. When a cascade
+	// rollback cleans up an epoch, all its tracked fds are force-closed so
+	// the process gets EBADF on the next I/O instead of silently reading a
+	// stale (now rolled-back) version.
+	openFDs   map[EpochID][]*TrackedFD
 	openFDsMu sync.Mutex
 
 	// invalidateFn, when set, is invoked after a rollback with the list of
-	// tracked (orig) file paths whose overlay state was removed. Rollback
-	// mutates overlay files out-of-band (via the control socket, not through
-	// the FUSE data path), so the kernel's dentry cache keeps serving stale
-	// positive entries for paths whose overlay copy was just deleted (e.g. the
-	// destination of a rolled-back rename). The FUSE layer registers this to
-	// drop those cache entries. Set once at startup; read without locking.
+	// tracked (orig) logical paths whose speculative versions were removed,
+	// so the FUSE layer can drop stale kernel dentry cache entries. Set once
+	// at startup; read without locking.
 	invalidateFn func(paths []string)
 
 	// mountDir is the FUSE mountpoint (set once at startup via SetMountDir).
-	// Commit-time mmap quiescence matches an agent's /proc/<pid>/maps entries
-	// (which show the mount path) to the overlay copy. Empty disables quiescence.
+	// Commit-time mmap quiescence matches an epoch's /proc/<pid>/maps entries
+	// (which show the mount path) to its stage copies. Empty disables it.
 	mountDir string
+
+	// Group-level finalization state (Phase 3).
+	// graphGen increments on every dependency-graph mutation (epoch add,
+	// edge add, epoch cleanup, ack-release) so prepare_resolution ->
+	// begin_finalize can detect TOCTOU changes.
+	graphGen     int64
+	activeGroups map[int]*finalizeGroup
+	nextGroupID  int
 }
 
 // SetMountDir records the FUSE mountpoint so commit-time writable-MAP_SHARED
-// quiescence can translate an agent's /proc/<pid>/maps paths to overlay copies.
+// quiescence can translate a process's /proc/<pid>/maps paths to stage copies.
 // Set once at startup, before serving.
 func (b *Backend) SetMountDir(dir string) {
 	if dir != "" {
@@ -199,67 +176,76 @@ func (b *Backend) SetMountDir(dir string) {
 }
 
 // SetInvalidateCallback registers a function invoked after a rollback with the
-// tracked file paths whose overlay state was removed, so the FUSE layer can
+// tracked logical paths whose versions were removed, so the FUSE layer can
 // invalidate stale kernel dentry cache entries. Must be set before serving.
 func (b *Backend) SetInvalidateCallback(fn func(paths []string)) {
 	b.invalidateFn = fn
 }
 
-// NewBackend creates a Backend. stagingDir is the overlay root (write side)
-// and also holds the persisted state file. trackedDir is the original
-// filesystem root being shadowed.
+// NewBackend creates a Backend. stagingDir is the version-store root (write
+// side) and also holds the persisted state under metadata/. trackedDir is the
+// original filesystem root being shadowed.
+//
+// FAIL CLOSED on legacy state: a v1 checkpoint/WAL (pre-MVCC) or an
+// unreadable v2 snapshot aborts startup instead of silently starting fresh.
 func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
-	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create staging dir %q: %w", stagingDir, err)
+	if err := detectLegacyState(stagingDir); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(metadataDir(stagingDir), 0o755); err != nil {
+		return nil, fmt.Errorf("create staging metadata dir: %w", err)
 	}
 	b := &Backend{
-		stagingDir:   stagingDir,
-		trackedDir:   trackedDir,
-		agents:       make(map[string]*AgentState),
-		dependents:   make(map[string]map[string]struct{}),
-		dependsOn:    make(map[string]map[string]struct{}),
-		fileDirty:    make(map[string]map[string]struct{}),
-		publishDirs:  make(map[string]struct{}),
-		persistPath:  persistFilePath(stagingDir),
-		walPath:      walFilePath(stagingDir),
-		walNotify:    make(chan struct{}, 1),
-		walStop:      make(chan struct{}),
-		walDone:      make(chan struct{}),
-		abortedSeq:   make(map[int64]bool),
-		openFDs:      make(map[string][]*TrackedFD),
-		chkptTrigger: make(chan struct{}, 1),
-		stopCh:       make(chan struct{}),
-		chkptDone:    make(chan struct{}),
+		stagingDir:          stagingDir,
+		trackedDir:          filepath.Clean(trackedDir),
+		epochs:              make(map[EpochID]*EpochState),
+		activeEpochByCgroup: make(map[string]EpochID),
+		versionsByObject:    make(map[ObjectID][]VersionID),
+		versionByID:         make(map[VersionID]*FileVersion),
+		visibleHead:         make(map[ObjectID]VersionID),
+		dependents:          make(map[EpochID]map[EpochID]struct{}),
+		dependsOn:           make(map[EpochID]map[EpochID]struct{}),
+		nextVersion:         1,
+		publishDirs:         make(map[string]struct{}),
+		persistPath:         persistFilePath(stagingDir),
+		walPath:             walFilePath(stagingDir),
+		walNotify:           make(chan struct{}, 1),
+		walStop:             make(chan struct{}),
+		walDone:             make(chan struct{}),
+		abortedSeq:          make(map[int64]bool),
+		openFDs:             make(map[EpochID][]*TrackedFD),
+		chkptTrigger:        make(chan struct{}, 1),
+		stopCh:              make(chan struct{}),
+		chkptDone:           make(chan struct{}),
+		activeGroups:        make(map[int]*finalizeGroup),
 	}
 	b.applyCond = sync.NewCond(&b.mu)
 
-	// --- Crash recovery ---
+	// --- Crash recovery (fail closed on unreadable state) ---
 	if _, err := os.Stat(b.persistPath); err == nil {
 		state, loadErr := loadFromDisk(b.persistPath)
 		if loadErr != nil {
-			log.Printf("[backend] WARNING: failed to load persisted state: %v (starting fresh)", loadErr)
-		} else {
-			b.loadState(state)
+			return nil, fmt.Errorf("load persisted state: %w", loadErr)
+		}
+		if err := b.loadState(state); err != nil {
+			return nil, err
 		}
 	}
-	// Replay WAL records written after last checkpoint.
-	if records, err := loadWAL(b.walPath); err != nil {
-		log.Printf("[backend] WARNING: failed to load WAL: %v", err)
-	} else if len(records) > 0 {
+	// Replay WAL records written after the last checkpoint.
+	records, err := loadWAL(b.walPath)
+	if err != nil {
+		return nil, fmt.Errorf("load WAL: %w", err)
+	}
+	if len(records) > 0 {
 		b.replayWAL(records)
 	}
-	// NOTE: agents are NOT auto-authorized on recovery. An epoch is authorized
-	// only if a durable "commit" (authorize) WAL record was replayed above,
-	// which sets AuthorizedPending via commitInternal. A read-only epoch that
-	// was never committed stays Speculative: it may still have process /
-	// network / output effects that policy must approve before it finalizes
-	// (see the invariant enforced in tryPromoteAll / tryFinalizeSCCs).
-	// Re-derive Finalized states after recovery. Every Promote() is
+	// NOTE: epochs are NOT auto-authorized on recovery. An epoch is
+	// authorized only if a durable "commit" WAL record was replayed above.
+	// Re-derive Finalized states after recovery: every promoteVersion is
 	// idempotent, so this is safe to run and reconstructs the durable
-	// finalized set from the authorized agents. Crucially, an agent is only
-	// (re-)marked Finalized if its promotions ACTUALLY succeed now, so a
-	// crash mid-promotion recovers as AuthorizedPending/Finalizing (fenced,
-	// retryable) — pending is never mistaken for finalized.
+	// finalized set from the authorized epochs. A crash mid-promotion
+	// recovers as AuthorizedPending/Finalizing (fenced, retryable) — pending
+	// is never mistaken for finalized.
 	_ = b.tryPromoteAll()
 	b.nextApply = b.seq + 1
 
@@ -272,49 +258,36 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 // Must be called before the backend is shared (no locking needed).
 //
 // Records with SeqNum <= snapshotSeq (the seq captured by the most recent
-// checkpoint already loaded into memory) are skipped: they have been
-// folded into the snapshot. Control records (commit/rollback) are
-// dispatched to the corresponding *Internal helper so the in-memory
-// state matches what the original caller observed before the crash.
-//
-// For mutation records the on-disk overlay state is also REDONE via
-// redoEntry. This is required because of the strict write-ahead order:
-// the WAL record is durable BEFORE the overlay-side mutation is applied,
-// so a crash after WAL fsync but before mutation completion can leave
-// the disk inconsistent. redoEntry uses idempotent primitives so it is
-// safe to re-run even when the mutation already finished.
+// checkpoint already loaded into memory) are skipped. For mutation records
+// the on-disk stage state is also REDONE via materializeVersionLocked (run
+// BEFORE the version is inserted into the chain, exactly like live apply, so
+// the copy-up source resolution is identical).
 func (b *Backend) replayWAL(records []WALRecord) {
 	snapshotSeq := b.seq
 	applied := 0
-	for _, rec := range records {
+	for i := range records {
+		rec := &records[i]
 		recSeq := rec.SeqNum
-		if recSeq == 0 {
-			recSeq = rec.Entry.SeqNum
-		}
 		if recSeq != 0 && recSeq <= snapshotSeq {
 			continue // already in snapshot
 		}
 		if rec.ControlOp != "" {
 			switch rec.ControlOp {
-			case "commit":
-				b.commitInternal(rec.CgroupID)
-			case "rollback":
-				_ = b.rollbackInternal(rec.CgroupID)
-			case "rollback_last":
-				b.rollbackLastInternal(rec.CgroupID)
 			case "begin_epoch":
-				b.beginEpochInternal(rec.CgroupID, recSeq)
-			case "commit_epoch":
-				b.commitEpochInternal(rec.CgroupID)
-			case "rollback_epoch":
-				_ = b.rollbackEpochInternal(rec.CgroupID)
+				b.beginEpochInternal(EpochID(rec.EpochID), rec.CgroupID, rec.SessionID)
+			case "commit":
+				// Authorize only; the trailing tryPromoteAll in NewBackend
+				// drives promotion/finalization once ALL records are in.
+				ep := b.ensureEpoch(EpochID(rec.EpochID), rec.CgroupID)
+				if ep.State < AuthorizedPending {
+					ep.State = AuthorizedPending
+				}
+			case "rollback":
+				_ = b.rollbackInternal(EpochID(rec.EpochID))
 			case "read_dep":
-				b.replayReadDep(rec.CgroupID, rec.Entry.OrigPath)
+				b.readDepInternal(EpochID(rec.EpochID), VersionID(rec.ReadVersion))
 			case "release_ack":
-				// The orchestrator acked release of a finalized agent before
-				// the crash. Drop its terminal record (idempotent; only acts
-				// if the agent is currently Finalized).
-				b.ackReleaseInternal(rec.CgroupID)
+				b.ackReleaseInternal(EpochID(rec.EpochID))
 			default:
 				log.Printf("[backend] WAL: unknown control op %q", rec.ControlOp)
 			}
@@ -324,88 +297,47 @@ func (b *Backend) replayWAL(records []WALRecord) {
 			applied++
 			continue
 		}
-		agent := b.ensureAgent(rec.CgroupID)
-		entry := UnmarshalEntry(rec.Entry)
-		if entry == nil {
+		if rec.Version == nil {
 			continue
 		}
-		agent.UndoLog = append(agent.UndoLog, entry)
-		if rec.Entry.SeqNum > b.seq {
-			b.seq = rec.Entry.SeqNum
+		v := unmarshalVersion(rec.Version)
+		if uint64(v.ID) >= b.nextVersion {
+			b.nextVersion = uint64(v.ID) + 1
 		}
-		// Rebuild dirty tracking AND dependency graph via markDirty.
-		b.markDirty(rec.CgroupID, entry.Path())
-		// REDO the overlay-side mutation idempotently. This recovers the
-		// disk state for crashes that occurred between WAL fsync and
-		// mutation completion.
-		b.redoEntry(rec.Entry)
+		if _, dup := b.versionByID[v.ID]; dup {
+			continue // already folded into the snapshot
+		}
+		// REDO the stage-side mutation idempotently BEFORE inserting, so the
+		// copy-up base resolves against the pre-insert chain (same as live).
+		if err := b.materializeVersionLocked(v); err != nil {
+			log.Printf("[backend] WAL redo version %d (%s %q): %v", v.ID, v.Operation, v.LogicalPath, err)
+		}
+		b.insertVersionLocked(v)
+		if v.Seq > b.seq {
+			b.seq = v.Seq
+		}
 		applied++
 	}
 	log.Printf("[backend] WAL replayed: %d/%d records (filtered by snapshot seq=%d)", applied, len(records), snapshotSeq)
 }
 
-// replayReadDep rebuilds the dependency edges for a read_dep WAL record.
-// Must be called before the backend is shared (no locking needed).
-func (b *Backend) replayReadDep(cgroupID, origPath string) {
-	if writers, ok := b.fileDirty[origPath]; ok {
-		for prev := range writers {
-			if prev != cgroupID {
-				b.addDependency(prev, cgroupID)
-			}
-		}
-	}
-	for dirtyPath, dirtyWriters := range b.fileDirty {
-		if dirtyPath == origPath {
-			continue
-		}
-		if isAncestor(dirtyPath, origPath) || isAncestor(origPath, dirtyPath) {
-			for prev := range dirtyWriters {
-				if prev != cgroupID {
-					b.addDependency(prev, cgroupID)
-				}
-			}
-		}
-	}
-	b.ensureAgent(cgroupID)
-}
-
 // --- Group-commit WAL (write-ahead with batched fsync) ---
 //
-// Every mutating Record* / Rollback* / Commit method follows this protocol:
+// Every mutating method follows this protocol:
 //
 //  1. opRW.RLock() for the full operation (gates against checkpoint).
-//  2. mu.Lock(); allocate seq, compute paths, build the WAL record(s);
-//     mu.Unlock().
+//  2. mu.Lock(); allocate seq, build the WAL record(s); mu.Unlock().
 //  3. submitWAL(rec) hands the record(s) to walWorker and returns a
 //     waiter channel. Block on the waiter — when it fires, the record
-//     is fsync'd to disk. Multiple callers submitting concurrently are
-//     coalesced by the worker into a single fsync (group commit).
+//     is fsync'd to disk (group commit).
 //  4. applyTurnWait(seq) blocks under mu until our seq is the next one
-//     allowed to apply. Then idempotently apply the overlay mutation
-//     and update in-memory state (UndoLog, dirty maps, dependency
-//     graph). Finally call applyTurnDone(seq) and release mu.
+//     allowed to apply. Then idempotently apply the stage mutation and
+//     update the version graph. Finally applyTurnDone(seq); release mu.
 //  5. opRW.RUnlock().
-//
-// Crash semantics:
-//
-//   - Crash before step 3 returns ⇒ WAL has no record AND in-memory /
-//     overlay update never happened. Recovery: nothing to do.
-//   - Crash after step 3 returns but before step 4 completes ⇒ WAL has
-//     the record but in-memory / overlay may be partial. replayWAL
-//     rebuilds in-memory state and idempotently re-applies the overlay
-//     mutation via redoEntry.
-//   - Crash after step 4 ⇒ WAL has the record and disk reflects the
-//     mutation. replayWAL's redo is idempotent so it is a no-op.
-//
-// Checkpoint correctness: opRW writer-lock waits until every in-flight
-// op has reached opRW.RUnlock() — at that point all WAL records have
-// been fsync'd AND all in-memory updates have been applied. The
-// snapshot is therefore consistent with the on-disk WAL.
 
 // submitWAL hands one or more records to walWorker for batched fsync and
 // returns a channel that fires (with the shared fsync result) once the
-// records are durable. May be called concurrently from any number of
-// goroutines without holding mu.
+// records are durable.
 func (b *Backend) submitWAL(recs ...WALRecord) <-chan error {
 	p := &walPending{recs: append([]WALRecord(nil), recs...), done: make(chan error, 1)}
 	b.mu.Lock()
@@ -419,9 +351,7 @@ func (b *Backend) submitWAL(recs ...WALRecord) <-chan error {
 }
 
 // walWorker is the single goroutine responsible for performing fsync on
-// behalf of all submitWAL callers. It runs flushPending whenever poked,
-// coalescing every submission accumulated since the previous fsync into
-// one appendWAL call.
+// behalf of all submitWAL callers.
 func (b *Backend) walWorker() {
 	defer close(b.walDone)
 	for {
@@ -502,126 +432,6 @@ func (b *Backend) applyTurnAbort(seq int64) {
 	b.abortedSeq[seq] = true
 }
 
-// redoEntry idempotently re-applies the overlay-side effect of a WAL
-// mutation record. Called from replayWAL so that crashes between WAL
-// fsync and mutation completion are recovered. Every step uses
-// idempotent primitives: MkdirAll, copy-up only when overlay missing,
-// whiteout creation via O_CREATE, etc.
-func (b *Backend) redoEntry(s SerializableEntry) {
-	switch s.Type {
-	case "mkdir":
-		if s.OverlayPath == "" {
-			return
-		}
-		if err := ensureOverlayParent(s.OverlayPath); err != nil {
-			log.Printf("[backend] redo mkdir parent %q: %v", s.OverlayPath, err)
-			return
-		}
-		mode := os.FileMode(s.Mode)
-		if mode == 0 {
-			mode = 0o755
-		}
-		if err := os.Mkdir(s.OverlayPath, mode); err != nil && !os.IsExist(err) {
-			log.Printf("[backend] redo mkdir %q: %v", s.OverlayPath, err)
-		}
-		if s.HadWhiteout && s.WhiteoutPath != "" {
-			if err := os.Remove(s.WhiteoutPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("[backend] redo mkdir whiteout-remove %q: %v", s.WhiteoutPath, err)
-			}
-		}
-	case "write":
-		if s.OverlayPath == "" {
-			return
-		}
-		if err := ensureOverlayParent(s.OverlayPath); err != nil {
-			log.Printf("[backend] redo write parent %q: %v", s.OverlayPath, err)
-			return
-		}
-		needCopyUp := false
-		if st, err := os.Lstat(s.OverlayPath); os.IsNotExist(err) {
-			needCopyUp = true
-		} else if err == nil && s.OrigSize > 0 && st.Size() < s.OrigSize {
-			// Overlay exists but is smaller than the orig at copy-up time:
-			// this indicates a partial write (crash between io.Copy and
-			// fsync in copyUpFile). Remove and re-copy.
-			log.Printf("[backend] redo write: partial overlay %q (size=%d, want=%d), re-copy",
-				s.OverlayPath, st.Size(), s.OrigSize)
-			os.Remove(s.OverlayPath)
-			needCopyUp = true
-		}
-		if needCopyUp {
-			if _, oerr := os.Lstat(s.OrigPath); oerr == nil {
-				if cerr := copyUpFile(s.OrigPath, s.OverlayPath); cerr != nil {
-					log.Printf("[backend] redo copy-up %q: %v", s.OrigPath, cerr)
-				}
-			}
-			// If orig is also missing this is a fresh create: leave the
-			// overlay empty for the FUSE caller to populate on the next
-			// open. The undo log entry alone is sufficient.
-		}
-		if s.HadWhiteout && s.WhiteoutPath != "" {
-			if err := os.Remove(s.WhiteoutPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("[backend] redo write whiteout-remove %q: %v", s.WhiteoutPath, err)
-			}
-		}
-	case "unlink", "rmdir":
-		if s.WhiteoutPath == "" {
-			return
-		}
-		if err := os.MkdirAll(filepath.Dir(s.WhiteoutPath), 0o755); err != nil {
-			log.Printf("[backend] redo whiteout parent %q: %v", s.WhiteoutPath, err)
-			return
-		}
-		f, err := os.OpenFile(s.WhiteoutPath, os.O_CREATE|os.O_WRONLY, 0o644)
-		if err != nil {
-			log.Printf("[backend] redo whiteout %q: %v", s.WhiteoutPath, err)
-			return
-		}
-		f.Close()
-	case "link":
-		// Recreate the overlay hard link to the target's overlay copy so a
-		// crash between WAL fsync and the os.Link is recovered. Idempotent:
-		// EEXIST is fine; a missing target overlay is skipped (the target's
-		// own redo will materialise it, and promote links on the orig side).
-		if s.OverlayPath == "" || s.TargetPath == "" {
-			return
-		}
-		if err := ensureOverlayParent(s.OverlayPath); err != nil {
-			log.Printf("[backend] redo link parent %q: %v", s.OverlayPath, err)
-			return
-		}
-		tgtOverlay, oerr := overlayPathFor(b.stagingDir, b.trackedDir, s.TargetPath)
-		if oerr == nil {
-			if _, st := os.Lstat(tgtOverlay); st == nil {
-				if err := os.Link(tgtOverlay, s.OverlayPath); err != nil && !os.IsExist(err) {
-					log.Printf("[backend] redo link %q -> %q: %v", tgtOverlay, s.OverlayPath, err)
-				}
-			}
-		}
-		if s.HadWhiteout && s.WhiteoutPath != "" {
-			if err := os.Remove(s.WhiteoutPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("[backend] redo link whiteout-remove %q: %v", s.WhiteoutPath, err)
-			}
-		}
-	case "mknod":
-		if s.OverlayPath == "" {
-			return
-		}
-		if err := ensureOverlayParent(s.OverlayPath); err != nil {
-			log.Printf("[backend] redo mknod parent %q: %v", s.OverlayPath, err)
-			return
-		}
-		if err := syscall.Mknod(s.OverlayPath, s.Mode, int(s.Rdev)); err != nil && !errors.Is(err, syscall.EEXIST) {
-			log.Printf("[backend] redo mknod %q: %v", s.OverlayPath, err)
-		}
-		if s.HadWhiteout && s.WhiteoutPath != "" {
-			if err := os.Remove(s.WhiteoutPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("[backend] redo mknod whiteout-remove %q: %v", s.WhiteoutPath, err)
-			}
-		}
-	}
-}
-
 // --- Checkpoint loop ---
 
 func (b *Backend) checkpointLoop() {
@@ -643,20 +453,14 @@ func (b *Backend) checkpointLoop() {
 
 // checkpoint writes a full state snapshot and truncates the WAL.
 //
-// Synchronisation: opRW.Lock() waits until every in-flight Record* /
-// Rollback* / Commit op has reached opRW.RUnlock(). At that point the
-// in-memory state and the on-disk WAL are consistent (every applied
-// in-memory change has its corresponding WAL record fsync'd; every
-// fsync'd WAL record has had its apply step run). flushPending() before
-// taking the writer lock makes sure pending waiters are unblocked so
-// they can complete and release their RLock.
+// Synchronisation: opRW.Lock() waits until every in-flight op has reached
+// opRW.RUnlock(). At that point the in-memory state and the on-disk WAL are
+// consistent. flushPending() before taking the writer lock makes sure
+// pending waiters are unblocked so they can complete and release their
+// RLock.
 func (b *Backend) checkpoint() {
-	// Drain any pending submissions so currently-waiting RLock holders
-	// can finish their apply step and release the RLock.
 	b.flushPending()
 
-	// Wait for all in-flight ops to release their RLock. After Lock
-	// succeeds, no new ops can start until we Unlock.
 	b.opRW.Lock()
 	defer b.opRW.Unlock()
 
@@ -700,10 +504,6 @@ func (b *Backend) Close() {
 // TrackedDir returns the original (read) filesystem root.
 func (b *Backend) TrackedDir() string { return b.trackedDir }
 
-// OverlayDir returns the overlay (write) filesystem root, which is the
-// staging directory itself.
-func (b *Backend) OverlayDir() string { return b.stagingDir }
-
 // StagingDir returns the staging directory passed to NewBackend.
 func (b *Backend) StagingDir() string { return b.stagingDir }
 
@@ -726,7 +526,6 @@ func NewTrackedFD(fd int) *TrackedFD {
 func (t *TrackedFD) FD() int { return t.fd }
 
 // Close closes the fd exactly once. Subsequent calls are no-ops.
-// Returns EBADF-style nil if already closed.
 func (t *TrackedFD) Close() error {
 	if t.closed.Swap(true) {
 		return nil // already closed
@@ -739,75 +538,73 @@ func (t *TrackedFD) IsClosed() bool {
 	return t.closed.Load()
 }
 
-// RegisterFD associates a tracked fd with an agent. The fd will be
-// force-closed if the agent is cleaned up by a cascade rollback.
-func (b *Backend) RegisterFD(cgroupID string, tfd *TrackedFD) {
+// RegisterFD associates a tracked fd with an epoch. The fd will be
+// force-closed if the epoch is cleaned up by a cascade rollback.
+func (b *Backend) RegisterFD(epochID EpochID, tfd *TrackedFD) {
 	b.openFDsMu.Lock()
-	b.openFDs[cgroupID] = append(b.openFDs[cgroupID], tfd)
+	b.openFDs[epochID] = append(b.openFDs[epochID], tfd)
 	b.openFDsMu.Unlock()
 }
 
-// UnregisterFD removes a tracked fd from an agent. Called when the FUSE
-// Release handler fires (i.e. the kernel closed the fd). Safe to call
-// even if the fd was already removed by CloseAgentFDs.
-func (b *Backend) UnregisterFD(cgroupID string, tfd *TrackedFD) {
+// UnregisterFD removes a tracked fd from an epoch. Called when the FUSE
+// Release handler fires. Safe to call even if the fd was already removed by
+// CloseEpochFDs.
+func (b *Backend) UnregisterFD(epochID EpochID, tfd *TrackedFD) {
 	b.openFDsMu.Lock()
-	fds := b.openFDs[cgroupID]
+	fds := b.openFDs[epochID]
 	for i, f := range fds {
 		if f == tfd {
-			b.openFDs[cgroupID] = append(fds[:i], fds[i+1:]...)
+			b.openFDs[epochID] = append(fds[:i], fds[i+1:]...)
 			break
 		}
 	}
-	if len(b.openFDs[cgroupID]) == 0 {
-		delete(b.openFDs, cgroupID)
+	if len(b.openFDs[epochID]) == 0 {
+		delete(b.openFDs, epochID)
 	}
 	b.openFDsMu.Unlock()
 }
 
-// CloseAgentFDs force-closes every tracked fd belonging to the given
-// agent. Called during cascade rollback so the agent's process receives
-// EBADF on its next I/O rather than silently accessing stale overlay
-// data through a dangling fd.
-func (b *Backend) CloseAgentFDs(cgroupID string) {
+// CloseEpochFDs force-closes every tracked fd belonging to the given epoch.
+// Called during cascade rollback so processes receive EBADF on their next
+// I/O rather than silently accessing a rolled-back version through a
+// dangling fd.
+func (b *Backend) CloseEpochFDs(epochID EpochID) {
 	b.openFDsMu.Lock()
-	fds := b.openFDs[cgroupID]
-	delete(b.openFDs, cgroupID)
+	fds := b.openFDs[epochID]
+	delete(b.openFDs, epochID)
 	b.openFDsMu.Unlock()
 	for _, tfd := range fds {
 		if err := tfd.Close(); err != nil {
-			log.Printf("[backend] CloseAgentFDs: agent=%q fd=%d: %v", cgroupID, tfd.FD(), err)
+			log.Printf("[backend] CloseEpochFDs: epoch=%q fd=%d: %v", epochID, tfd.FD(), err)
 		}
 	}
 	if len(fds) > 0 {
-		log.Printf("[backend] CloseAgentFDs: agent=%q closed %d fd(s)", cgroupID, len(fds))
+		log.Printf("[backend] CloseEpochFDs: epoch=%q closed %d fd(s)", epochID, len(fds))
 	}
 }
 
-// flushAgentFDs fsyncs every tracked fd of the agent so that any data the
-// kernel has written back through the FUSE data path -- including dirty pages
-// of a writable MAP_SHARED mmap that the process has already msync'd/flushed --
-// is durable on the overlay copy BEFORE promotion renames it onto orig. Called
-// at commit time, when ShadowProc has frozen the agent. Best-effort: an fsync
-// error on an already-closed or read-only fd is ignored. Dirty pages a FROZEN
-// process never got to flush are handled separately by quiesceMappings(), which
-// runs just before this at commit time.
-func (b *Backend) flushAgentFDs(cgroupID string) {
+// flushEpochFDs fsyncs every tracked fd of the epoch so that any data the
+// kernel has written back through the FUSE data path — including dirty pages
+// of a writable MAP_SHARED mmap the process already msync'd — is durable on
+// the stage copy BEFORE promotion moves it onto orig. Best-effort.
+func (b *Backend) flushEpochFDs(epochID EpochID) {
 	b.openFDsMu.Lock()
-	fds := make([]*TrackedFD, len(b.openFDs[cgroupID]))
-	copy(fds, b.openFDs[cgroupID])
+	fds := make([]*TrackedFD, len(b.openFDs[epochID]))
+	copy(fds, b.openFDs[epochID])
 	b.openFDsMu.Unlock()
 	for _, tfd := range fds {
 		if tfd.IsClosed() {
 			continue
 		}
 		if err := syscall.Fsync(tfd.FD()); err != nil {
-			log.Printf("[backend] flushAgentFDs: agent=%q fd=%d: %v", cgroupID, tfd.FD(), err)
+			log.Printf("[backend] flushEpochFDs: epoch=%q fd=%d: %v", epochID, tfd.FD(), err)
 		}
 	}
 }
 
-// mapRegion is one writable MAP_SHARED region of a frozen agent process that is
+// --- Commit-time writable MAP_SHARED quiescence ---
+
+// mapRegion is one writable MAP_SHARED region of a frozen process that is
 // backed by a file under the ShadowFS mount.
 type mapRegion struct {
 	start, end, offset uint64
@@ -815,10 +612,7 @@ type mapRegion struct {
 }
 
 // parseWritableSharedMaps extracts every writable MAP_SHARED region whose
-// backing file lives under mountDir from a /proc/<pid>/maps blob. A maps line
-// is `start-end perms offset dev inode pathname`; perms is e.g. "rw-s" where the
-// 2nd char 'w' means writable and the 4th 's' means a shared (not private)
-// mapping. Read-only, private, or non-ShadowFS mappings are skipped.
+// backing file lives under mountDir from a /proc/<pid>/maps blob.
 func parseWritableSharedMaps(maps, mountDir string) []mapRegion {
 	var out []mapRegion
 	root := strings.TrimSuffix(mountDir, "/")
@@ -867,31 +661,23 @@ func cgroupPIDs(cgroupID string) ([]int, error) {
 	return pids, nil
 }
 
-// quiesceMappings captures the current contents of every FROZEN agent process's
-// writable MAP_SHARED mappings of ShadowFS-backed files into the overlay copy,
-// so promotion carries the agent's latest in-memory writes even for dirty mmap
-// pages the (frozen) process never got to msync/write back itself. This closes
-// the mmap writeback gap: ShadowFS cannot ask a frozen process to flush, but it
-// CAN read the process's stable memory directly and write it into the overlay.
-//
-// Idempotent: a shared file mapping's memory IS the file's intended content, so
-// writing it back is safe even for pages that were already flushed. Requires
-// the agent to be frozen (stable memory); callers invoke it from the commit
-// path where ShadowProc has already frozen the cgroup.
+// quiesceMappings captures the current contents of every FROZEN process's
+// writable MAP_SHARED mappings of ShadowFS-backed files into the acting
+// epoch's stage copies, so promotion carries the latest in-memory writes even
+// for dirty mmap pages the (frozen) process never got to write back.
 //
 // FAIL CLOSED: if ANY writable MAP_SHARED region of a ShadowFS-backed file is
-// found but cannot be fully captured (no overlay copy, /proc/<pid>/mem
-// unreadable, or a copy/sync error), an error is returned and the caller MUST
-// abort finalization -- promoting would otherwise publish a file that silently
-// misses the process's dirty mmap pages. Vacuous success (no such mappings, or
-// the cgroup/processes are already gone, e.g. during WAL replay) returns nil.
-func (b *Backend) quiesceMappings(cgroupID string) error {
-	if b.mountDir == "" {
-		return nil // mountpoint unknown (not yet mounted) -> cannot match maps entries
+// found but cannot be fully captured, an error is returned and the caller
+// MUST abort finalization. Vacuous success (no such mappings, or the
+// cgroup/processes are already gone, e.g. during WAL replay) returns nil.
+// Must be called with b.mu held.
+func (b *Backend) quiesceMappings(ep *EpochState) error {
+	if b.mountDir == "" || ep.CgroupID == "" {
+		return nil // mountpoint or attribution unknown -> nothing to match
 	}
-	pids, err := cgroupPIDs(cgroupID)
+	pids, err := cgroupPIDs(ep.CgroupID)
 	if err != nil {
-		return nil // cgroup gone / unreadable -> no live processes, nothing to quiesce
+		return nil // cgroup gone / unreadable -> no live processes
 	}
 	flushed := 0
 	var errs []string
@@ -906,13 +692,11 @@ func (b *Backend) quiesceMappings(cgroupID string) error {
 		}
 		mem, err := os.OpenFile(fmt.Sprintf("/proc/%d/mem", pid), os.O_RDONLY, 0)
 		if err != nil {
-			// Regions exist but their memory cannot be read: their dirty pages
-			// would be silently lost by promotion. Abort.
 			errs = append(errs, fmt.Sprintf("pid %d: open /proc/mem: %v", pid, err))
 			continue
 		}
 		for _, r := range regions {
-			if err := b.quiesceRegion(mem, r); err != nil {
+			if err := b.quiesceRegion(ep, mem, r); err != nil {
 				errs = append(errs, fmt.Sprintf("pid %d %q: %v", pid, r.mountPath, err))
 			} else {
 				flushed++
@@ -921,8 +705,8 @@ func (b *Backend) quiesceMappings(cgroupID string) error {
 		mem.Close()
 	}
 	if flushed > 0 {
-		log.Printf("[backend] quiesceMappings: agent=%q flushed %d writable MAP_SHARED region(s)",
-			cgroupID, flushed)
+		log.Printf("[backend] quiesceMappings: epoch=%q flushed %d writable MAP_SHARED region(s)",
+			ep.ID, flushed)
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("quiesce failed for %d writable MAP_SHARED region(s): %s",
@@ -932,27 +716,26 @@ func (b *Backend) quiesceMappings(cgroupID string) error {
 }
 
 // quiesceRegion copies one region's bytes from the frozen process's memory
-// (/proc/<pid>/mem) into its overlay copy at the mapped file offset. Returns
-// nil only on a COMPLETE capture + fsync; any shortfall is an error so the
-// caller aborts finalization instead of promoting a partially-captured file.
-func (b *Backend) quiesceRegion(mem *os.File, r mapRegion) error {
+// into the epoch's own stage copy at the mapped file offset. Returns nil only
+// on a COMPLETE capture + fsync. Must be called with b.mu held.
+func (b *Backend) quiesceRegion(ep *EpochState, mem *os.File, r mapRegion) error {
 	root := strings.TrimSuffix(b.mountDir, "/")
 	rel := strings.TrimPrefix(r.mountPath, root)
 	origPath := filepath.Join(b.trackedDir, rel)
-	overlayPath, err := overlayPathFor(b.stagingDir, b.trackedDir, origPath)
-	if err != nil {
-		return fmt.Errorf("overlay path: %w", err)
+	// A writable shared mapping of a tracked file requires the epoch to own
+	// a content-bearing version of it (the O_RDWR open that backs the
+	// mapping went through PrepareWrite). Fail closed otherwise: promoting
+	// would publish a file that silently misses the dirty mmap pages.
+	v := b.latestOwnVersionLocked(ep.ID, filepath.Clean(origPath))
+	if v == nil || v.Operation == OpWhiteout || v.StagePath == "" {
+		return fmt.Errorf("no owned stage copy for mapped file (dirty mmap pages would be lost)")
 	}
-	// A writable shared mapping of a tracked file that has NO overlay copy
-	// means dirty pages exist that promotion cannot carry at all. Fail closed:
-	// admission is supposed to exclude such sessions, so hitting this at
-	// commit time is an integrity violation, not a skippable edge case.
-	if st, serr := os.Lstat(overlayPath); serr != nil || st.IsDir() {
-		return fmt.Errorf("no overlay copy for mapped file (dirty mmap pages would be lost)")
+	if st, serr := os.Lstat(v.StagePath); serr != nil || st.IsDir() {
+		return fmt.Errorf("no stage copy for mapped file (dirty mmap pages would be lost)")
 	}
-	out, err := os.OpenFile(overlayPath, os.O_WRONLY, 0)
+	out, err := os.OpenFile(v.StagePath, os.O_WRONLY, 0)
 	if err != nil {
-		return fmt.Errorf("open overlay: %w", err)
+		return fmt.Errorf("open stage copy: %w", err)
 	}
 	defer out.Close()
 	const chunk = 1 << 20 // 1 MiB
@@ -966,7 +749,7 @@ func (b *Backend) quiesceRegion(mem *os.File, r mapRegion) error {
 		rn, rerr := mem.ReadAt(buf[:n], int64(r.start+done))
 		if rn > 0 {
 			if _, werr := out.WriteAt(buf[:rn], int64(r.offset+done)); werr != nil {
-				return fmt.Errorf("write overlay at %#x: %w", r.offset+done, werr)
+				return fmt.Errorf("write stage copy at %#x: %w", r.offset+done, werr)
 			}
 			done += uint64(rn)
 		}
@@ -981,38 +764,39 @@ func (b *Backend) quiesceRegion(mem *os.File, r mapRegion) error {
 		}
 	}
 	if err := out.Sync(); err != nil {
-		return fmt.Errorf("sync overlay: %w", err)
+		return fmt.Errorf("sync stage copy: %w", err)
 	}
 	return nil
 }
 
-// --- Dependency graph ---
+// --- Dependency graph (epoch -> epoch) ---
 
-func (b *Backend) addDependency(on, dependent string) {
+func (b *Backend) addDependency(on, dependent EpochID) {
 	if on == dependent {
 		return
 	}
 	set, ok := b.dependents[on]
 	if !ok {
-		set = make(map[string]struct{})
+		set = make(map[EpochID]struct{})
 		b.dependents[on] = set
 	}
 	if _, exists := set[dependent]; !exists {
 		set[dependent] = struct{}{}
+		b.graphGen++
 		log.Printf("[backend] addDependency: %q depends on %q", dependent, on)
 	}
 	rev, ok := b.dependsOn[dependent]
 	if !ok {
-		rev = make(map[string]struct{})
+		rev = make(map[EpochID]struct{})
 		b.dependsOn[dependent] = rev
 	}
 	rev[on] = struct{}{}
 }
 
-func (b *Backend) reachableFrom(start string) map[string]struct{} {
-	visited := make(map[string]struct{})
-	var dfs func(string)
-	dfs = func(id string) {
+func (b *Backend) reachableFrom(start EpochID) map[EpochID]struct{} {
+	visited := make(map[EpochID]struct{})
+	var dfs func(EpochID)
+	dfs = func(id EpochID) {
 		if _, seen := visited[id]; seen {
 			return
 		}
@@ -1025,93 +809,421 @@ func (b *Backend) reachableFrom(start string) map[string]struct{} {
 	return visited
 }
 
-// --- Agent / dirty management ---
+// --- Epoch management ---
 
-func (b *Backend) ensureAgent(cgroupID string) *AgentState {
-	agent, ok := b.agents[cgroupID]
+// ensureEpoch returns the epoch record, creating a Speculative one when
+// missing. cgroupID (if non-empty) refreshes kernel attribution. Must be
+// called with b.mu held.
+func (b *Backend) ensureEpoch(id EpochID, cgroupID string) *EpochState {
+	ep, ok := b.epochs[id]
 	if !ok {
-		agent = &AgentState{CgroupID: cgroupID, DirtyFiles: make(map[string]struct{})}
-		b.agents[cgroupID] = agent
+		ep = &EpochState{ID: id, ReadFrom: make(map[VersionID]struct{})}
+		b.epochs[id] = ep
 	}
-	return agent
+	if cgroupID != "" && ep.CgroupID == "" {
+		ep.CgroupID = cgroupID
+	}
+	return ep
 }
 
-// markDirty marks origPath as dirtied by cgroupID and adds dependency edges
-// from every prior writer (exact path or parent-child) to cgroupID.
-func (b *Backend) markDirty(cgroupID, origPath string) {
-	agent := b.ensureAgent(cgroupID)
-	agent.DirtyFiles[origPath] = struct{}{}
+// BeginEpoch registers an explicit epoch and binds it as the active epoch of
+// cgroupID, so subsequent FUSE operations from that cgroup are attributed to
+// it. Durable (WAL) so the binding survives a crash.
+func (b *Backend) BeginEpoch(epochID EpochID, cgroupID, sessionID string) error {
+	if epochID == "" {
+		return fmt.Errorf("begin_epoch: empty epoch id")
+	}
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
 
-	writers, ok := b.fileDirty[origPath]
+	b.mu.Lock()
+	if ep, ok := b.epochs[epochID]; ok && ep.State >= Finalizing {
+		st := ep.State
+		b.mu.Unlock()
+		return fmt.Errorf("begin_epoch: epoch %q already %s", epochID, st)
+	}
+	seqNum := b.nextSeq()
+	rec := WALRecord{EpochID: string(epochID), CgroupID: cgroupID,
+		SessionID: sessionID, SeqNum: seqNum, ControlOp: "begin_epoch"}
+	b.mu.Unlock()
+
+	if err := <-b.submitWAL(rec); err != nil {
+		b.applyTurnAbort(seqNum)
+		return fmt.Errorf("begin_epoch WAL: %w", err)
+	}
+
+	b.mu.Lock()
+	b.applyTurnWait(seqNum)
+	defer func() {
+		b.applyTurnDone(seqNum)
+		b.mu.Unlock()
+	}()
+	b.beginEpochInternal(epochID, cgroupID, sessionID)
+	return nil
+}
+
+// beginEpochInternal performs the in-memory effect of BeginEpoch. Must be
+// called with b.mu held. Used both by BeginEpoch and by replayWAL.
+func (b *Backend) beginEpochInternal(epochID EpochID, cgroupID, sessionID string) {
+	ep := b.ensureEpoch(epochID, cgroupID)
+	if sessionID != "" {
+		ep.SessionID = sessionID
+	}
+	if cgroupID != "" {
+		ep.CgroupID = cgroupID
+		b.activeEpochByCgroup[cgroupID] = epochID
+	}
+	b.graphGen++
+	log.Printf("[backend] BeginEpoch: epoch=%q cgroup=%q session=%q", epochID, cgroupID, sessionID)
+}
+
+// EpochForCgroup returns the epoch that FUSE operations from cgroupID should
+// be attributed to. When the cgroup has no usable active epoch (none
+// registered, or the registered one has entered Finalizing/Finalized), a
+// fresh implicit epoch is durably registered so cgroup-only legacy flows
+// keep working.
+func (b *Backend) EpochForCgroup(cgroupID string) (EpochID, error) {
+	b.mu.Lock()
+	if id, ok := b.activeEpochByCgroup[cgroupID]; ok {
+		if ep, live := b.epochs[id]; live && ep.State < Finalizing {
+			b.mu.Unlock()
+			return id, nil
+		}
+	}
+	// Allocate a fresh implicit epoch id. The counter uniquifies successors
+	// after a previous implicit epoch finalized or rolled back.
+	b.implicitCtr++
+	n := b.implicitCtr
+	b.mu.Unlock()
+
+	id := EpochID(fmt.Sprintf("implicit:%s#%d", cgroupID, n))
+	if err := b.BeginEpoch(id, cgroupID, ""); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// ActiveEpochForCgroup reports the currently-bound epoch of a cgroup without
+// creating one.
+func (b *Backend) ActiveEpochForCgroup(cgroupID string) (EpochID, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id, ok := b.activeEpochByCgroup[cgroupID]
+	return id, ok
+}
+
+// EpochCgroup returns the kernel attribution of an epoch ("" if unknown).
+func (b *Backend) EpochCgroup(epochID EpochID) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if ep, ok := b.epochs[epochID]; ok {
+		return ep.CgroupID
+	}
+	return ""
+}
+
+// EpochInfo is a read-only epoch summary for the control API.
+type EpochInfo struct {
+	ID        string `json:"epoch_id"`
+	CgroupID  string `json:"cgroup_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	State     string `json:"state"`
+	Versions  int    `json:"versions"`
+}
+
+// ListEpochs returns a summary of every tracked epoch.
+func (b *Backend) ListEpochs() []EpochInfo {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]EpochInfo, 0, len(b.epochs))
+	for _, ep := range b.epochs {
+		out = append(out, EpochInfo{
+			ID:        string(ep.ID),
+			CgroupID:  ep.CgroupID,
+			SessionID: ep.SessionID,
+			State:     ep.State.String(),
+			Versions:  len(ep.Versions),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+func (b *Backend) nextSeq() int64 { b.seq++; return b.seq }
+
+// --- Version chain internals (b.mu held) ---
+
+// sortChainBySeq sorts a slice of version IDs by their versions' seq.
+func (b *Backend) sortChainBySeq(chain []VersionID) {
+	sort.Slice(chain, func(i, j int) bool {
+		vi, vj := b.versionByID[chain[i]], b.versionByID[chain[j]]
+		if vi == nil || vj == nil {
+			return chain[i] < chain[j]
+		}
+		return vi.Seq < vj.Seq
+	})
+}
+
+// latestOwnVersionLocked returns the epoch's newest version of obj, or nil.
+func (b *Backend) latestOwnVersionLocked(epochID EpochID, obj ObjectID) *FileVersion {
+	chain := b.versionsByObject[obj]
+	for i := len(chain) - 1; i >= 0; i-- {
+		if v := b.versionByID[chain[i]]; v != nil && v.Owner == epochID {
+			return v
+		}
+	}
+	return nil
+}
+
+// headVersionLocked returns the globally visible head version of obj, or nil
+// when the backing file is the visible state.
+func (b *Backend) headVersionLocked(obj ObjectID) *FileVersion {
+	head, ok := b.visibleHead[obj]
 	if !ok {
-		writers = make(map[string]struct{})
-		b.fileDirty[origPath] = writers
+		return nil
 	}
-	for prev := range writers {
-		if prev != cgroupID {
-			b.addDependency(prev, cgroupID)
-		}
-	}
-	writers[cgroupID] = struct{}{}
+	return b.versionByID[head]
+}
 
-	// Parent-child path dependencies.
-	otherPaths := make([]string, 0, len(b.fileDirty))
-	for p := range b.fileDirty {
-		if p != origPath {
-			otherPaths = append(otherPaths, p)
+// viewVersionLocked returns the version obj resolves to in epochID's view:
+// the epoch's own newest version if it has one, else the global head. nil
+// means the backing file is the visible state.
+func (b *Backend) viewVersionLocked(epochID EpochID, obj ObjectID) *FileVersion {
+	if own := b.latestOwnVersionLocked(epochID, obj); own != nil {
+		return own
+	}
+	return b.headVersionLocked(obj)
+}
+
+// insertVersionLocked links a new version into the object chain, updates the
+// visible head, records epoch ownership and adds the write-write ordering
+// edge (previous head's owner -> new writer). Parent is (re)computed here so
+// live apply and WAL replay derive identical chains.
+func (b *Backend) insertVersionLocked(v *FileVersion) {
+	obj := v.LogicalPath
+	prevHead := b.headVersionLocked(obj)
+	v.Parent = 0
+	if prevHead != nil {
+		v.Parent = prevHead.ID
+	}
+	b.versionByID[v.ID] = v
+	chain := append(b.versionsByObject[obj], v.ID)
+	// Seqs are allocated monotonically and applied in seq order, so the
+	// append preserves ordering; sort defensively for replay paths.
+	if len(chain) > 1 {
+		if prev := b.versionByID[chain[len(chain)-2]]; prev != nil && prev.Seq > v.Seq {
+			b.sortChainBySeq(chain)
 		}
 	}
-	for _, dirty := range otherPaths {
-		dirtyWriters := b.fileDirty[dirty]
-		if isAncestor(dirty, origPath) {
-			for prev := range dirtyWriters {
-				if prev != cgroupID {
-					b.addDependency(prev, cgroupID)
-				}
-			}
-		} else if isAncestor(origPath, dirty) {
-			for other := range dirtyWriters {
-				if other != cgroupID {
-					b.addDependency(cgroupID, other)
-				}
-			}
+	b.versionsByObject[obj] = chain
+	if prevHead == nil || v.Seq >= prevHead.Seq {
+		b.visibleHead[obj] = v.ID
+	}
+	ep := b.ensureEpoch(v.Owner, "")
+	ep.Versions = append(ep.Versions, v.ID)
+	// Write-write ordering edge: overwriting another live epoch's version
+	// means our version's fate is tied to theirs (rolling THEM back removes
+	// the base we built on, so we must cascade).
+	if prevHead != nil && prevHead.Owner != v.Owner {
+		if owner, ok := b.epochs[prevHead.Owner]; ok && owner.State != Finalized {
+			b.addDependency(prevHead.Owner, v.Owner)
 		}
 	}
 }
 
-// hasAncestorWhiteoutOverlay checks whether any ancestor directory of the
-// given absolute overlay path has a whiteout marker. This is used during
-// the apply phase of PrepareWrite / RecordMkdir to detect the case where
-// another agent deleted a parent directory while we waited for WAL fsync.
-//
-// The walk is bounded by stagingRoot so we never read ".shadow.wh.*" files
-// that happen to live OUTSIDE the staging tree (e.g. in /tmp or /). This
-// preserves correctness when stagingDir is itself a subdirectory of a
-// directory the user does not control, and avoids unnecessary stats.
-func hasAncestorWhiteoutOverlay(stagingRoot, overlayAbsPath string) bool {
-	cleanRoot := filepath.Clean(stagingRoot)
-	dir := filepath.Dir(overlayAbsPath)
-	for {
-		// Stop once we reach the staging root: ancestors above it are
-		// outside the overlay and cannot legitimately carry whiteouts.
-		if dir == cleanRoot {
-			return false
+// removeVersionFromEpoch drops vid from ep.Versions (order preserved).
+func removeVersionFromEpoch(ep *EpochState, vid VersionID) {
+	for i, id := range ep.Versions {
+		if id == vid {
+			ep.Versions = append(ep.Versions[:i], ep.Versions[i+1:]...)
+			return
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return false
-		}
-		// The whiteout for directory `dir` lives in its PARENT, named
-		// `.shadow.wh.<basename(dir)>` — mirroring whiteoutPathFor /
-		// whiteoutPath. Previously this looked inside `dir` itself,
-		// which never matched and silently disabled the apply-phase
-		// race check entirely.
-		wp := filepath.Join(parent, whiteoutPrefix+filepath.Base(dir))
-		if _, err := os.Lstat(wp); err == nil {
-			return true
-		}
-		dir = parent
 	}
+}
+
+// --- Resolve (per-epoch view) + read-from dependency recording ---
+
+// resolveLocked resolves obj in epochID's view WITHOUT recording any
+// dependency. Must be called with b.mu held.
+func (b *Backend) resolveLocked(epochID EpochID, obj ObjectID) ResolveResult {
+	// Ancestor whiteouts: a deleted ancestor directory hides the whole
+	// subtree. Walk strict ancestors below the tracked root.
+	for anc := filepath.Dir(obj); isAncestor(b.trackedDir, anc); anc = filepath.Dir(anc) {
+		av := b.viewVersionLocked(epochID, anc)
+		if av != nil && av.Operation == OpWhiteout {
+			return ResolveResult{Version: av.ID, Producer: av.Owner, Exists: false, Op: OpWhiteout}
+		}
+	}
+	v := b.viewVersionLocked(epochID, obj)
+	if v == nil {
+		return ResolveResult{PhysicalPath: obj, Version: 0, Producer: "", Exists: true}
+	}
+	if v.Operation == OpWhiteout {
+		return ResolveResult{Version: v.ID, Producer: v.Owner, Exists: false, Op: OpWhiteout}
+	}
+	return ResolveResult{PhysicalPath: v.StagePath, Version: v.ID, Producer: v.Owner, Exists: true, Op: v.Operation}
+}
+
+// needsReadDepLocked reports whether observing res from epochID constitutes a
+// NEW read-from dependency that must be durably recorded.
+func (b *Backend) needsReadDepLocked(epochID EpochID, res ResolveResult) bool {
+	if res.Version == 0 || res.Producer == "" || res.Producer == epochID {
+		return false
+	}
+	producer, ok := b.epochs[res.Producer]
+	if !ok || producer.State == Finalized {
+		return false // durable (or gone): can never cascade a rollback
+	}
+	if ep, ok := b.epochs[epochID]; ok {
+		if _, dup := ep.ReadFrom[res.Version]; dup {
+			return false
+		}
+	}
+	return true
+}
+
+// Resolve resolves origPath for epochID's view and, when the observed
+// version belongs to another live (non-finalized) epoch, durably records the
+// producer -> consumer read-from edge. This is THE dependency primitive: a
+// reader depends exactly on the versions it actually saw, never on the whole
+// writer history of the path.
+func (b *Backend) Resolve(epochID EpochID, origPath string) ResolveResult {
+	obj := filepath.Clean(origPath)
+	b.mu.Lock()
+	res := b.resolveLocked(epochID, obj)
+	need := b.needsReadDepLocked(epochID, res)
+	b.mu.Unlock()
+	if need {
+		b.recordReadDep(epochID, res.Version, obj)
+	}
+	return res
+}
+
+// recordReadDep durably records a read-from edge (WAL "read_dep") and applies
+// it. Follows the standard write-ahead protocol.
+func (b *Backend) recordReadDep(epochID EpochID, vid VersionID, obj ObjectID) {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+
+	b.mu.Lock()
+	ep := b.ensureEpoch(epochID, "")
+	if _, dup := ep.ReadFrom[vid]; dup {
+		b.mu.Unlock()
+		return
+	}
+	seqNum := b.nextSeq()
+	rec := WALRecord{EpochID: string(epochID), SeqNum: seqNum,
+		ControlOp: "read_dep", ReadVersion: uint64(vid), ObjectPath: obj}
+	b.mu.Unlock()
+
+	if err := <-b.submitWAL(rec); err != nil {
+		log.Printf("[backend] recordReadDep WAL: %v", err)
+		b.applyTurnAbort(seqNum)
+		return
+	}
+
+	b.mu.Lock()
+	b.applyTurnWait(seqNum)
+	defer func() {
+		b.applyTurnDone(seqNum)
+		b.mu.Unlock()
+	}()
+	b.readDepInternal(epochID, vid)
+}
+
+// readDepInternal applies a read-from edge. Must be called with b.mu held.
+// Used both by recordReadDep and by replayWAL.
+func (b *Backend) readDepInternal(epochID EpochID, vid VersionID) {
+	ep := b.ensureEpoch(epochID, "")
+	ep.ReadFrom[vid] = struct{}{}
+	v, ok := b.versionByID[vid]
+	if !ok || v.Owner == epochID {
+		return // producer version already gone (rolled back / promoted)
+	}
+	if owner, ok := b.epochs[v.Owner]; ok && owner.State != Finalized {
+		b.addDependency(v.Owner, epochID)
+	}
+}
+
+// MergeReaddirVersions lists the merged view of origDir for epochID: backing
+// entries overlaid with each object's resolved version, whiteouts hiding
+// deleted names. Every foreign version observed by the enumeration gets a
+// read-from edge — directory listing IS a namespace read.
+func (b *Backend) MergeReaddirVersions(epochID EpochID, origDir string) ([]MergedDirEntry, error) {
+	dir := filepath.Clean(origDir)
+
+	type override struct {
+		physical string // "" = hidden by whiteout
+	}
+	overrides := make(map[string]override)
+	type dep struct {
+		vid VersionID
+		obj ObjectID
+	}
+	var deps []dep
+
+	b.mu.Lock()
+	for obj := range b.versionsByObject {
+		if filepath.Dir(obj) != dir {
+			continue
+		}
+		v := b.viewVersionLocked(epochID, obj)
+		if v == nil {
+			continue
+		}
+		name := filepath.Base(obj)
+		if v.Operation == OpWhiteout {
+			overrides[name] = override{physical: ""}
+		} else {
+			overrides[name] = override{physical: v.StagePath}
+		}
+		if b.needsReadDepLocked(epochID, ResolveResult{Version: v.ID, Producer: v.Owner}) {
+			deps = append(deps, dep{vid: v.ID, obj: obj})
+		}
+	}
+	b.mu.Unlock()
+
+	// Record the namespace read-from edges durably (outside b.mu).
+	for _, d := range deps {
+		b.recordReadDep(epochID, d.vid, d.obj)
+	}
+
+	result := make([]MergedDirEntry, 0, len(overrides))
+	if oents, err := os.ReadDir(dir); err == nil {
+		for _, e := range oents {
+			name := e.Name()
+			if _, overridden := overrides[name]; overridden {
+				continue
+			}
+			info, ierr := e.Info()
+			if ierr != nil {
+				continue
+			}
+			result = append(result, MergedDirEntry{
+				Name: name,
+				Mode: info.Mode(),
+				Ino:  inodeOf(info),
+			})
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	for name, ov := range overrides {
+		if ov.physical == "" {
+			continue // whiteout
+		}
+		st, err := os.Lstat(ov.physical)
+		if err != nil {
+			continue // payload not materialized yet (fresh create pre-open)
+		}
+		result = append(result, MergedDirEntry{
+			Name: name,
+			Mode: st.Mode(),
+			Ino:  inodeOf(st),
+		})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
 }
 
 // isAncestor reports whether dir is a strict ancestor directory of child.
@@ -1133,121 +1245,188 @@ func isAncestor(dir, child string) bool {
 	return child[len(dir)] == os.PathSeparator
 }
 
-// restoreWhiteout recreates a whiteout marker file. Best-effort: errors are
-// logged but not returned (used during rollback cleanup paths).
-func restoreWhiteout(whiteoutPath string) {
-	if err := os.MkdirAll(filepath.Dir(whiteoutPath), 0o755); err != nil {
-		log.Printf("[backend] restoreWhiteout: mkdir %q: %v", whiteoutPath, err)
-		return
-	}
-	f, err := os.OpenFile(whiteoutPath, os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		log.Printf("[backend] restoreWhiteout: create %q: %v", whiteoutPath, err)
-		return
-	}
-	f.Close()
-	log.Printf("[backend] restoreWhiteout: restored %q", whiteoutPath)
+// --- Version creation (write path) ---
+
+// versionSpec describes the version a Record*/Prepare* call wants to create.
+type versionSpec struct {
+	op         VersionOp
+	mode       uint32
+	rdev       uint64
+	renameFrom string
+	linkTarget string
+	dir        bool
 }
 
-func (b *Backend) nextSeq() int64 { b.seq++; return b.seq }
+// materializeVersionLocked idempotently produces the PHYSICAL stage payload
+// for v. It must run BEFORE insertVersionLocked so the copy-up base resolves
+// against the pre-insert chain — live apply and WAL-replay redo therefore
+// derive the identical source. Must be called with b.mu held.
+func (b *Backend) materializeVersionLocked(v *FileVersion) error {
+	switch v.Operation {
+	case OpWhiteout:
+		// Whiteouts are purely logical; the marker is debug-only.
+		if marker, err := whiteoutMarkerFor(b.stagingDir, b.trackedDir, v.Owner, v.LogicalPath); err == nil {
+			_ = writeWhiteoutMarker(marker)
+		}
+		return nil
 
-// hasWriteEntry reports whether the given agent already has an active
-// OverlayWriteEntry or OverlayMkdirEntry for origPath that has NOT been
-// superseded by a later Unlink/Rmdir on the same path. Used to dedupe
-// repeated open(W) calls.
-func (b *Backend) hasWriteEntry(cgroupID, origPath string) bool {
-	agent, ok := b.agents[cgroupID]
-	if !ok {
-		return false
-	}
-	// Iterate from the most recent entry backwards so that an
-	// Unlink/Rmdir that follows a Write correctly invalidates the
-	// dedup: the agent deleted and then re-wrote the path, so a
-	// fresh WriteEntry is needed.
-	for i := len(agent.UndoLog) - 1; i >= 0; i-- {
-		entry := agent.UndoLog[i]
-		if entry.Path() != origPath {
-			continue
+	case OpMkdir:
+		if err := ensureParentDir(v.StagePath); err != nil {
+			return err
 		}
-		switch entry.(type) {
-		case *OverlayWriteEntry, *OverlayMkdirEntry:
-			return true
-		case *OverlayUnlinkEntry, *OverlayRmdirEntry:
-			return false
+		mode := os.FileMode(v.Mode)
+		if mode == 0 {
+			mode = 0o755
 		}
+		if err := os.Mkdir(v.StagePath, mode); err != nil && !os.IsExist(err) {
+			return fmt.Errorf("stage mkdir %q: %w", v.StagePath, err)
+		}
+		return nil
+
+	case OpMknod:
+		if err := ensureParentDir(v.StagePath); err != nil {
+			return err
+		}
+		if err := syscall.Mknod(v.StagePath, v.Mode, int(v.Rdev)); err != nil && !errors.Is(err, syscall.EEXIST) {
+			return fmt.Errorf("stage mknod %q: %w", v.StagePath, err)
+		}
+		return nil
+
+	case OpLink:
+		if err := ensureParentDir(v.StagePath); err != nil {
+			return err
+		}
+		if _, err := os.Lstat(v.StagePath); err == nil {
+			return nil // already materialized (redo)
+		}
+		src := b.resolveLocked(v.Owner, filepath.Clean(v.LinkTarget))
+		if !src.Exists {
+			return syscall.ENOENT
+		}
+		if st, err := os.Lstat(src.PhysicalPath); err != nil || st.IsDir() {
+			return syscall.ENOENT
+		}
+		// Prefer a real hard link (shared inode within the epoch's view);
+		// fall back to a copy across staging trees / devices.
+		if err := os.Link(src.PhysicalPath, v.StagePath); err != nil {
+			if os.IsExist(err) {
+				return nil
+			}
+			if cerr := copyUpFile(src.PhysicalPath, v.StagePath); cerr != nil {
+				return fmt.Errorf("stage link %q -> %q: %w", src.PhysicalPath, v.StagePath, cerr)
+			}
+		}
+		return nil
+
+	default: // OpWrite / OpXattr: content payload
+		if v.RenameFrom != "" {
+			// Rename destination: materialize as a copy of the SOURCE as
+			// seen in the owner's view (file or whole directory tree). The
+			// source object is hidden by its whiteout version, so the copy
+			// is not moved: the whole epoch rolls back atomically.
+			if _, err := os.Lstat(v.StagePath); err == nil {
+				return nil // already materialized (redo)
+			}
+			src := b.resolveLocked(v.Owner, filepath.Clean(v.RenameFrom))
+			if !src.Exists {
+				return syscall.ENOENT
+			}
+			st, err := os.Lstat(src.PhysicalPath)
+			if err != nil {
+				return err
+			}
+			if st.IsDir() {
+				return copyUpDir(src.PhysicalPath, v.StagePath)
+			}
+			return copyUpFile(src.PhysicalPath, v.StagePath)
+		}
+		// Plain write / copy-up. copyUpFile publishes atomically (temp +
+		// rename), so an existing stage payload is COMPLETE by construction
+		// — never re-copy over it: on WAL replay it may already carry user
+		// writes made after the original copy-up.
+		if _, err := os.Lstat(v.StagePath); err == nil {
+			return nil
+		}
+		base := b.resolveLocked(v.Owner, v.LogicalPath)
+		if base.Exists && base.PhysicalPath != "" {
+			if _, err := os.Lstat(base.PhysicalPath); err == nil {
+				return copyUpFile(base.PhysicalPath, v.StagePath)
+			}
+		}
+		// Fresh create: just make sure the parent exists; the FUSE caller
+		// populates the file via open(O_CREAT).
+		return ensureParentDir(v.StagePath)
 	}
-	return false
 }
 
-// --- Record methods ---
-
-// PrepareWrite ensures an overlay copy of origPath exists (copy-up if the
-// orig file exists and the overlay does not), records an OverlayWriteEntry
-// for the agent if it has not already done so, and returns the overlay
-// path the caller should open for writing.
-//
-// Strict write-ahead protocol: the WAL record is appended+fsynced BEFORE
-// any overlay mutation (copy-up, whiteout removal). On crash between WAL
-// fsync and mutation, replayWAL's redoEntry idempotently restores the
-// overlay state.
-func (b *Backend) PrepareWrite(cgroupID, origPath string) (string, error) {
+// createVersion runs the full write-ahead protocol for ONE new version and
+// returns it. The caller-facing Record*/Prepare* methods are thin wrappers.
+func (b *Backend) createVersion(epochID EpochID, origPath string, spec versionSpec) (*FileVersion, error) {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
-	overlayPath, err := overlayPathFor(b.stagingDir, b.trackedDir, origPath)
-	if err != nil {
-		return "", err
-	}
-	whPath, _ := whiteoutPathFor(b.stagingDir, b.trackedDir, origPath)
-
-	// Reject writes targeting a symlink. copyUpFile preserves symlinks
-	// verbatim, and every subsequent mutation primitive used by Open(W)
-	// / Setattr (syscall.Open without O_NOFOLLOW, os.Truncate, os.Chmod,
-	// os.Chown, os.Chtimes) follows symlinks. If orig is a symlink, the
-	// resulting fd / metadata change would be applied to the symlink
-	// target — potentially a file inside orig — directly breaking the
-	// "orig is immutable" invariant. The check is done before allocating
-	// a seq / writing WAL so a refused op leaves no trace.
-	if st, lerr := os.Lstat(origPath); lerr == nil && st.Mode()&os.ModeSymlink != 0 {
-		return "", syscall.EOPNOTSUPP
+	obj := filepath.Clean(origPath)
+	var stage string
+	if spec.op != OpWhiteout {
+		var err error
+		stage, err = stagePathFor(b.stagingDir, b.trackedDir, epochID, obj)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Whiteouts still need path validation (escape rejection).
+		if _, err := relFromTracked(b.trackedDir, obj); err != nil {
+			return nil, err
+		}
 	}
 
 	// --- compute (under mu) ---
 	b.mu.Lock()
-	if b.hasWriteEntry(cgroupID, origPath) {
-		// Already recorded for this agent; a duplicate WAL marker would
-		// just be filtered by replayWAL. Skip WAL+apply, only refresh
-		// dirty graph.
-		b.markDirty(cgroupID, origPath)
-		b.mu.Unlock()
-		log.Printf("[backend] PrepareWrite: agent=%q path=%q already recorded, skip", cgroupID, origPath)
-		return overlayPath, nil
-	}
-	hadWh := false
-	if whPath != "" {
-		if _, statErr := os.Lstat(whPath); statErr == nil {
-			hadWh = true
+	if spec.op == OpWrite && spec.renameFrom == "" {
+		// Reject writes targeting a symlink: every subsequent mutation
+		// primitive used by Open(W)/Setattr follows symlinks, so the change
+		// would land on the link TARGET and escape version tracking.
+		view := b.resolveLocked(epochID, obj)
+		if view.Exists && view.PhysicalPath != "" {
+			if st, lerr := os.Lstat(view.PhysicalPath); lerr == nil && st.Mode()&os.ModeSymlink != 0 {
+				b.mu.Unlock()
+				return nil, syscall.EOPNOTSUPP
+			}
+		}
+		// Dedup: the epoch already owns the newest version of this object
+		// and it carries content — repeated open(W) reuses it.
+		if own := b.latestOwnVersionLocked(epochID, obj); own != nil &&
+			b.visibleHead[obj] == own.ID && own.Operation != OpWhiteout && own.StagePath != "" {
+			b.mu.Unlock()
+			log.Printf("[backend] createVersion: epoch=%q path=%q reuse v%d", epochID, obj, own.ID)
+			return own, nil
 		}
 	}
-	// Record orig file size so redoEntry can detect partial copy-up after
-	// a crash between io.Copy and fsync in copyUpFile.
-	var origSize int64
-	if origInfo, statErr := os.Lstat(origPath); statErr == nil && !origInfo.IsDir() {
-		origSize = origInfo.Size()
-	}
 	seqNum := b.nextSeq()
-	rec := WALRecord{
-		CgroupID:          cgroupID,
-		SeqNum:            seqNum,
-		Entry:             SerializableEntry{Type: "write", SeqNum: seqNum, OrigPath: origPath, OverlayPath: overlayPath, HadWhiteout: hadWh, WhiteoutPath: whPath, OrigSize: origSize},
-		DirtyOverlayPaths: []string{overlayPath},
+	vid := VersionID(b.nextVersion)
+	b.nextVersion++
+	v := &FileVersion{
+		ID:          vid,
+		Owner:       epochID,
+		LogicalPath: obj,
+		StagePath:   stage,
+		Seq:         seqNum,
+		Operation:   spec.op,
+		State:       VSpeculative,
+		Mode:        spec.mode,
+		Rdev:        spec.rdev,
+		RenameFrom:  spec.renameFrom,
+		LinkTarget:  spec.linkTarget,
+		Dir:         spec.dir,
 	}
+	pv := marshalVersion(v)
+	rec := WALRecord{EpochID: string(epochID), SeqNum: seqNum, Version: &pv}
 	b.mu.Unlock()
 
 	// --- WAL fsync (group-commit) ---
 	if err := <-b.submitWAL(rec); err != nil {
 		b.applyTurnAbort(seqNum)
-		return "", err
+		return nil, err
 	}
 
 	// --- apply (in seq order, under mu) ---
@@ -1258,389 +1437,150 @@ func (b *Backend) PrepareWrite(cgroupID, origPath string) (string, error) {
 		b.mu.Unlock()
 	}()
 
-	if err := ensureOverlayParent(overlayPath); err != nil {
+	if err := b.materializeVersionLocked(v); err != nil {
+		// The WAL record is durable; replay will retry the same idempotent
+		// materialization. Surface the error but still link the version so
+		// memory and WAL agree (fail closed: rollback removes both).
+		b.insertVersionLocked(v)
+		return nil, fmt.Errorf("materialize %s %q: %w", spec.op, obj, err)
+	}
+	b.insertVersionLocked(v)
+	log.Printf("[backend] createVersion: epoch=%q op=%s path=%q v%d parent=v%d",
+		epochID, spec.op, obj, v.ID, v.Parent)
+	return v, nil
+}
+
+// PrepareWrite ensures the epoch owns a content-bearing version of origPath
+// (copy-up from its resolved view if needed) and returns the stage path the
+// caller should open for writing.
+func (b *Backend) PrepareWrite(epochID EpochID, origPath string) (string, error) {
+	v, err := b.createVersion(epochID, origPath, versionSpec{op: OpWrite})
+	if err != nil {
 		return "", err
 	}
-	// Check ancestor whiteouts at apply time: if a parent directory was
-	// deleted (whiteout created) by another agent while we waited for
-	// WAL fsync, abort this write to maintain view consistency.
-	if hasAncestorWhiteoutOverlay(b.stagingDir, overlayPath) {
-		return "", fmt.Errorf("ancestor directory of %q has been deleted", origPath)
-	}
-	if _, statErr := os.Lstat(overlayPath); os.IsNotExist(statErr) {
-		if _, oerr := os.Lstat(origPath); oerr == nil {
-			if err := copyUpFile(origPath, overlayPath); err != nil {
-				return "", fmt.Errorf("copy-up %q: %w", origPath, err)
-			}
-		}
-	}
-	// Re-check whiteout state at apply time to close the TOCTOU window
-	// between compute (hadWh snapshot) and apply. Another agent may have
-	// created or removed a whiteout while we waited for WAL fsync.
-	if whPath != "" {
-		if _, statErr := os.Lstat(whPath); statErr == nil {
-			// Whiteout exists now — remove it and record hadWh=true so
-			// rollback can restore it.
-			hadWh = true
-			if _, err := removeWhiteout(b.stagingDir, b.trackedDir, origPath); err != nil {
-				return "", err
-			}
-		}
-		// If whiteout is absent at apply time but was present at compute
-		// time, another agent already removed it. Keep hadWh as-is from
-		// compute so our rollback still restores it (the other agent's
-		// rollback is responsible for its own whiteout lifecycle).
-	}
-
-	agent := b.ensureAgent(cgroupID)
-	b.markDirty(cgroupID, origPath)
-
-	// If there are old UndoLog entries for this path (e.g. the agent
-	// previously unlinked and now re-writes), remove them. Keeping
-	// stale Unlink/Rmdir entries would cause promote to execute both
-	// the unlink's "remove orig" and the write's "rename overlay→orig",
-	// leaving orig deleted.
-	cleanedStale := false
-	if len(agent.UndoLog) > 0 {
-		kept := agent.UndoLog[:0]
-		for _, e := range agent.UndoLog {
-			if e.Path() == origPath {
-				cleanedStale = true
-				continue
-			}
-			kept = append(kept, e)
-		}
-		agent.UndoLog = kept
-	}
-	// When we cleaned stale Unlink/Rmdir entries, the new write fully
-	// supersedes the old delete-then-write sequence. Set hadWh=false so
-	// that rolling back the new write does NOT restore a whiteout that
-	// belonged to the superseded sequence.
-	if cleanedStale {
-		hadWh = false
-	}
-
-	log.Printf("[backend] PrepareWrite: agent=%q path=%q overlay=%q hadWhiteout=%v", cgroupID, origPath, overlayPath, hadWh)
-	agent.UndoLog = append(agent.UndoLog, &OverlayWriteEntry{
-		baseEntry:    baseEntry{SeqNum: seqNum},
-		OrigPath:     origPath,
-		OverlayPath:  overlayPath,
-		HadWhiteout:  hadWh,
-		WhiteoutPath: whPath,
-		OrigSize:     origSize,
-	})
-	return overlayPath, nil
+	return v.StagePath, nil
 }
 
-// PrepareCreate prepares the overlay for a brand new file at origPath.
-// Behaves like PrepareWrite but does not require the orig file to exist.
-// Any existing whiteout for the path is removed.
-func (b *Backend) PrepareCreate(cgroupID, origPath string) (string, error) {
-	return b.PrepareWrite(cgroupID, origPath)
+// PrepareCreate prepares a version for a brand new file at origPath.
+// Identical to PrepareWrite (a missing base simply means a fresh create).
+func (b *Backend) PrepareCreate(epochID EpochID, origPath string) (string, error) {
+	return b.PrepareWrite(epochID, origPath)
 }
 
-// RecordMkdir records an overlay mkdir. The overlay directory is created
-// here (so subsequent FUSE lookups see it). Any whiteout is cleared.
-func (b *Backend) RecordMkdir(cgroupID, origPath string, mode uint32) error {
+// RecordMkdir records a directory created speculatively by the epoch.
+func (b *Backend) RecordMkdir(epochID EpochID, origPath string, mode uint32) error {
+	_, err := b.createVersion(epochID, origPath, versionSpec{op: OpMkdir, mode: mode})
+	return err
+}
+
+// RecordUnlink records a file deletion as a whiteout version.
+func (b *Backend) RecordUnlink(epochID EpochID, origPath string) error {
+	_, err := b.createVersion(epochID, origPath, versionSpec{op: OpWhiteout})
+	return err
+}
+
+// RecordRmdir records a directory removal as a recursive whiteout version.
+func (b *Backend) RecordRmdir(epochID EpochID, origPath string) error {
+	_, err := b.createVersion(epochID, origPath, versionSpec{op: OpWhiteout, dir: true})
+	return err
+}
+
+// RecordMknod records a special file (FIFO / socket / device) creation.
+func (b *Backend) RecordMknod(epochID EpochID, origPath string, mode uint32, rdev uint64) error {
+	_, err := b.createVersion(epochID, origPath, versionSpec{op: OpMknod, mode: mode, rdev: rdev})
+	return err
+}
+
+// RecordLink creates a hard link version at linkOrig pointing to targetOrig.
+// The target's actually-resolved version is recorded as a read-from
+// dependency (the link's content derives from it). Hard links to directories
+// are rejected (EPERM), matching link(2). Returns the link's stage path.
+func (b *Backend) RecordLink(epochID EpochID, targetOrig, linkOrig string) (string, error) {
+	tgt := b.Resolve(epochID, targetOrig) // records the read-from edge
+	if !tgt.Exists {
+		return "", syscall.ENOENT
+	}
+	if st, lerr := os.Lstat(tgt.PhysicalPath); lerr == nil && st.IsDir() {
+		return "", syscall.EPERM
+	}
+	v, err := b.createVersion(epochID, linkOrig, versionSpec{op: OpLink, linkTarget: filepath.Clean(targetOrig)})
+	if err != nil {
+		return "", err
+	}
+	return v.StagePath, nil
+}
+
+// RecordXattrWrite ensures origPath is copied up and versioned, so a
+// subsequent Setxattr/Removexattr applied to the returned stage path is
+// captured for rollback and promotion. ACLs are stored as xattrs, so this
+// covers them.
+func (b *Backend) RecordXattrWrite(epochID EpochID, origPath string) (string, error) {
+	return b.PrepareWrite(epochID, origPath)
+}
+
+// RecordRename records a rename as a version PAIR sharing one WAL fsync: a
+// content version at newPath (RenameFrom=oldPath) plus a whiteout version at
+// oldPath. Both carry consecutive seqs so replay reconstructs the same order.
+func (b *Backend) RecordRename(epochID EpochID, oldPath, newPath string) error {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
-	overlayPath, err := overlayPathFor(b.stagingDir, b.trackedDir, origPath)
-	if err != nil {
-		return err
-	}
-	whPath, _ := whiteoutPathFor(b.stagingDir, b.trackedDir, origPath)
-
-	b.mu.Lock()
-	// Dedup check FIRST — before allocating a seq, writing WAL, or
-	// mutating the overlay. If the agent already has an active
-	// MkdirEntry for this path (not superseded by a Rmdir), skip
-	// everything. Previously the dedup was checked after os.Mkdir and
-	// WAL write, causing WAL/UndoLog divergence on crash.
-	if b.hasWriteEntry(cgroupID, origPath) {
-		b.markDirty(cgroupID, origPath)
-		b.mu.Unlock()
-		log.Printf("[backend] RecordMkdir: agent=%q path=%q already recorded, skip", cgroupID, origPath)
-		return nil
-	}
-	hadWh := false
-	if whPath != "" {
-		if _, statErr := os.Lstat(whPath); statErr == nil {
-			hadWh = true
-		}
-	}
-	seqNum := b.nextSeq()
-	rec := WALRecord{
-		CgroupID: cgroupID,
-		SeqNum:   seqNum,
-		Entry:    SerializableEntry{Type: "mkdir", SeqNum: seqNum, OrigPath: origPath, OverlayPath: overlayPath, Mode: mode, HadWhiteout: hadWh, WhiteoutPath: whPath},
-	}
-	b.mu.Unlock()
-
-	if err := <-b.submitWAL(rec); err != nil {
-		b.applyTurnAbort(seqNum)
-		return err
-	}
-
-	b.mu.Lock()
-	b.applyTurnWait(seqNum)
-	defer func() {
-		b.applyTurnDone(seqNum)
-		b.mu.Unlock()
-	}()
-
-	if err := ensureOverlayParent(overlayPath); err != nil {
-		return err
-	}
-	// Check ancestor whiteouts at apply time: if a parent directory was
-	// deleted while we waited for WAL fsync, abort this mkdir.
-	if hasAncestorWhiteoutOverlay(b.stagingDir, overlayPath) {
-		return fmt.Errorf("ancestor directory of %q has been deleted", origPath)
-	}
-	// Re-check whiteout state at apply time to close the TOCTOU window
-	// between compute (hadWh snapshot) and apply.
-	if whPath != "" {
-		if _, statErr := os.Lstat(whPath); statErr == nil {
-			hadWh = true
-			if _, err := removeWhiteout(b.stagingDir, b.trackedDir, origPath); err != nil {
-				return err
-			}
-		}
-	}
-	if err := os.Mkdir(overlayPath, os.FileMode(mode)); err != nil && !os.IsExist(err) {
-		return fmt.Errorf("overlay mkdir %q: %w", overlayPath, err)
-	}
-
-	agent := b.ensureAgent(cgroupID)
-	b.markDirty(cgroupID, origPath)
-
-	// Clean up stale entries for the same path (e.g. mkdir → rmdir →
-	// mkdir). See PrepareWrite for the same logic.
-	if len(agent.UndoLog) > 0 {
-		kept := agent.UndoLog[:0]
-		for _, e := range agent.UndoLog {
-			if e.Path() == origPath {
-				continue
-			}
-			kept = append(kept, e)
-		}
-		agent.UndoLog = kept
-	}
-
-	log.Printf("[backend] RecordMkdir: agent=%q path=%q mode=%#o hadWhiteout=%v", cgroupID, origPath, mode, hadWh)
-	agent.UndoLog = append(agent.UndoLog, &OverlayMkdirEntry{
-		baseEntry:    baseEntry{SeqNum: seqNum},
-		OrigPath:     origPath,
-		OverlayPath:  overlayPath,
-		Mode:         mode,
-		HadWhiteout:  hadWh,
-		WhiteoutPath: whPath,
-	})
-	return nil
-}
-
-// RecordUnlink records a file unlink. A whiteout marker is written so the
-// file disappears from the merged view; the orig file is not touched.
-func (b *Backend) RecordUnlink(cgroupID, origPath string) error {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
-
-	overlayPath, err := overlayPathFor(b.stagingDir, b.trackedDir, origPath)
-	if err != nil {
-		return err
-	}
-	whiteoutPath, err := whiteoutPathFor(b.stagingDir, b.trackedDir, origPath)
-	if err != nil {
-		return err
-	}
-
-	b.mu.Lock()
-	seqNum := b.nextSeq()
-	rec := WALRecord{
-		CgroupID:          cgroupID,
-		SeqNum:            seqNum,
-		Entry:             SerializableEntry{Type: "unlink", SeqNum: seqNum, OrigPath: origPath, OverlayPath: overlayPath, WhiteoutPath: whiteoutPath},
-		DirtyOverlayPaths: []string{whiteoutPath},
-	}
-	b.mu.Unlock()
-
-	if err := <-b.submitWAL(rec); err != nil {
-		b.applyTurnAbort(seqNum)
-		return err
-	}
-
-	b.mu.Lock()
-	b.applyTurnWait(seqNum)
-	defer func() {
-		b.applyTurnDone(seqNum)
-		b.mu.Unlock()
-	}()
-
-	// Close the TOCTOU window with another agent's rmdir on a parent: if
-	// any ancestor was whiteout'd while we waited for WAL fsync, abort
-	// instead of materialising a whiteout inside an already-deleted dir.
-	if hasAncestorWhiteoutOverlay(b.stagingDir, overlayPath) {
-		return fmt.Errorf("ancestor directory of %q has been deleted", origPath)
-	}
-
-	if err := writeWhiteout(b.stagingDir, b.trackedDir, origPath); err != nil {
-		return err
-	}
-	// Clean up any existing overlay copy so it doesn't become an orphan
-	// file. The whiteout already hides the path in the merged view, but
-	// leaving the overlay copy wastes disk space and could cause confusion
-	// if the whiteout is later removed (e.g. by a partial rollback).
-	if _, statErr := os.Lstat(overlayPath); statErr == nil {
-		os.Remove(overlayPath) // best-effort; ignore errors
-	}
-
-	agent := b.ensureAgent(cgroupID)
-	b.markDirty(cgroupID, origPath)
-	log.Printf("[backend] RecordUnlink: agent=%q path=%q", cgroupID, origPath)
-	agent.UndoLog = append(agent.UndoLog, &OverlayUnlinkEntry{
-		baseEntry:    baseEntry{SeqNum: seqNum},
-		OrigPath:     origPath,
-		OverlayPath:  overlayPath,
-		WhiteoutPath: whiteoutPath,
-	})
-	return nil
-}
-
-// RecordRmdir records a directory removal. Like Unlink but for a dir tree.
-func (b *Backend) RecordRmdir(cgroupID, origPath string) error {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
-
-	overlayPath, err := overlayPathFor(b.stagingDir, b.trackedDir, origPath)
-	if err != nil {
-		return err
-	}
-	whiteoutPath, err := whiteoutPathFor(b.stagingDir, b.trackedDir, origPath)
-	if err != nil {
-		return err
-	}
-
-	b.mu.Lock()
-	seqNum := b.nextSeq()
-	rec := WALRecord{
-		CgroupID:          cgroupID,
-		SeqNum:            seqNum,
-		Entry:             SerializableEntry{Type: "rmdir", SeqNum: seqNum, OrigPath: origPath, OverlayPath: overlayPath, WhiteoutPath: whiteoutPath},
-		DirtyOverlayPaths: []string{whiteoutPath},
-	}
-	b.mu.Unlock()
-
-	if err := <-b.submitWAL(rec); err != nil {
-		b.applyTurnAbort(seqNum)
-		return err
-	}
-
-	b.mu.Lock()
-	b.applyTurnWait(seqNum)
-	defer func() {
-		b.applyTurnDone(seqNum)
-		b.mu.Unlock()
-	}()
-
-	// Apply-time ancestor whiteout check: same TOCTOU window as RecordUnlink.
-	if hasAncestorWhiteoutOverlay(b.stagingDir, overlayPath) {
-		return fmt.Errorf("ancestor directory of %q has been deleted", origPath)
-	}
-
-	if err := writeWhiteout(b.stagingDir, b.trackedDir, origPath); err != nil {
-		return err
-	}
-	// Do NOT os.RemoveAll the overlay directory here. Other agents may
-	// have written files into this overlay directory; removing it would
-	// silently destroy their data. The whiteout already hides the entire
-	// directory from the merged view. On rollback the whiteout is removed
-	// (revealing any surviving overlay children); on promote the
-	// OverlayRmdirEntry.Promote() removes the orig directory tree.
-
-	agent := b.ensureAgent(cgroupID)
-	b.markDirty(cgroupID, origPath)
-	log.Printf("[backend] RecordRmdir: agent=%q path=%q", cgroupID, origPath)
-	agent.UndoLog = append(agent.UndoLog, &OverlayRmdirEntry{
-		baseEntry:    baseEntry{SeqNum: seqNum},
-		OrigPath:     origPath,
-		OverlayPath:  overlayPath,
-		WhiteoutPath: whiteoutPath,
-	})
-	return nil
-}
-
-// RecordRename records a file or directory rename. It is implemented as a
-// pair of overlay actions (write at newPath + unlink at oldPath) so both
-// edges of the dependency graph are tracked uniformly. The caller should
-// invoke this BEFORE relying on the new path: by the time the call
-// returns, the overlay has been mutated to reflect the rename.
-func (b *Backend) RecordRename(cgroupID, oldPath, newPath string) error {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
-
-	// Cycle detection: prevent rename("dir", "dir/subdir/...") which
-	// would create a directory cycle and confuse rollback ordering.
 	cleanOld := filepath.Clean(oldPath)
 	cleanNew := filepath.Clean(newPath)
-	// rename(x, x) is a POSIX no-op. Without this short-circuit the
-	// apply phase below would `os.RemoveAll(dstOverlay)` (which is the
-	// same path as srcOverlay) and then fail to rename the now-deleted
-	// source onto itself, leaving the overlay in an inconsistent state.
+	// rename(x, x) is a POSIX no-op.
 	if cleanOld == cleanNew {
 		return nil
 	}
+	// Cycle detection: prevent rename("dir", "dir/subdir/...").
 	if strings.HasPrefix(cleanNew, cleanOld+string(os.PathSeparator)) {
 		return fmt.Errorf("rename %q into its own subdirectory %q is not allowed", oldPath, newPath)
 	}
-
-	srcOverlay, err := overlayPathFor(b.stagingDir, b.trackedDir, oldPath)
+	dstStage, err := stagePathFor(b.stagingDir, b.trackedDir, epochID, cleanNew)
 	if err != nil {
 		return err
 	}
-	dstOverlay, err := overlayPathFor(b.stagingDir, b.trackedDir, newPath)
-	if err != nil {
-		return err
-	}
-	srcWhiteout, err := whiteoutPathFor(b.stagingDir, b.trackedDir, oldPath)
-	if err != nil {
-		return err
-	}
-	dstWhiteout, err := whiteoutPathFor(b.stagingDir, b.trackedDir, newPath)
-	if err != nil {
+	if _, err := relFromTracked(b.trackedDir, cleanOld); err != nil {
 		return err
 	}
 
+	// --- compute (under mu) ---
 	b.mu.Lock()
-	// Check if the destination has a whiteout BEFORE we remove it in the
-	// apply phase, so rollback can restore it.
-	dstHadWh := false
-	if dstWhiteout != "" {
-		if _, statErr := os.Lstat(dstWhiteout); statErr == nil {
-			dstHadWh = true
-		}
+	src := b.resolveLocked(epochID, cleanOld)
+	if !src.Exists {
+		b.mu.Unlock()
+		return syscall.ENOENT
 	}
-	// Record orig file size for redo partial-write detection.
-	var origSize int64
-	if origInfo, statErr := os.Lstat(oldPath); statErr == nil && !origInfo.IsDir() {
-		origSize = origInfo.Size()
+	srcIsDir := false
+	if st, serr := os.Lstat(src.PhysicalPath); serr == nil {
+		srcIsDir = st.IsDir()
 	}
+	needSrcDep := b.needsReadDepLocked(epochID, src)
 	seq1 := b.nextSeq()
 	seq2 := b.nextSeq()
+	dstVid := VersionID(b.nextVersion)
+	srcVid := VersionID(b.nextVersion + 1)
+	b.nextVersion += 2
+	dstV := &FileVersion{
+		ID: dstVid, Owner: epochID, LogicalPath: cleanNew, StagePath: dstStage,
+		Seq: seq1, Operation: OpWrite, State: VSpeculative, RenameFrom: cleanOld,
+	}
+	srcV := &FileVersion{
+		ID: srcVid, Owner: epochID, LogicalPath: cleanOld,
+		Seq: seq2, Operation: OpWhiteout, State: VSpeculative, Dir: srcIsDir,
+	}
+	pv1 := marshalVersion(dstV)
+	pv2 := marshalVersion(srcV)
 	recs := []WALRecord{
-		{
-			CgroupID:          cgroupID,
-			SeqNum:            seq1,
-			Entry:             SerializableEntry{Type: "write", SeqNum: seq1, OrigPath: newPath, OverlayPath: dstOverlay, HadWhiteout: dstHadWh, WhiteoutPath: dstWhiteout, OrigSize: origSize},
-			DirtyOverlayPaths: []string{dstOverlay},
-		},
-		{
-			CgroupID:          cgroupID,
-			SeqNum:            seq2,
-			Entry:             SerializableEntry{Type: "unlink", SeqNum: seq2, OrigPath: oldPath, OverlayPath: srcOverlay, WhiteoutPath: srcWhiteout},
-			DirtyOverlayPaths: []string{srcWhiteout},
-		},
+		{EpochID: string(epochID), SeqNum: seq1, Version: &pv1},
+		{EpochID: string(epochID), SeqNum: seq2, Version: &pv2},
 	}
 	b.mu.Unlock()
+
+	// The rename READS the source version it moves: record that dependency
+	// durably before the mutation lands.
+	if needSrcDep {
+		b.recordReadDep(epochID, src.Version, cleanOld)
+	}
 
 	// Both records go in one fsync; share the same waiter.
 	if err := <-b.submitWAL(recs...); err != nil {
@@ -1651,727 +1591,87 @@ func (b *Backend) RecordRename(cgroupID, oldPath, newPath string) error {
 
 	b.mu.Lock()
 	b.applyTurnWait(seq1)
-	// We will advance both seqs ourselves under mu (seq1 then seq2).
 	defer func() {
 		b.applyTurnDone(seq1)
 		b.applyTurnDone(seq2)
 		b.mu.Unlock()
 	}()
 
-	// Apply-time ancestor whiteout check on BOTH endpoints. If a parent
-	// of the source has been deleted, copy-up would materialise files in
-	// an already-deleted directory; if a parent of the destination has
-	// been deleted, we'd rename into an invisible location.
-	if hasAncestorWhiteoutOverlay(b.stagingDir, srcOverlay) {
-		return fmt.Errorf("ancestor directory of %q has been deleted", oldPath)
+	// Materialize + insert the destination FIRST (its copy source is the
+	// still-visible old path), then hide the source with its whiteout.
+	if err := b.materializeVersionLocked(dstV); err != nil {
+		b.insertVersionLocked(dstV)
+		b.insertVersionLocked(srcV)
+		return fmt.Errorf("materialize rename %q -> %q: %w", cleanOld, cleanNew, err)
 	}
-	if hasAncestorWhiteoutOverlay(b.stagingDir, dstOverlay) {
-		return fmt.Errorf("ancestor directory of %q has been deleted", newPath)
-	}
-
-	if _, statErr := os.Lstat(srcOverlay); os.IsNotExist(statErr) {
-		if origInfo, oerr := os.Lstat(oldPath); oerr == nil {
-			if origInfo.IsDir() {
-				if err := copyUpDir(oldPath, srcOverlay); err != nil {
-					return fmt.Errorf("rename copy-up dir %q: %w", oldPath, err)
-				}
-			} else {
-				if err := copyUpFile(oldPath, srcOverlay); err != nil {
-					return fmt.Errorf("rename copy-up %q: %w", oldPath, err)
-				}
-			}
-		}
-	}
-	if err := ensureOverlayParent(dstOverlay); err != nil {
-		return err
-	}
-	if _, err := os.Lstat(dstOverlay); err == nil {
-		if err := os.RemoveAll(dstOverlay); err != nil {
-			return fmt.Errorf("rename clear dst overlay: %w", err)
-		}
-	}
-	if _, err := removeWhiteout(b.stagingDir, b.trackedDir, newPath); err != nil {
-		return err
-	}
-	if err := os.Rename(srcOverlay, dstOverlay); err != nil {
-		return fmt.Errorf("rename overlay %q -> %q: %w", srcOverlay, dstOverlay, err)
-	}
-	if err := writeWhiteout(b.stagingDir, b.trackedDir, oldPath); err != nil {
-		return err
-	}
-
-	agent := b.ensureAgent(cgroupID)
-	b.markDirty(cgroupID, oldPath)
-	b.markDirty(cgroupID, newPath)
-
-	// Clean stale entries for both oldPath and newPath. Without this,
-	// prior writes/unlinks on these paths would remain in the UndoLog
-	// and cause conflicting operations during promote.
-	if len(agent.UndoLog) > 0 {
-		kept := agent.UndoLog[:0]
-		for _, e := range agent.UndoLog {
-			if e.Path() == oldPath || e.Path() == newPath {
-				continue
-			}
-			kept = append(kept, e)
-		}
-		agent.UndoLog = kept
-	}
-
-	log.Printf("[backend] RecordRename: agent=%q %q -> %q", cgroupID, oldPath, newPath)
-	agent.UndoLog = append(agent.UndoLog,
-		&OverlayWriteEntry{
-			baseEntry:    baseEntry{SeqNum: seq1},
-			OrigPath:     newPath,
-			OverlayPath:  dstOverlay,
-			HadWhiteout:  dstHadWh,
-			WhiteoutPath: dstWhiteout,
-			OrigSize:     origSize,
-		},
-		&OverlayUnlinkEntry{
-			baseEntry:    baseEntry{SeqNum: seq2},
-			OrigPath:     oldPath,
-			OverlayPath:  srcOverlay,
-			WhiteoutPath: srcWhiteout,
-		},
-	)
+	b.insertVersionLocked(dstV)
+	_ = b.materializeVersionLocked(srcV)
+	b.insertVersionLocked(srcV)
+	log.Printf("[backend] RecordRename: epoch=%q %q -> %q (v%d, v%d)", epochID, cleanOld, cleanNew, dstVid, srcVid)
 	return nil
-}
-
-// RecordLink creates a hard link at linkOrig pointing to targetOrig, tracked
-// for rollback/promote. The target is copied up so the overlay holds a shared
-// inode; on promote a real hard link is created on the orig FS. Hard links to
-// directories are rejected (EPERM), matching link(2).
-func (b *Backend) RecordLink(cgroupID, targetOrig, linkOrig string) error {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
-
-	if st, lerr := os.Lstat(targetOrig); lerr == nil && st.IsDir() {
-		return syscall.EPERM
-	}
-
-	linkOverlay, err := overlayPathFor(b.stagingDir, b.trackedDir, linkOrig)
-	if err != nil {
-		return err
-	}
-	targetOverlay, err := overlayPathFor(b.stagingDir, b.trackedDir, targetOrig)
-	if err != nil {
-		return err
-	}
-	linkWhiteout, _ := whiteoutPathFor(b.stagingDir, b.trackedDir, linkOrig)
-
-	b.mu.Lock()
-	hadWh := false
-	if linkWhiteout != "" {
-		if _, statErr := os.Lstat(linkWhiteout); statErr == nil {
-			hadWh = true
-		}
-	}
-	seqNum := b.nextSeq()
-	rec := WALRecord{
-		CgroupID:          cgroupID,
-		SeqNum:            seqNum,
-		Entry:             SerializableEntry{Type: "link", SeqNum: seqNum, OrigPath: linkOrig, OverlayPath: linkOverlay, TargetPath: targetOrig, HadWhiteout: hadWh, WhiteoutPath: linkWhiteout},
-		DirtyOverlayPaths: []string{linkOverlay},
-	}
-	b.mu.Unlock()
-
-	if err := <-b.submitWAL(rec); err != nil {
-		b.applyTurnAbort(seqNum)
-		return err
-	}
-
-	b.mu.Lock()
-	b.applyTurnWait(seqNum)
-	defer func() {
-		b.applyTurnDone(seqNum)
-		b.mu.Unlock()
-	}()
-
-	if hasAncestorWhiteoutOverlay(b.stagingDir, linkOverlay) {
-		return fmt.Errorf("ancestor directory of %q has been deleted", linkOrig)
-	}
-	// Ensure the target has an overlay copy so both names share one inode.
-	if _, statErr := os.Lstat(targetOverlay); os.IsNotExist(statErr) {
-		if _, oerr := os.Lstat(targetOrig); oerr == nil {
-			if err := copyUpFile(targetOrig, targetOverlay); err != nil {
-				return fmt.Errorf("link copy-up target %q: %w", targetOrig, err)
-			}
-		} else {
-			return syscall.ENOENT
-		}
-	}
-	if err := ensureOverlayParent(linkOverlay); err != nil {
-		return err
-	}
-	if _, err := os.Lstat(linkOverlay); err == nil {
-		if err := os.RemoveAll(linkOverlay); err != nil {
-			return fmt.Errorf("link clear dst overlay: %w", err)
-		}
-	}
-	if linkWhiteout != "" {
-		if _, statErr := os.Lstat(linkWhiteout); statErr == nil {
-			hadWh = true
-			if _, err := removeWhiteout(b.stagingDir, b.trackedDir, linkOrig); err != nil {
-				return err
-			}
-		}
-	}
-	if err := os.Link(targetOverlay, linkOverlay); err != nil {
-		return fmt.Errorf("link overlay %q -> %q: %w", targetOverlay, linkOverlay, err)
-	}
-
-	agent := b.ensureAgent(cgroupID)
-	b.markDirty(cgroupID, linkOrig)
-	// The link's content derives from the target: if the target's writer(s)
-	// roll back, this link must too. Add that dependency WITHOUT registering
-	// this agent as a writer of the target (it did not modify the target).
-	if tw, ok := b.fileDirty[targetOrig]; ok {
-		for prev := range tw {
-			if prev != cgroupID {
-				b.addDependency(prev, cgroupID)
-			}
-		}
-	}
-	if len(agent.UndoLog) > 0 {
-		kept := agent.UndoLog[:0]
-		for _, e := range agent.UndoLog {
-			if e.Path() == linkOrig {
-				continue
-			}
-			kept = append(kept, e)
-		}
-		agent.UndoLog = kept
-	}
-	log.Printf("[backend] RecordLink: agent=%q %q -> %q", cgroupID, linkOrig, targetOrig)
-	agent.UndoLog = append(agent.UndoLog, &OverlayLinkEntry{
-		baseEntry:     baseEntry{SeqNum: seqNum},
-		OrigPath:      linkOrig,
-		TargetOrig:    targetOrig,
-		OverlayPath:   linkOverlay,
-		OverlayTarget: targetOverlay,
-		HadWhiteout:   hadWh,
-		WhiteoutPath:  linkWhiteout,
-	})
-	return nil
-}
-
-// RecordMknod creates a special file (FIFO / socket / char / block device, or
-// a plain node) at origPath in the overlay, tracked for rollback/promote.
-// `mode` includes the S_IFMT type bits; `rdev` is the device number.
-func (b *Backend) RecordMknod(cgroupID, origPath string, mode uint32, rdev uint64) error {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
-
-	overlayPath, err := overlayPathFor(b.stagingDir, b.trackedDir, origPath)
-	if err != nil {
-		return err
-	}
-	whPath, _ := whiteoutPathFor(b.stagingDir, b.trackedDir, origPath)
-
-	b.mu.Lock()
-	hadWh := false
-	if whPath != "" {
-		if _, statErr := os.Lstat(whPath); statErr == nil {
-			hadWh = true
-		}
-	}
-	seqNum := b.nextSeq()
-	rec := WALRecord{
-		CgroupID:          cgroupID,
-		SeqNum:            seqNum,
-		Entry:             SerializableEntry{Type: "mknod", SeqNum: seqNum, OrigPath: origPath, OverlayPath: overlayPath, Mode: mode, Rdev: rdev, HadWhiteout: hadWh, WhiteoutPath: whPath},
-		DirtyOverlayPaths: []string{overlayPath},
-	}
-	b.mu.Unlock()
-
-	if err := <-b.submitWAL(rec); err != nil {
-		b.applyTurnAbort(seqNum)
-		return err
-	}
-
-	b.mu.Lock()
-	b.applyTurnWait(seqNum)
-	defer func() {
-		b.applyTurnDone(seqNum)
-		b.mu.Unlock()
-	}()
-
-	if hasAncestorWhiteoutOverlay(b.stagingDir, overlayPath) {
-		return fmt.Errorf("ancestor directory of %q has been deleted", origPath)
-	}
-	if err := ensureOverlayParent(overlayPath); err != nil {
-		return err
-	}
-	if _, err := os.Lstat(overlayPath); err == nil {
-		if err := os.RemoveAll(overlayPath); err != nil {
-			return fmt.Errorf("mknod clear overlay: %w", err)
-		}
-	}
-	if whPath != "" {
-		if _, statErr := os.Lstat(whPath); statErr == nil {
-			hadWh = true
-			if _, err := removeWhiteout(b.stagingDir, b.trackedDir, origPath); err != nil {
-				return err
-			}
-		}
-	}
-	if err := syscall.Mknod(overlayPath, mode, int(rdev)); err != nil {
-		return fmt.Errorf("mknod overlay %q: %w", overlayPath, err)
-	}
-
-	agent := b.ensureAgent(cgroupID)
-	b.markDirty(cgroupID, origPath)
-	if len(agent.UndoLog) > 0 {
-		kept := agent.UndoLog[:0]
-		for _, e := range agent.UndoLog {
-			if e.Path() == origPath {
-				continue
-			}
-			kept = append(kept, e)
-		}
-		agent.UndoLog = kept
-	}
-	log.Printf("[backend] RecordMknod: agent=%q path=%q mode=%#o rdev=%d", cgroupID, origPath, mode, rdev)
-	agent.UndoLog = append(agent.UndoLog, &OverlayMknodEntry{
-		baseEntry:    baseEntry{SeqNum: seqNum},
-		OrigPath:     origPath,
-		OverlayPath:  overlayPath,
-		Mode:         mode,
-		Rdev:         rdev,
-		HadWhiteout:  hadWh,
-		WhiteoutPath: whPath,
-	})
-	return nil
-}
-
-// RecordXattrWrite ensures origPath is copied up and tracked as a write, so a
-// subsequent syscall.Setxattr / Removexattr applied to the returned overlay
-// copy is captured for rollback (discard overlay) and promote (rename carries
-// the modified attributes). ACLs are stored as xattrs, so this covers them.
-func (b *Backend) RecordXattrWrite(cgroupID, origPath string) (string, error) {
-	return b.PrepareWrite(cgroupID, origPath)
-}
-
-// HasActiveState reports whether the agent has any undo log entries or dirty
-// files. Purely-read agents with no active state do not need read dependency
-// tracking (they have nothing to roll back).
-func (b *Backend) HasActiveState(cgroupID string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	agent, ok := b.agents[cgroupID]
-	if !ok {
-		return false
-	}
-	return len(agent.UndoLog) > 0 || len(agent.DirtyFiles) > 0
-}
-
-// RecordReadOpen records that an agent opened the path for reading. It
-// adds dependency edges so a later cascaded rollback affects this agent
-// too, but it does NOT add an undo log entry or mark the file dirty.
-// A WAL record is written so that the dependency survives a crash.
-func (b *Backend) RecordReadOpen(cgroupID, origPath string) {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
-
-	b.mu.Lock()
-	seqNum := b.nextSeq()
-	rec := WALRecord{
-		CgroupID:  cgroupID,
-		SeqNum:    seqNum,
-		ControlOp: "read_dep",
-		Entry:     SerializableEntry{OrigPath: origPath},
-	}
-	b.mu.Unlock()
-
-	if err := <-b.submitWAL(rec); err != nil {
-		log.Printf("[backend] RecordReadOpen WAL: %v", err)
-		b.applyTurnAbort(seqNum)
-		return
-	}
-
-	b.mu.Lock()
-	b.applyTurnWait(seqNum)
-	defer func() {
-		b.applyTurnDone(seqNum)
-		b.mu.Unlock()
-	}()
-
-	if writers, ok := b.fileDirty[origPath]; ok {
-		for prev := range writers {
-			if prev != cgroupID {
-				b.addDependency(prev, cgroupID)
-			}
-		}
-	}
-	for dirtyPath, dirtyWriters := range b.fileDirty {
-		if dirtyPath == origPath {
-			continue
-		}
-		if isAncestor(dirtyPath, origPath) || isAncestor(origPath, dirtyPath) {
-			for prev := range dirtyWriters {
-				if prev != cgroupID {
-					b.addDependency(prev, cgroupID)
-				}
-			}
-		}
-	}
-	b.ensureAgent(cgroupID)
 }
 
 // --- Rollback ---
 
-// RollbackLastEntry undoes the most recent log entry of the given agent.
-// Used to recover from a FUSE op that prepared overlay state but failed
-// downstream.
-func (b *Backend) RollbackLastEntry(cgroupID string) {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
-
-	b.mu.Lock()
-	agent, ok := b.agents[cgroupID]
-	if !ok || len(agent.UndoLog) == 0 {
-		b.mu.Unlock()
-		return
-	}
-	seqNum := b.nextSeq()
-	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "rollback_last"}
-	b.mu.Unlock()
-
-	if err := <-b.submitWAL(rec); err != nil {
-		log.Printf("[backend] RollbackLastEntry WAL: %v", err)
-		b.applyTurnAbort(seqNum)
-		return
-	}
-
-	b.mu.Lock()
-	b.applyTurnWait(seqNum)
-	defer func() {
-		b.applyTurnDone(seqNum)
-		b.mu.Unlock()
-	}()
-	b.rollbackLastInternal(cgroupID)
+// AffectedSet reports the epochs (and their cgroup attributions) touched by
+// a cascade rollback.
+type AffectedSet struct {
+	Epochs  []string
+	Cgroups []string
 }
 
-// rollbackBlockedBy returns the first agent id in `ids` whose promotion has
-// STARTED (State >= Finalizing) and is therefore no longer safely rollable:
-// some of its writes may already be published to the real workspace with their
-// undo-log entries removed, so undoing would leave a torn, unrecoverable
-// state. Returns "" if none. Must be called with b.mu held.
+// rollbackBlockedBy returns the first epoch id in `ids` whose promotion has
+// STARTED (State >= Finalizing) and is therefore no longer safely rollable.
+// Returns "" if none. Must be called with b.mu held.
 //
-// This is the AUTHORITATIVE rollback gate. It lives inside the *Internal
-// executors (rollbackInternal / rollbackEpochInternal / rollbackLastInternal)
-// so that BOTH live apply AND WAL replay enforce the identical rule. In
-// particular it closes the race where a lower-seq commit is ordered before a
-// rollback: the commit applies first and moves an agent into Finalizing, and
-// the later rollback record — already durable — is then refused / no-op'd here
-// rather than corrupting the published state.
-func (b *Backend) rollbackBlockedBy(ids map[string]struct{}) string {
+// This is the AUTHORITATIVE rollback gate. It lives inside rollbackInternal
+// so that BOTH live apply AND WAL replay enforce the identical rule.
+func (b *Backend) rollbackBlockedBy(ids map[EpochID]struct{}) EpochID {
 	for id := range ids {
-		if a := b.agents[id]; a != nil && a.State >= Finalizing {
+		if ep := b.epochs[id]; ep != nil && ep.State >= Finalizing {
 			return id
 		}
 	}
 	return ""
 }
 
-// rollbackLastInternal performs the in-memory + disk effects of
-// RollbackLastEntry without touching the WAL. Must be called with b.mu
-// held. Used both by RollbackLastEntry and by replayWAL.
-func (b *Backend) rollbackLastInternal(cgroupID string) {
-	agent, ok := b.agents[cgroupID]
-	if !ok || len(agent.UndoLog) == 0 {
-		return
-	}
-	// Authoritative guard: once promotion has started this agent cannot be
-	// rolled back. Safe no-op (this executor is void and shared with replay).
-	if agent.State >= Finalizing {
-		log.Printf("[backend] RollbackLastEntry refused: agent=%q is %s (promotion started)", cgroupID, agent.State)
-		return
-	}
-	last := agent.UndoLog[len(agent.UndoLog)-1]
-	agent.UndoLog = agent.UndoLog[:len(agent.UndoLog)-1]
-	if err := last.Rollback(); err != nil {
-		log.Printf("[backend] RollbackLastEntry: %v", err)
-	}
-
-	// Clean dirty tracking if no remaining entries reference this path.
-	// Without this the path stays marked dirty, blocking promote/finalize.
-	path := last.Path()
-	stillReferenced := false
-	for _, e := range agent.UndoLog {
-		if e.Path() == path {
-			stillReferenced = true
-			break
-		}
-	}
-	if !stillReferenced {
-		delete(agent.DirtyFiles, path)
-		if writers, ok := b.fileDirty[path]; ok {
-			delete(writers, cgroupID)
-			if len(writers) == 0 {
-				delete(b.fileDirty, path)
-			}
-		}
-	}
-}
-
-// --- Speculative epoch (per-agent, epoch-scoped rollback) ---
-//
-// A speculative epoch segments a single agent's undo log by seq so a batch
-// of file changes can be committed or rolled back in isolation, mirroring
-// the ShadowProc process layer's begin_speculative / reject_pid / commit_pid.
-// This lets the orchestrator roll back a long-lived bash session's file
-// changes AND its process state for one tool invocation together, while the
-// session (agent) keeps living for the next epoch.
-
-// BeginEpoch opens a speculative epoch for the agent. Undo entries recorded
-// after this call carry a strictly greater seq than the marker allocated
-// here, which is how CommitEpoch / RollbackEpoch tell epoch work apart from
-// pre-epoch state. Follows the standard write-ahead protocol.
-func (b *Backend) BeginEpoch(cgroupID string) {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
-
-	b.mu.Lock()
-	seqNum := b.nextSeq()
-	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "begin_epoch"}
-	b.mu.Unlock()
-
-	if err := <-b.submitWAL(rec); err != nil {
-		log.Printf("[backend] BeginEpoch WAL: %v", err)
-		b.applyTurnAbort(seqNum)
-		return
-	}
-
-	b.mu.Lock()
-	b.applyTurnWait(seqNum)
-	defer func() {
-		b.applyTurnDone(seqNum)
-		b.mu.Unlock()
-	}()
-	b.beginEpochInternal(cgroupID, seqNum)
-}
-
-// beginEpochInternal performs the in-memory effect of BeginEpoch without
-// touching the WAL. Must be called with b.mu held. Used both by BeginEpoch
-// and by replayWAL.
-func (b *Backend) beginEpochInternal(cgroupID string, startSeq int64) {
-	agent := b.ensureAgent(cgroupID)
-	agent.EpochOpen = true
-	agent.EpochStartSeq = startSeq
-	log.Printf("[backend] BeginEpoch: agent=%q startSeq=%d", cgroupID, startSeq)
-}
-
-// CommitEpoch accepts the current epoch's changes: the epoch's undo entries
-// stay in the agent's undo log as ordinary (still-uncommitted, still-in-
-// overlay) state and will be promoted when the whole agent is committed.
-// Only the epoch marker is cleared. No-op if no epoch is open.
-func (b *Backend) CommitEpoch(cgroupID string) {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
-
-	b.mu.Lock()
-	agent, ok := b.agents[cgroupID]
-	if !ok || !agent.EpochOpen {
-		b.mu.Unlock()
-		log.Printf("[backend] CommitEpoch: agent %q has no open epoch, no-op", cgroupID)
-		return
-	}
-	seqNum := b.nextSeq()
-	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "commit_epoch"}
-	b.mu.Unlock()
-
-	if err := <-b.submitWAL(rec); err != nil {
-		log.Printf("[backend] CommitEpoch WAL: %v", err)
-		b.applyTurnAbort(seqNum)
-		return
-	}
-
-	b.mu.Lock()
-	b.applyTurnWait(seqNum)
-	defer func() {
-		b.applyTurnDone(seqNum)
-		b.mu.Unlock()
-	}()
-	b.commitEpochInternal(cgroupID)
-}
-
-// commitEpochInternal performs the in-memory effect of CommitEpoch without
-// touching the WAL. Must be called with b.mu held. Used both by CommitEpoch
-// and by replayWAL.
-func (b *Backend) commitEpochInternal(cgroupID string) {
-	agent, ok := b.agents[cgroupID]
-	if !ok {
-		return
-	}
-	agent.EpochOpen = false
-	log.Printf("[backend] CommitEpoch: agent=%q epoch accepted", cgroupID)
-}
-
-// RollbackEpoch undoes every undo-log entry the agent recorded during the
-// current epoch (Seq > EpochStartSeq), in reverse seq order, then clears the
-// epoch marker. Pre-epoch state is left intact. Unlike the whole-agent
-// Rollback, this is SINGLE-AGENT scoped: it does NOT cascade to dependent
-// agents (an epoch is a private speculative batch of one session).
-//
-// Returns nil on success (including the no-open-epoch no-op). Returns an error
-// if the epoch's promotion has already started (State >= Finalizing): the
-// published file state can no longer be undone, so the caller (orchestrator)
-// MUST NOT roll back the corresponding process/network state either.
-func (b *Backend) RollbackEpoch(cgroupID string) error {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
-
-	b.mu.Lock()
-	agent, ok := b.agents[cgroupID]
-	if !ok || !agent.EpochOpen {
-		b.mu.Unlock()
-		log.Printf("[backend] RollbackEpoch: agent %q has no open epoch, no-op", cgroupID)
-		return nil
-	}
-	// Fast-path pre-check: refuse an obviously-blocked rollback before writing
-	// a WAL record. The authoritative gate is in rollbackEpochInternal, which
-	// also catches the race where a lower-seq commit finalizes after this
-	// check but before apply.
-	if agent.State >= Finalizing {
-		st := agent.State
-		b.mu.Unlock()
-		return fmt.Errorf("rollback_epoch refused: agent %q is %s (promotion started; published state cannot be undone)", cgroupID, st)
-	}
-	seqNum := b.nextSeq()
-	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "rollback_epoch"}
-	b.mu.Unlock()
-
-	if err := <-b.submitWAL(rec); err != nil {
-		log.Printf("[backend] RollbackEpoch WAL: %v", err)
-		b.applyTurnAbort(seqNum)
-		return err
-	}
-
-	b.mu.Lock()
-	b.applyTurnWait(seqNum)
-	defer func() {
-		b.applyTurnDone(seqNum)
-		b.mu.Unlock()
-	}()
-	return b.rollbackEpochInternal(cgroupID)
-}
-
-// rollbackEpochInternal performs the in-memory + disk effects of
-// RollbackEpoch without touching the WAL. Must be called with b.mu held.
-// Used both by RollbackEpoch and by replayWAL. Returns an error (without
-// mutating anything) when the authoritative guard refuses the rollback; on
-// replay the caller ignores the return so the durable record is a safe no-op.
-func (b *Backend) rollbackEpochInternal(cgroupID string) error {
-	agent, ok := b.agents[cgroupID]
-	if !ok {
-		return nil
-	}
-	// Authoritative guard: once promotion has started this agent cannot be
-	// rolled back. Refuse in-place (shared by live apply and WAL replay).
-	if agent.State >= Finalizing {
-		log.Printf("[backend] RollbackEpoch refused: agent=%q is %s (promotion started)", cgroupID, agent.State)
-		return fmt.Errorf("rollback_epoch refused: agent %q is %s (promotion started; published state cannot be undone)", cgroupID, agent.State)
-	}
-	mark := agent.EpochStartSeq
-	// Partition the undo log: keep pre-epoch entries, collect epoch entries
-	// (Seq > mark) to undo.
-	var epochEntries []LogEntry
-	var kept []LogEntry
-	for _, e := range agent.UndoLog {
-		if e.Seq() > mark {
-			epochEntries = append(epochEntries, e)
-		} else {
-			kept = append(kept, e)
-		}
-	}
-	agent.UndoLog = kept
-
-	// Undo in reverse seq order (most recent first), reusing each entry's
-	// own Rollback primitive.
-	sort.Slice(epochEntries, func(i, j int) bool { return epochEntries[i].Seq() > epochEntries[j].Seq() })
-	var invalidatePaths []string
-	seen := make(map[string]struct{})
-	for _, e := range epochEntries {
-		if err := e.Rollback(); err != nil {
-			log.Printf("[backend] RollbackEpoch: agent=%q seq=%d: %v", cgroupID, e.Seq(), err)
-		}
-		if p := e.Path(); p != "" {
-			if _, dup := seen[p]; !dup {
-				seen[p] = struct{}{}
-				invalidatePaths = append(invalidatePaths, p)
-			}
-		}
-	}
-
-	// Recompute dirty tracking: a path stays dirty only if a kept (pre-epoch)
-	// entry still references it.
-	for p := range seen {
-		stillReferenced := false
-		for _, k := range agent.UndoLog {
-			if k.Path() == p {
-				stillReferenced = true
-				break
-			}
-		}
-		if !stillReferenced {
-			delete(agent.DirtyFiles, p)
-			if writers, ok := b.fileDirty[p]; ok {
-				delete(writers, cgroupID)
-				if len(writers) == 0 {
-					delete(b.fileDirty, p)
-				}
-			}
-		}
-	}
-
-	agent.EpochOpen = false
-	if b.invalidateFn != nil && len(invalidatePaths) > 0 {
-		b.invalidateFn(invalidatePaths)
-	}
-	log.Printf("[backend] RollbackEpoch: agent=%q undid %d epoch entry(ies)", cgroupID, len(epochEntries))
-	return nil
-}
-
-// Rollback discards all overlay artefacts produced by the named agent and
-// every agent that transitively depends on it.
-func (b *Backend) Rollback(cgroupID string) error {
-	_, err := b.RollbackWithAffected(cgroupID)
+// Rollback discards every version produced by the named epoch and every
+// epoch that transitively depends on it (read-from or write-write edges).
+func (b *Backend) Rollback(epochID EpochID) error {
+	_, err := b.RollbackWithAffected(epochID)
 	return err
 }
 
-// RollbackWithAffected performs a cascading rollback and returns the list of
-// all affected cgroup IDs (including the target itself). This is used by the
-// orchestrator to coordinate with ShadowProc.
-func (b *Backend) RollbackWithAffected(cgroupID string) ([]string, error) {
+// RollbackWithAffected performs a cascading rollback and returns the
+// affected epoch set (including the target itself) so the orchestrator can
+// coordinate the process layer.
+func (b *Backend) RollbackWithAffected(epochID EpochID) (AffectedSet, error) {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
 	b.mu.Lock()
-	if _, ok := b.agents[cgroupID]; !ok {
+	if _, ok := b.epochs[epochID]; !ok {
 		b.mu.Unlock()
-		log.Printf("[backend] Rollback: agent %q not found, no-op", cgroupID)
-		return nil, nil
+		log.Printf("[backend] Rollback: epoch %q not found, no-op", epochID)
+		return AffectedSet{}, nil
 	}
-	// Fast-path pre-check (before allocating a seq / writing WAL): refuse an
-	// obviously-blocked rollback early. This is only an optimization -- the
+	// Fast-path pre-check (before allocating a seq / writing WAL). The
 	// AUTHORITATIVE gate is inside rollbackInternal, which also catches the
-	// race where a lower-seq commit moves an agent to Finalizing after this
+	// race where a lower-seq commit moves an epoch to Finalizing after this
 	// check but before apply.
-	if blk := b.rollbackBlockedBy(b.reachableFrom(cgroupID)); blk != "" {
-		st := b.agents[blk].State
+	if blk := b.rollbackBlockedBy(b.reachableFrom(epochID)); blk != "" {
+		st := b.epochs[blk].State
 		b.mu.Unlock()
-		return nil, fmt.Errorf("rollback refused: agent %q is %s (promotion started; published state cannot be undone)", blk, st)
+		return AffectedSet{}, fmt.Errorf("rollback refused: epoch %q is %s (promotion started; published state cannot be undone)", blk, st)
 	}
 	seqNum := b.nextSeq()
-	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "rollback"}
+	rec := WALRecord{EpochID: string(epochID), SeqNum: seqNum, ControlOp: "rollback"}
 	b.mu.Unlock()
 
 	if err := <-b.submitWAL(rec); err != nil {
 		log.Printf("[backend] Rollback WAL: %v", err)
 		b.applyTurnAbort(seqNum)
-		return nil, err
+		return AffectedSet{}, err
 	}
 
 	b.mu.Lock()
@@ -2381,171 +1681,126 @@ func (b *Backend) RollbackWithAffected(cgroupID string) ([]string, error) {
 		b.mu.Unlock()
 	}()
 
-	// Compute affected set before rollback executes cleanup
-	affected := b.reachableFrom(cgroupID)
-	affectedList := make([]string, 0, len(affected))
-	for id := range affected {
-		affectedList = append(affectedList, id)
-	}
-
-	err := b.rollbackInternal(cgroupID)
-	return affectedList, err
+	// Compute affected set before rollback executes cleanup.
+	set := b.affectedSetLocked(epochID)
+	err := b.rollbackInternal(epochID)
+	return set, err
 }
 
-// GetAffected returns the list of cgroup IDs that would be affected by a
-// rollback of the given agent, without actually performing the rollback.
-func (b *Backend) GetAffected(cgroupID string) []string {
+// affectedSetLocked snapshots the cascade set of epochID. Must be called
+// with b.mu held.
+func (b *Backend) affectedSetLocked(epochID EpochID) AffectedSet {
+	var set AffectedSet
+	cgSeen := make(map[string]struct{})
+	for id := range b.reachableFrom(epochID) {
+		set.Epochs = append(set.Epochs, string(id))
+		if ep := b.epochs[id]; ep != nil && ep.CgroupID != "" {
+			if _, dup := cgSeen[ep.CgroupID]; !dup {
+				cgSeen[ep.CgroupID] = struct{}{}
+				set.Cgroups = append(set.Cgroups, ep.CgroupID)
+			}
+		}
+	}
+	sort.Strings(set.Epochs)
+	sort.Strings(set.Cgroups)
+	return set
+}
+
+// GetAffected returns the epochs that would be affected by a rollback of the
+// given epoch, without performing it.
+func (b *Backend) GetAffected(epochID EpochID) AffectedSet {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, ok := b.agents[cgroupID]; !ok {
-		return nil
+	if _, ok := b.epochs[epochID]; !ok {
+		return AffectedSet{}
 	}
-	affected := b.reachableFrom(cgroupID)
-	result := make([]string, 0, len(affected))
-	for id := range affected {
-		result = append(result, id)
-	}
-	return result
+	return b.affectedSetLocked(epochID)
 }
 
-// ListAgents returns the cgroup IDs of all currently tracked agents.
-func (b *Backend) ListAgents() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	result := make([]string, 0, len(b.agents))
-	for id := range b.agents {
-		result = append(result, id)
-	}
-	return result
-}
-
-// rollbackInternal performs the cascading rollback (in-memory cleanup +
-// overlay deletions) without touching the WAL. Must be called with b.mu
-// held. Used both by Rollback and by replayWAL.
-func (b *Backend) rollbackInternal(cgroupID string) error {
-	if _, ok := b.agents[cgroupID]; !ok {
+// rollbackInternal performs the cascading rollback: remove every affected
+// epoch's versions from the chains (re-exposing predecessor versions), drop
+// the epochs and their staging trees. Must be called with b.mu held. Used
+// both by RollbackWithAffected and by replayWAL.
+func (b *Backend) rollbackInternal(epochID EpochID) error {
+	if _, ok := b.epochs[epochID]; !ok {
 		return nil
 	}
-	affected := b.reachableFrom(cgroupID)
-	// Authoritative guard (shared by live apply AND WAL replay): refuse if the
-	// target or ANY agent this rollback would cascade into has entered
-	// Finalizing/Finalized. On the live path this returns an error; on replay
-	// the return is ignored, so a durable rollback record that raced a
-	// lower-seq commit becomes a safe no-op instead of corrupting the
-	// already-published state.
+	affected := b.reachableFrom(epochID)
+	// Authoritative guard (shared by live apply AND WAL replay): refuse if
+	// the target or ANY epoch this rollback would cascade into has entered
+	// Finalizing/Finalized. On replay the return is ignored, so a durable
+	// rollback record that raced a lower-seq commit becomes a safe no-op.
 	if blk := b.rollbackBlockedBy(affected); blk != "" {
-		log.Printf("[backend] Rollback refused: agent=%q is %s (promotion started; published state cannot be undone)", blk, b.agents[blk].State)
-		return fmt.Errorf("rollback refused: agent %q is %s (promotion started; published state cannot be undone)", blk, b.agents[blk].State)
+		log.Printf("[backend] Rollback refused: epoch=%q is %s (promotion started)", blk, b.epochs[blk].State)
+		return fmt.Errorf("rollback refused: epoch %q is %s (promotion started; published state cannot be undone)", blk, b.epochs[blk].State)
 	}
-	memberList := make([]string, 0, len(affected))
+	memberList := make([]EpochID, 0, len(affected))
 	for id := range affected {
 		memberList = append(memberList, id)
 	}
-	log.Printf("[backend] Rollback: agent=%q cascading to %v", cgroupID, memberList)
+	log.Printf("[backend] Rollback: epoch=%q cascading to %v", epochID, memberList)
 
-	var allEntries []LogEntry
-	dirtyPaths := make(map[string]struct{})
+	// Force-close every tracked fd of affected epochs BEFORE the version
+	// files disappear, so processes get EBADF instead of stale data.
 	for id := range affected {
-		agent := b.agents[id]
-		allEntries = append(allEntries, agent.UndoLog...)
-		for p := range agent.DirtyFiles {
-			dirtyPaths[p] = struct{}{}
-		}
-	}
-	sort.Slice(allEntries, func(i, j int) bool { return allEntries[i].Seq() > allEntries[j].Seq() })
-
-	// Collect the tracked paths touched by this rollback so the FUSE layer
-	// can invalidate the kernel dentry cache for them once the overlay files
-	// have been removed below (see Backend.invalidateFn).
-	var invalidatePaths []string
-	if b.invalidateFn != nil {
-		seen := make(map[string]struct{})
-		add := func(p string) {
-			if _, ok := seen[p]; !ok {
-				seen[p] = struct{}{}
-				invalidatePaths = append(invalidatePaths, p)
-			}
-		}
-		for _, entry := range allEntries {
-			add(entry.Path())
-		}
-		for p := range dirtyPaths {
-			add(p)
-		}
+		b.CloseEpochFDs(id)
 	}
 
-	pathFullyAffected := func(path string) bool {
-		writers, ok := b.fileDirty[path]
-		if !ok {
-			return true
-		}
-		for w := range writers {
-			if _, in := affected[w]; !in {
-				return false
-			}
-		}
-		return true
-	}
-
-	// Force-close every tracked fd belonging to an affected agent BEFORE
-	// executing rollback entries or deleting overlay files. This ensures
-	// the agent's process receives EBADF on its next I/O instead of
-	// silently reading stale data from a dangling fd to an overlay file
-	// that is about to be rolled back or deleted.
+	// Collect touched objects and rebuild their chains without the affected
+	// epochs' versions. The new tail (if any) is RE-EXPOSED as the head.
+	touched := make(map[ObjectID]struct{})
 	for id := range affected {
-		b.CloseAgentFDs(id)
-	}
-
-	var errs []error
-	for _, entry := range allEntries {
-		if !pathFullyAffected(entry.Path()) {
-			switch v := entry.(type) {
-			case *OverlayWriteEntry:
-				if v.HadWhiteout && v.WhiteoutPath != "" {
-					restoreWhiteout(v.WhiteoutPath)
-				}
-			case *OverlayMkdirEntry:
-				if v.HadWhiteout && v.WhiteoutPath != "" {
-					restoreWhiteout(v.WhiteoutPath)
-				}
+		ep := b.epochs[id]
+		for _, vid := range ep.Versions {
+			if v, ok := b.versionByID[vid]; ok {
+				touched[v.LogicalPath] = struct{}{}
 			}
-			continue
-		}
-		if err := entry.Rollback(); err != nil {
-			errs = append(errs, err)
+			delete(b.versionByID, vid)
 		}
 	}
-	for path := range dirtyPaths {
-		if !pathFullyAffected(path) {
-			continue
+	for obj := range touched {
+		chain := b.versionsByObject[obj]
+		kept := chain[:0]
+		for _, vid := range chain {
+			if _, alive := b.versionByID[vid]; alive {
+				kept = append(kept, vid)
+			}
 		}
-		_ = removeOverlayState(b.stagingDir, b.trackedDir, path, true)
+		if len(kept) == 0 {
+			delete(b.versionsByObject, obj)
+			delete(b.visibleHead, obj)
+		} else {
+			b.versionsByObject[obj] = kept
+			b.visibleHead[obj] = kept[len(kept)-1]
+		}
 	}
 
-	b.cleanupAgents(affected)
-	if b.invalidateFn != nil && len(invalidatePaths) > 0 {
-		b.invalidateFn(invalidatePaths)
+	// Remove staging payload and epoch records, then prune graph edges.
+	for id := range affected {
+		if err := os.RemoveAll(epochDirFor(b.stagingDir, id)); err != nil {
+			log.Printf("[backend] Rollback: remove stage dir of %q: %v", id, err)
+		}
 	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
+	b.cleanupEpochs(affected)
+
+	if b.invalidateFn != nil && len(touched) > 0 {
+		paths := make([]string, 0, len(touched))
+		for p := range touched {
+			paths = append(paths, p)
+		}
+		b.invalidateFn(paths)
 	}
 	return nil
 }
 
-func (b *Backend) cleanupAgents(affected map[string]struct{}) {
+// cleanupEpochs drops the affected epochs and every graph edge touching
+// them. Must be called with b.mu held.
+func (b *Backend) cleanupEpochs(affected map[EpochID]struct{}) {
+	b.graphGen++
 	for id := range affected {
-		delete(b.agents, id)
-	}
-	for path, writers := range b.fileDirty {
-		for id := range affected {
-			delete(writers, id)
-		}
-		if len(writers) == 0 {
-			delete(b.fileDirty, path)
-		}
-	}
-	for id := range affected {
+		delete(b.epochs, id)
 		delete(b.dependents, id)
+		delete(b.dependsOn, id)
 	}
 	for src, dsts := range b.dependents {
 		for id := range affected {
@@ -2555,9 +1810,6 @@ func (b *Backend) cleanupAgents(affected map[string]struct{}) {
 			delete(b.dependents, src)
 		}
 	}
-	for id := range affected {
-		delete(b.dependsOn, id)
-	}
 	for src, dsts := range b.dependsOn {
 		for id := range affected {
 			delete(dsts, id)
@@ -2566,28 +1818,28 @@ func (b *Backend) cleanupAgents(affected map[string]struct{}) {
 			delete(b.dependsOn, src)
 		}
 	}
+	for cg, ep := range b.activeEpochByCgroup {
+		if _, gone := affected[ep]; gone {
+			delete(b.activeEpochByCgroup, cg)
+		}
+	}
 }
 
-// --- Commit ---
+// --- Commit / finalization ---
 
-// Commit marks the agent's session as committed. The agent is retained
-// while it has uncommitted upstream dependencies; per-file promotion runs
-// for every dirty path whose writers are all committed and whose writers
-// have all-finalized upstreams.
-// PromoteFailure records why a single path's promotion failed, so the caller
-// (and get_lifecycle) can see exactly what is keeping an agent fenced.
+// PromoteFailure records why a single object's promotion failed.
 type PromoteFailure struct {
 	Path string `json:"path"`
 	Op   string `json:"op"`
 	Err  string `json:"err"`
 }
 
-// CommitResult is returned by Commit / RetryFinalize. It reports the agent's
-// resulting lifecycle state, whether it is now safe to release, which agents
-// became Finalized as a side effect, and any promotion failures that must be
-// retried before release. A non-nil error is reserved for infrastructure
-// failures (WAL); promotion failures are surfaced via Failures + a non-
-// Finalized State so the orchestrator keeps the workload fenced and retries.
+// CommitResult is returned by Commit / RetryFinalize. It reports the epoch's
+// resulting lifecycle state, whether it is now safe to release, and any
+// promotion failures that must be retried before release. A non-nil error is
+// reserved for infrastructure failures (WAL); promotion failures are
+// surfaced via Failures + a non-Finalized State so the orchestrator keeps
+// the workload fenced and retries.
 type CommitResult struct {
 	State      AgentLifecycle   `json:"state"`
 	CanRelease bool             `json:"can_release"`
@@ -2595,30 +1847,27 @@ type CommitResult struct {
 	Failures   []PromoteFailure `json:"failures,omitempty"`
 }
 
-// Commit AUTHORIZES the agent's session (policy approved) and then attempts to
-// drive it to Finalized. Authorization alone does NOT permit release: the
-// agent only becomes releasable once every dirty path has been durably
-// promoted and every upstream dependency is Finalized. Promotion failures do
-// not abort the commit; they leave the agent in AuthorizedPending/Finalizing
-// (CanRelease=false) so the caller can retry via RetryFinalize.
+// Commit AUTHORIZES the epoch (policy approved) and then attempts to drive
+// it to Finalized. Authorization alone does NOT permit release: the epoch
+// only becomes releasable once every object whose chain it participates in
+// has been durably promoted and every upstream dependency is Finalized.
 //
-// An unknown cgroup is REGISTERED here (a no-file-op agent) and immediately
+// An unknown epoch is REGISTERED here (a no-file-op epoch) and immediately
 // driven to Finalized, so the release path never has to treat "not tracked"
 // as "safe" (fail-closed).
-func (b *Backend) Commit(cgroupID string) (CommitResult, error) {
+func (b *Backend) Commit(epochID EpochID) (CommitResult, error) {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
 	b.mu.Lock()
-	agent := b.agents[cgroupID]
-	if agent != nil && agent.State >= Finalized {
+	if ep := b.epochs[epochID]; ep != nil && ep.State >= Finalized {
 		// Idempotent: already finalized.
-		res := b.lifecycleResultLocked(cgroupID)
+		res := b.lifecycleResultLocked(epochID)
 		b.mu.Unlock()
 		return res, nil
 	}
 	seqNum := b.nextSeq()
-	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "commit"}
+	rec := WALRecord{EpochID: string(epochID), SeqNum: seqNum, ControlOp: "commit"}
 	b.mu.Unlock()
 
 	if err := <-b.submitWAL(rec); err != nil {
@@ -2633,130 +1882,113 @@ func (b *Backend) Commit(cgroupID string) (CommitResult, error) {
 		b.applyTurnDone(seqNum)
 		b.mu.Unlock()
 	}()
-	b.commitInternal(cgroupID)
-	return b.lifecycleResultLocked(cgroupID), nil
+	b.commitInternal(epochID)
+	return b.lifecycleResultLocked(epochID), nil
 }
 
-// commitInternal AUTHORIZES the agent (Speculative -> AuthorizedPending),
-// registering it first if it never touched the shadowed filesystem, then runs
-// the promotion/finalization pass. Must be called with b.mu held. Used both by
-// Commit and by replayWAL; idempotent and re-runnable.
-func (b *Backend) commitInternal(cgroupID string) {
-	agent, ok := b.agents[cgroupID]
-	if !ok {
-		// Register a no-file-op agent so release gating never has to treat an
-		// unknown cgroup as safe. With no undo entries it finalizes at once.
-		agent = b.ensureAgent(cgroupID)
+// commitInternal AUTHORIZES the epoch (Speculative -> AuthorizedPending),
+// registering it first if it never touched the shadowed filesystem, then
+// runs the promotion/finalization pass. Must be called with b.mu held.
+func (b *Backend) commitInternal(epochID EpochID) {
+	ep := b.ensureEpoch(epochID, "")
+	if ep.State < AuthorizedPending {
+		ep.State = AuthorizedPending
+		log.Printf("[backend] Commit: epoch=%q authorized (pending finalization)", epochID)
 	}
-	if agent.State < AuthorizedPending {
-		agent.State = AuthorizedPending
-		log.Printf("[backend] Commit: agent=%q authorized (pending finalization)", cgroupID)
-	}
-	// Capture the (frozen) agent's dirty writable MAP_SHARED pages into the
-	// overlay BEFORE promotion, closing the mmap writeback gap for pages the
-	// frozen process never got to flush itself. FAIL CLOSED: if the capture is
-	// incomplete, abort finalization (the agent stays AuthorizedPending with
-	// FinalizeErr set, releasable=false) instead of promoting files that
-	// silently miss dirty mmap pages. retry_finalize re-attempts the quiesce.
-	if err := b.quiesceMappings(cgroupID); err != nil {
-		agent.FinalizeErr = fmt.Sprintf("mmap quiesce: %v", err)
-		log.Printf("[backend] Commit: agent=%q finalization ABORTED: %v", cgroupID, err)
+	// Capture the (frozen) processes' dirty writable MAP_SHARED pages into
+	// the epoch's stage copies BEFORE promotion. FAIL CLOSED: an incomplete
+	// capture aborts finalization (epoch stays AuthorizedPending with
+	// FinalizeErr set, releasable=false).
+	if err := b.quiesceMappings(ep); err != nil {
+		ep.FinalizeErr = fmt.Sprintf("mmap quiesce: %v", err)
+		log.Printf("[backend] Commit: epoch=%q finalization ABORTED: %v", epochID, err)
 		return
 	}
-	// Then fsync the tracked fds so promotion renames a fully up-to-date
-	// overlay copy.
-	b.flushAgentFDs(cgroupID)
+	// Then fsync the tracked fds so promotion moves fully up-to-date stage
+	// copies.
+	b.flushEpochFDs(epochID)
 	_ = b.tryPromoteAll()
 }
 
-// RetryFinalize re-runs the promotion/finalization pass for a stuck agent
-// (one left in AuthorizedPending/Finalizing by an earlier promotion failure,
-// e.g. a transient I/O error). It is safe to call repeatedly: every Promote()
-// is idempotent, so already-promoted entries are no-ops. Returns the agent's
-// resulting lifecycle. A no-op WAL "commit" record is NOT re-appended; the
-// original authorization record already drives re-promotion on replay.
-func (b *Backend) RetryFinalize(cgroupID string) (CommitResult, error) {
+// RetryFinalize re-runs the promotion/finalization pass for a stuck epoch
+// (one left in AuthorizedPending/Finalizing by an earlier promotion failure).
+// Safe to call repeatedly: every promoteVersion is idempotent.
+func (b *Backend) RetryFinalize(epochID EpochID) (CommitResult, error) {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	agent, ok := b.agents[cgroupID]
+	ep, ok := b.epochs[epochID]
 	if !ok {
-		return CommitResult{}, fmt.Errorf("retry_finalize: agent %q not found", cgroupID)
+		return CommitResult{}, fmt.Errorf("retry_finalize: epoch %q not found", epochID)
 	}
-	if agent.State < AuthorizedPending {
-		return CommitResult{}, fmt.Errorf("retry_finalize: agent %q not authorized (state=%s)", cgroupID, agent.State)
+	if ep.State < AuthorizedPending {
+		return CommitResult{}, fmt.Errorf("retry_finalize: epoch %q not authorized (state=%s)", epochID, ep.State)
 	}
-	// Re-attempt the writable-MAP_SHARED quiesce with the same fail-closed
-	// gate as commitInternal: promotion must never run against an overlay
-	// that is missing dirty mmap pages.
-	if err := b.quiesceMappings(cgroupID); err != nil {
-		agent.FinalizeErr = fmt.Sprintf("mmap quiesce: %v", err)
-		log.Printf("[backend] RetryFinalize: agent=%q ABORTED: %v", cgroupID, err)
-		return b.lifecycleResultLocked(cgroupID), nil
+	if err := b.quiesceMappings(ep); err != nil {
+		ep.FinalizeErr = fmt.Sprintf("mmap quiesce: %v", err)
+		log.Printf("[backend] RetryFinalize: epoch=%q ABORTED: %v", epochID, err)
+		return b.lifecycleResultLocked(epochID), nil
 	}
-	b.flushAgentFDs(cgroupID)
+	b.flushEpochFDs(epochID)
 	_ = b.tryPromoteAll()
-	return b.lifecycleResultLocked(cgroupID), nil
+	return b.lifecycleResultLocked(epochID), nil
 }
 
-// lifecycleResultLocked builds a CommitResult snapshot for cgroupID. Must be
+// lifecycleResultLocked builds a CommitResult snapshot for epochID. Must be
 // called with b.mu held.
-func (b *Backend) lifecycleResultLocked(cgroupID string) CommitResult {
+func (b *Backend) lifecycleResultLocked(epochID EpochID) CommitResult {
 	res := CommitResult{}
-	agent, ok := b.agents[cgroupID]
+	ep, ok := b.epochs[epochID]
 	if !ok {
-		// Absent after finalize+ack is the only benign "gone" case, but a
-		// bare absence is NOT releasable here: callers use canReleaseLocked.
 		res.State = Speculative
 		res.CanRelease = false
 		return res
 	}
-	res.State = agent.State
-	res.CanRelease = agent.State == Finalized
-	if agent.FinalizeErr != "" {
+	res.State = ep.State
+	res.CanRelease = ep.State == Finalized
+	if ep.FinalizeErr != "" {
 		res.Failures = append(res.Failures, PromoteFailure{
-			Path: "", Op: "promote", Err: agent.FinalizeErr,
+			Path: "", Op: "promote", Err: ep.FinalizeErr,
 		})
 	}
 	return res
 }
 
-// GetLifecycle reports an agent's current lifecycle state and any pending
-// promotion failure, without mutating anything. An unknown cgroup reports
+// GetLifecycle reports an epoch's current lifecycle state and any pending
+// promotion failure, without mutating anything. An unknown epoch reports
 // state "unknown" and CanRelease=false (fail-closed).
-func (b *Backend) GetLifecycle(cgroupID string) (state string, canRelease bool, finalizeErr string) {
+func (b *Backend) GetLifecycle(epochID EpochID) (state string, canRelease bool, finalizeErr string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	agent, ok := b.agents[cgroupID]
+	ep, ok := b.epochs[epochID]
 	if !ok {
 		return "unknown", false, ""
 	}
-	return agent.State.String(), agent.State == Finalized, agent.FinalizeErr
+	return ep.State.String(), ep.State == Finalized, ep.FinalizeErr
 }
 
-// AckRelease is called by the orchestrator AFTER it has successfully released
-// a Finalized agent's external effects (processes resumed, network un-fenced,
-// stdout/tool output flushed). Only then is the terminal record cleaned up.
-// Refuses to drop an agent that has not reached Finalized (fail-closed), so a
-// premature ack can never discard state that is still needed for rollback.
-func (b *Backend) AckRelease(cgroupID string) error {
+// AckRelease is called by the orchestrator AFTER it has successfully
+// released a Finalized epoch's external effects. Only then is the terminal
+// record cleaned up. Refuses to drop an epoch that has not reached Finalized
+// (fail-closed).
+func (b *Backend) AckRelease(epochID EpochID) error {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
 	b.mu.Lock()
-	agent, ok := b.agents[cgroupID]
+	ep, ok := b.epochs[epochID]
 	if !ok {
 		b.mu.Unlock()
 		return nil // already cleaned up: idempotent
 	}
-	if agent.State != Finalized {
-		state := agent.State
+	if ep.State != Finalized {
+		state := ep.State
 		b.mu.Unlock()
-		return fmt.Errorf("ack_release: agent %q is %s, not finalized", cgroupID, state)
+		return fmt.Errorf("ack_release: epoch %q is %s, not finalized", epochID, state)
 	}
 	seqNum := b.nextSeq()
-	rec := WALRecord{CgroupID: cgroupID, SeqNum: seqNum, ControlOp: "release_ack"}
+	rec := WALRecord{EpochID: string(epochID), SeqNum: seqNum, ControlOp: "release_ack"}
 	b.mu.Unlock()
 
 	if err := <-b.submitWAL(rec); err != nil {
@@ -2770,32 +2002,38 @@ func (b *Backend) AckRelease(cgroupID string) error {
 		b.applyTurnDone(seqNum)
 		b.mu.Unlock()
 	}()
-	b.ackReleaseInternal(cgroupID)
+	b.ackReleaseInternal(epochID)
 	return nil
 }
 
-// ackReleaseInternal drops a Finalized agent's terminal record. Must be called
-// with b.mu held. Used by AckRelease and by replayWAL. Idempotent.
-func (b *Backend) ackReleaseInternal(cgroupID string) {
-	agent, ok := b.agents[cgroupID]
+// ackReleaseInternal drops a Finalized epoch's terminal record and its
+// (already-consumed) staging tree. Must be called with b.mu held. Idempotent.
+func (b *Backend) ackReleaseInternal(epochID EpochID) {
+	ep, ok := b.epochs[epochID]
 	if !ok {
 		return
 	}
-	if agent.State != Finalized {
-		// Only a finalized agent may be acked. On replay this guards against
-		// a stale release_ack for an agent that (post-checkpoint) is not yet
-		// finalized: leave it in place to be re-finalized.
+	if ep.State != Finalized {
+		// Only a finalized epoch may be acked. On replay this guards
+		// against a stale release_ack for an epoch that (post-checkpoint)
+		// is not yet finalized: leave it in place to be re-finalized.
 		return
 	}
-	delete(b.agents, cgroupID)
-	log.Printf("[backend] release_ack: dropped finalized agent=%q", cgroupID)
+	delete(b.epochs, epochID)
+	if ep.CgroupID != "" && b.activeEpochByCgroup[ep.CgroupID] == epochID {
+		delete(b.activeEpochByCgroup, ep.CgroupID)
+	}
+	if err := os.RemoveAll(epochDirFor(b.stagingDir, epochID)); err != nil {
+		log.Printf("[backend] release_ack: remove stage dir of %q: %v", epochID, err)
+	}
+	b.graphGen++
+	log.Printf("[backend] release_ack: dropped finalized epoch=%q", epochID)
 }
 
-// publishBarrier fsyncs every orig parent directory accumulated by promotions
-// since the last barrier, then clears the set. This is the crash-atomic
-// group-publish durability point: it runs BEFORE any agent in the group is
-// marked Finalized, so a commit group's renames are all durable together
-// before its external effects can be released. Must be called with b.mu held.
+// publishBarrier fsyncs every orig parent directory accumulated by
+// promotions since the last barrier, then clears the set. This is the
+// crash-atomic group-publish durability point: it runs BEFORE any epoch in
+// the group is marked Finalized. Must be called with b.mu held.
 func (b *Backend) publishBarrier() {
 	for dir := range b.publishDirs {
 		if err := fsyncDir(dir); err != nil && !os.IsNotExist(err) {
@@ -2805,47 +2043,38 @@ func (b *Backend) publishBarrier() {
 	}
 }
 
-// tryPromoteAll iterates over every dirty path and promotes those whose
-// writers are all authorized (with all-finalized upstreams). Promotion of
-// one path may finalize an agent which in turn unblocks downstream agents,
-// so the loop runs until no progress is made. Returns the joined error of any
-// promotion failures encountered this pass (nil if all promotions succeeded);
-// failed agents are left non-Finalized with FinalizeErr set for retry.
+// tryPromoteAll iterates over every object with a speculative head and
+// promotes those whose whole chain is owned by authorized epochs (with
+// all-finalized external upstreams). Promotion of one object may finalize an
+// epoch which in turn unblocks downstream epochs, so the loop runs until no
+// progress is made. Returns the joined error of any promotion failures
+// encountered (nil if all succeeded). Must be called with b.mu held.
 func (b *Backend) tryPromoteAll() error {
 	for {
 		var errs []error
-		paths := make([]string, 0, len(b.fileDirty))
-		for p := range b.fileDirty {
-			paths = append(paths, p)
+		objects := make([]string, 0, len(b.versionsByObject))
+		for obj := range b.versionsByObject {
+			objects = append(objects, obj)
 		}
-		// Promote deeper paths first. After a path is promoted,
-		// removeOverlayState() does RemoveAll on its overlay copy; if a
-		// parent directory promoted first, that RemoveAll would wipe out
-		// any descendant overlay files whose entries have not yet run,
-		// causing OverlayWriteEntry.Promote to find the overlay missing
-		// and silently no-op — losing the agent's data. Iterating from
-		// the deepest path upwards guarantees descendants are renamed to
-		// orig BEFORE any ancestor's cleanup runs.
-		sort.Slice(paths, func(i, j int) bool {
-			di := strings.Count(paths[i], string(os.PathSeparator))
-			dj := strings.Count(paths[j], string(os.PathSeparator))
+		// Promote deeper paths first so that e.g. child whiteouts empty a
+		// directory on the backing side before the directory itself is
+		// renamed/removed by its own head version.
+		sort.Slice(objects, func(i, j int) bool {
+			di := strings.Count(objects[i], string(os.PathSeparator))
+			dj := strings.Count(objects[j], string(os.PathSeparator))
 			if di != dj {
 				return di > dj
 			}
-			return paths[i] > paths[j]
+			return objects[i] > objects[j]
 		})
-		// SCC membership for this pass. Under the strong-semantics model,
-		// promoting a member's files requires every upstream OUTSIDE its SCC to
-		// be Finalized (the incoming group must finalize before we publish
-		// downstream work); intra-SCC upstreams are resolved by the atomic SCC
-		// finalize below. Crucially, NO agent is auto-authorized here: an epoch
-		// must be explicitly committed (policy-approved) to advance, even if it
-		// made no filesystem writes -- a pure-read epoch may still have
-		// process / network / output effects that policy must gate.
+		// SCC membership for this pass. NO epoch is auto-authorized here: an
+		// epoch must be explicitly committed (policy-approved) to advance,
+		// even if it made no filesystem writes — a pure-read epoch may still
+		// have process / network / output effects that policy must gate.
 		sccOf := b.sccMembership()
 		progress := false
-		for _, p := range paths {
-			ran, err := b.tryPromotePath(p, sccOf)
+		for _, obj := range objects {
+			ran, err := b.tryPromoteObject(obj, sccOf)
 			if ran {
 				progress = true
 			}
@@ -2853,64 +2082,63 @@ func (b *Backend) tryPromoteAll() error {
 				errs = append(errs, err)
 			}
 		}
-		// Finalize whole strongly-connected components at once so dependency
-		// cycles (A -> B -> A) resolve together, and never before every
-		// member's promotion has succeeded.
+		// Finalize whole strongly-connected components at once so
+		// dependency cycles (A -> B -> A) resolve together, and never
+		// before every member's promotion has succeeded.
 		if b.tryFinalizeSCCs() {
 			progress = true
 		}
 		if !progress {
-			// No forward progress this pass: return any promotion errors so
-			// the caller keeps the workload fenced and schedules a retry.
-			// errors.Join(nil...) is nil, so a clean settle returns nil.
 			return errors.Join(errs...)
 		}
 	}
 }
 
-// tryPromotePath attempts to promote every entry that targets path. It
-// requires that every writer of path is authorized AND that none of those
-// writers has an un-finalized upstream dependency.
+// tryPromoteObject attempts to promote the object's visible-head version to
+// the backing filesystem. It requires that EVERY owner in the object's chain
+// is authorized AND that none of those owners has an un-finalized upstream
+// dependency outside its SCC (chain co-owners are promoted together as a
+// unit and do not block each other).
 //
-// All-or-nothing per path: if ANY entry's Promote() fails, NOTHING is torn
-// down — the UndoLog entries, DirtyFiles, fileDirty tracking and overlay
-// recovery data are ALL preserved, the involved writers are left in
-// Finalizing with FinalizeErr set, and (false, err) is returned. Because
-// every Promote() is idempotent, a later RetryFinalize re-runs the whole set
-// and only tears down once they all succeed. Returns (true, nil) when the
-// path was fully promoted, (false, nil) when it is not yet eligible.
-func (b *Backend) tryPromotePath(path string, sccOf map[string]int) (bool, error) {
-	writers, ok := b.fileDirty[path]
-	if !ok || len(writers) == 0 {
+// All-or-nothing per object: if the head's promotion fails, NOTHING is torn
+// down — the chain, stage payloads and graph state are ALL preserved, the
+// involved owners are left in Finalizing with FinalizeErr set, and
+// (false, err) is returned. promoteVersion is idempotent, so RetryFinalize
+// re-runs the same promotion. Must be called with b.mu held.
+func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, error) {
+	chain := b.versionsByObject[obj]
+	if len(chain) == 0 {
 		return false, nil
 	}
-	for w := range writers {
-		agent, ok := b.agents[w]
-		if !ok || !agent.approved() {
+	owners := make(map[EpochID]struct{})
+	for _, vid := range chain {
+		if v := b.versionByID[vid]; v != nil {
+			owners[v.Owner] = struct{}{}
+		}
+	}
+	for w := range owners {
+		ep, ok := b.epochs[w]
+		if !ok || !ep.approved() {
 			return false, nil
 		}
 		for up := range b.dependsOn[w] {
-			upAgent, ok := b.agents[up]
+			upEp, ok := b.epochs[up]
 			if !ok {
 				continue // upstream gone => finalized and acked
 			}
-			if upAgent.State == Finalized {
+			if upEp.State == Finalized {
 				continue
 			}
-			// Co-writers of THIS path share a single overlay copy and are
-			// promoted together as a unit (one rename), so their mutual
-			// dependency does not block the path's promotion: they all move to
-			// Finalizing together here, and the rollback guard then protects
-			// the torn window.
-			if _, coWriter := writers[up]; coWriter {
+			// Chain co-owners promote together as a unit; their mutual
+			// (write-write) dependency does not block this object.
+			if _, co := owners[up]; co {
 				continue
 			}
-			// Strong semantics: an un-finalized upstream OUTSIDE this writer's
-			// SCC blocks promotion. Its group must Finalize first, otherwise a
-			// later reject of that upstream could cascade into files we have
-			// already published to the real workspace -- which the undo log can
-			// no longer restore. Intra-SCC upstreams do NOT block: the whole
-			// cycle promotes and finalizes together (see tryFinalizeSCCs).
+			// Strong semantics: an un-finalized upstream OUTSIDE this
+			// owner's SCC blocks promotion. Its group must Finalize first,
+			// otherwise a later reject of that upstream could cascade into
+			// state we already published. Intra-SCC upstreams do NOT block:
+			// the whole cycle promotes and finalizes together.
 			if sccOf[up] == sccOf[w] {
 				continue
 			}
@@ -2918,182 +2146,131 @@ func (b *Backend) tryPromotePath(path string, sccOf map[string]int) (bool, error
 		}
 	}
 
-	type writerEntry struct {
-		writer string
-		entry  LogEntry
-		idx    int
+	head := b.versionByID[b.visibleHead[obj]]
+	if head == nil {
+		return false, nil
 	}
-	var matched []writerEntry
-	for w := range writers {
-		agent := b.agents[w]
-		for i, entry := range agent.UndoLog {
-			if entry.Path() == path {
-				matched = append(matched, writerEntry{writer: w, entry: entry, idx: i})
-			}
-		}
-	}
-	sort.Slice(matched, func(i, j int) bool { return matched[i].entry.Seq() < matched[j].entry.Seq() })
-
-	// Promotion has started for this path: move its (authorized) writers to
-	// Finalizing so a normal rollback is refused from here on.
-	for w := range writers {
-		if a := b.agents[w]; a != nil && a.State == AuthorizedPending {
-			a.State = Finalizing
+	// Promotion has started for this object: move its (authorized) owners
+	// to Finalizing so a normal rollback is refused from here on.
+	for w := range owners {
+		if ep := b.epochs[w]; ep != nil && ep.State == AuthorizedPending {
+			ep.State = Finalizing
 		}
 	}
 
-	// Each Promote() implementation is idempotent against a missing
-	// OverlayPath (returns nil), so an ancestor rmdir that already wiped a
-	// descendant overlay is a no-op rather than an error.
-	var promoteErr error
-	for _, m := range matched {
-		if err := m.entry.Promote(); err != nil {
-			log.Printf("[backend] Promote: path=%q seq=%d failed: %v", path, m.entry.Seq(), err)
-			promoteErr = err
-			break
-		}
-	}
-	if promoteErr != nil {
-		// FAIL CLOSED: preserve ALL recovery state (UndoLog, DirtyFiles,
-		// fileDirty, overlay copies) so the exact same promotion can be
-		// retried. Record why on every writer of this path so get_lifecycle
-		// can surface it. Do NOT removeOverlayState and do NOT drop entries.
-		msg := fmt.Sprintf("promote %q: %v", path, promoteErr)
-		for w := range writers {
-			if a := b.agents[w]; a != nil {
-				a.FinalizeErr = msg
+	if err := promoteVersion(head); err != nil {
+		// FAIL CLOSED: preserve ALL recovery state so the exact same
+		// promotion can be retried. Record why on every owner.
+		msg := fmt.Sprintf("promote %q: %v", obj, err)
+		log.Printf("[backend] Promote: %s", msg)
+		for w := range owners {
+			if ep := b.epochs[w]; ep != nil {
+				ep.FinalizeErr = msg
 			}
 		}
 		return false, fmt.Errorf("%s", msg)
 	}
 
-	// All entries for this path promoted: now it is safe to tear down.
-	type rem struct {
-		writer string
-		idx    int
-	}
-	rems := make([]rem, 0, len(matched))
-	for _, m := range matched {
-		rems = append(rems, rem{writer: m.writer, idx: m.idx})
-	}
-	sort.Slice(rems, func(i, j int) bool { return rems[i].idx > rems[j].idx })
-	for _, r := range rems {
-		agent := b.agents[r.writer]
-		if r.idx < len(agent.UndoLog) {
-			agent.UndoLog = append(agent.UndoLog[:r.idx], agent.UndoLog[r.idx+1:]...)
+	// Head published durably. Tear down the WHOLE chain: superseded
+	// intermediate versions are cleared together with the head.
+	for _, vid := range chain {
+		v := b.versionByID[vid]
+		if v == nil {
+			continue
 		}
-	}
-	for w := range writers {
-		if a := b.agents[w]; a != nil {
-			delete(a.DirtyFiles, path)
-			a.FinalizeErr = "" // this path is clean now
+		if ep := b.epochs[v.Owner]; ep != nil {
+			removeVersionFromEpoch(ep, vid)
+			ep.FinalizeErr = ""
 		}
+		if v.StagePath != "" && vid != head.ID {
+			// The head's payload was consumed by movePath; superseded
+			// payloads are dropped best-effort.
+			if st, serr := os.Lstat(v.StagePath); serr == nil {
+				if st.IsDir() {
+					_ = os.RemoveAll(v.StagePath)
+				} else {
+					_ = os.Remove(v.StagePath)
+				}
+			}
+		}
+		delete(b.versionByID, vid)
 	}
-	delete(b.fileDirty, path)
+	delete(b.versionsByObject, obj)
+	delete(b.visibleHead, obj)
 
-	// Do NOT remove whiteout during promote: another agent may still have
-	// an active UnlinkEntry for this path whose whiteout this is. The
-	// UnlinkEntry.Promote() will clean up its own whiteout when it runs.
-	_ = removeOverlayState(b.stagingDir, b.trackedDir, path, false)
-	// Record this path's orig parent dir for the group publish barrier.
-	b.publishDirs[filepath.Dir(path)] = struct{}{}
-	log.Printf("[backend] Promote: path=%q promoted (%d entries)", path, len(matched))
+	// Record this object's orig parent dir for the group publish barrier.
+	b.publishDirs[filepath.Dir(obj)] = struct{}{}
+	log.Printf("[backend] Promote: obj=%q head=v%d promoted (%d chain version(s) cleared)", obj, head.ID, len(chain))
 	return true, nil
 }
 
-// tryFinalize transitions a SINGLE agent to Finalized when it is authorized,
-// has no remaining undo entries, and all its upstream dependencies are
-// finalized (a pure-read upstream does not block). Retained for the trivial
-// acyclic case and direct callers; the promotion loop uses tryFinalizeSCCs so
-// dependency CYCLES finalize as a unit. Returns true if it finalized.
-func (b *Backend) tryFinalize(cgroupID string) bool {
-	agent, ok := b.agents[cgroupID]
-	if !ok || !agent.approved() {
-		return false
-	}
-	if agent.State == Finalized {
-		return false // already finalized
-	}
-	if len(agent.UndoLog) > 0 {
-		return false
-	}
-	for up := range b.dependsOn[cgroupID] {
-		upAgent, ok := b.agents[up]
-		if ok && upAgent.State != Finalized {
-			// Strong semantics: every incoming (upstream) group must be
-			// Finalized before this agent can finalize.
-			return false
-		}
-	}
-	b.finalizeAgent(cgroupID)
-	return true
-}
-
-// finalizeAgent performs the state mutation of finalizing one agent: drop its
-// dependency edges (a finalized agent's changes are durable and can no longer
-// cascade a rollback, so it must neither block nor be reached by the graph),
-// then set State=Finalized. The agent record itself is RETAINED until
-// AckRelease. Must be called with b.mu held; callers own the readiness checks.
-func (b *Backend) finalizeAgent(cgroupID string) {
-	agent, ok := b.agents[cgroupID]
+// finalizeEpoch performs the state mutation of finalizing one epoch: drop
+// its dependency edges (a finalized epoch's changes are durable and can no
+// longer cascade a rollback), then set State=Finalized. The epoch record
+// itself is RETAINED until AckRelease. Must be called with b.mu held.
+func (b *Backend) finalizeEpoch(epochID EpochID) {
+	ep, ok := b.epochs[epochID]
 	if !ok {
 		return
 	}
-	log.Printf("[backend] finalize: agent=%q", cgroupID)
-	for src := range b.dependsOn[cgroupID] {
+	log.Printf("[backend] finalize: epoch=%q", epochID)
+	for src := range b.dependsOn[epochID] {
 		if dsts, ok := b.dependents[src]; ok {
-			delete(dsts, cgroupID)
+			delete(dsts, epochID)
 			if len(dsts) == 0 {
 				delete(b.dependents, src)
 			}
 		}
 	}
-	delete(b.dependsOn, cgroupID)
-	for s := range b.dependents[cgroupID] {
+	delete(b.dependsOn, epochID)
+	for s := range b.dependents[epochID] {
 		if preds, ok := b.dependsOn[s]; ok {
-			delete(preds, cgroupID)
+			delete(preds, epochID)
 			if len(preds) == 0 {
 				delete(b.dependsOn, s)
 			}
 		}
 	}
-	delete(b.dependents, cgroupID)
-	agent.State = Finalized
-	agent.FinalizeErr = ""
+	delete(b.dependents, epochID)
+	ep.State = Finalized
+	ep.FinalizeErr = ""
 }
 
 // computeSCCs returns the strongly-connected components of the current
 // dependency graph (edges: dependent -> upstream, from b.dependsOn) using
-// Tarjan's algorithm. Every tracked agent appears in exactly one component;
-// an acyclic agent is a singleton. SCCs are the unit of finalization so a
-// dependency cycle (A -> B -> A) is finalized all-at-once or not at all. Must
-// be called with b.mu held.
-func (b *Backend) computeSCCs() [][]string {
-	const unvisited = -1
-	index := make(map[string]int, len(b.agents))
-	lowlink := make(map[string]int, len(b.agents))
-	onStack := make(map[string]bool, len(b.agents))
-	var stack []string
-	var sccs [][]string
+// iterative Tarjan. Every tracked epoch appears in exactly one component.
+// Must be called with b.mu held.
+func (b *Backend) computeSCCs() [][]EpochID {
+	index := make(map[EpochID]int, len(b.epochs))
+	lowlink := make(map[EpochID]int, len(b.epochs))
+	onStack := make(map[EpochID]bool, len(b.epochs))
+	var stack []EpochID
+	var sccs [][]EpochID
 	next := 0
 
-	// Iterative Tarjan to avoid deep recursion on long dependency chains.
 	type frame struct {
-		node string
-		succ []string
+		node EpochID
+		succ []EpochID
 		i    int
 	}
-	successors := func(id string) []string {
-		out := make([]string, 0, len(b.dependsOn[id]))
+	successors := func(id EpochID) []EpochID {
+		out := make([]EpochID, 0, len(b.dependsOn[id]))
 		for up := range b.dependsOn[id] {
-			if _, ok := b.agents[up]; ok {
+			if _, ok := b.epochs[up]; ok {
 				out = append(out, up)
 			}
 		}
 		return out
 	}
 
-	for id := range b.agents {
+	// Sort epoch IDs for deterministic SCC numbering (stable group IDs).
+	epochIDs := make([]EpochID, 0, len(b.epochs))
+	for id := range b.epochs {
+		epochIDs = append(epochIDs, id)
+	}
+	sort.Slice(epochIDs, func(i, j int) bool { return epochIDs[i] < epochIDs[j] })
+
+	for _, id := range epochIDs {
 		if _, seen := index[id]; seen {
 			continue
 		}
@@ -3126,7 +2303,7 @@ func (b *Backend) computeSCCs() [][]string {
 			}
 			// Done exploring fr.node; if it's a root, pop an SCC.
 			if lowlink[fr.node] == index[fr.node] {
-				var comp []string
+				var comp []EpochID
 				for {
 					n := stack[len(stack)-1]
 					stack = stack[:len(stack)-1]
@@ -3150,13 +2327,10 @@ func (b *Backend) computeSCCs() [][]string {
 	return sccs
 }
 
-// sccMembership maps each tracked agent to an integer identifying its
-// strongly-connected component in the current dependency graph. Two agents
-// share an id iff they are mutually reachable (a dependency cycle). Used by
-// tryPromotePath to allow intra-SCC promotion while still requiring every
-// upstream OUTSIDE the SCC to be Finalized. Must be called with b.mu held.
-func (b *Backend) sccMembership() map[string]int {
-	m := make(map[string]int, len(b.agents))
+// sccMembership maps each tracked epoch to an integer identifying its
+// strongly-connected component. Must be called with b.mu held.
+func (b *Backend) sccMembership() map[EpochID]int {
+	m := make(map[EpochID]int, len(b.epochs))
 	for i, comp := range b.computeSCCs() {
 		for _, id := range comp {
 			m[id] = i
@@ -3165,18 +2339,17 @@ func (b *Backend) sccMembership() map[string]int {
 	return m
 }
 
-// tryFinalizeSCCs finalizes every strongly-connected component that is READY,
-// treating each SCC as an atomic unit. An SCC becomes Finalized iff:
+// tryFinalizeSCCs finalizes every strongly-connected component that is
+// READY, treating each SCC as an atomic unit. An SCC becomes Finalized iff:
 //
 //	(1) every member's policy is approved, AND
-//	(2) every member has no remaining undo entries (all its file promotions
-//	    have succeeded — a failed/pending promotion leaves undo entries), AND
+//	(2) every member owns no remaining versions (all objects it wrote have
+//	    been promoted — a failed/pending promotion leaves versions), AND
 //	(3) every upstream OUTSIDE the SCC is already Finalized (a pure-read
-//	    upstream with no undo/dirty state does not block).
+//	    upstream with no versions of its own does not block once
+//	    finalized/acked).
 //
-// If any member fails (2), the WHOLE SCC stays fenced — this is what prevents a
-// cycle A -> B -> A from being released early or waiting forever. Returns true
-// if any SCC finalized. Must be called with b.mu held.
+// Must be called with b.mu held.
 func (b *Backend) tryFinalizeSCCs() bool {
 	progress := false
 	for _, scc := range b.computeSCCs() {
@@ -3187,51 +2360,48 @@ func (b *Backend) tryFinalizeSCCs() bool {
 	return progress
 }
 
-func (b *Backend) finalizeSCCIfReady(scc []string) bool {
-	inSCC := make(map[string]bool, len(scc))
+func (b *Backend) finalizeSCCIfReady(scc []EpochID) bool {
+	inSCC := make(map[EpochID]bool, len(scc))
 	for _, id := range scc {
 		inSCC[id] = true
 	}
 	// (1)+(2): every member approved, none already finalized, and no member
-	// has pending/failed promotions (undo must be empty).
+	// has pending/failed promotions (owned version set must be empty).
 	anyPending := false
 	for _, id := range scc {
-		a := b.agents[id]
-		if a == nil {
+		ep := b.epochs[id]
+		if ep == nil {
 			return false
 		}
-		if a.State == Finalized {
+		if ep.State == Finalized {
 			return false // component already finalized; nothing to do
 		}
-		if !a.approved() {
+		if !ep.approved() {
 			return false
 		}
-		if len(a.UndoLog) > 0 {
+		if len(ep.Versions) > 0 {
 			anyPending = true
 		}
 	}
 	if anyPending {
-		return false // a member's promotion is not done: keep the whole SCC fenced
+		return false // a member's promotion is not done: keep the SCC fenced
 	}
-	// (3): every external upstream must be Finalized (pure-read exempt).
+	// (3): every external upstream must be Finalized.
 	for _, id := range scc {
 		for up := range b.dependsOn[id] {
 			if inSCC[up] {
 				continue // intra-SCC edge: satisfied by finalizing together
 			}
-			upA, ok := b.agents[up]
+			upEp, ok := b.epochs[up]
 			if !ok {
 				continue // gone => finalized and acked
 			}
-			if upA.State != Finalized {
-				// Strong semantics: the incoming group must be Finalized
-				// before this group may finalize (and release its effects).
+			if upEp.State != Finalized {
 				return false
 			}
 		}
 	}
-	// Ready: finalize the whole component atomically. Publish barrier FIRST:
-	// fsync every orig parent directory touched by promotions in this settle
+	// Ready: finalize the whole component atomically. Publish barrier FIRST
 	// so the group's on-disk state is durable as a unit before ANY member
 	// becomes releasable.
 	b.publishBarrier()
@@ -3239,155 +2409,353 @@ func (b *Backend) finalizeSCCIfReady(scc []string) bool {
 		log.Printf("[backend] finalize SCC (cycle) as a unit: %v", scc)
 	}
 	for _, id := range scc {
-		b.finalizeAgent(id)
+		b.finalizeEpoch(id)
 	}
 	return true
 }
 
 // --- Release gating ---
 
-// CanRelease reports whether the external side effects of the given cgroup
-// (its processes are held frozen by ShadowProc, its network fenced, its
-// stdout/tool output buffered) are safe to externalize.
-//
-// It is TRUE only when the agent has reached the Finalized lifecycle state:
-// every dirty path has been durably promoted to the real filesystem and every
-// upstream dependency is itself Finalized, so no rollback can ever cascade
-// into this cgroup. Any other state (Speculative, AuthorizedPending,
-// Finalizing) is NOT releasable.
-//
-// FAIL CLOSED: an unknown / untracked cgroup is NOT releasable. Callers that
-// legitimately have no filesystem footprint must be registered and driven to
-// Finalized via Commit (which registers no-file-op agents), rather than
-// relying on "absent means safe".
-func (b *Backend) CanRelease(cgroupID string) bool {
+// CanRelease reports whether the external side effects of the given epoch
+// are safe to externalize. TRUE only when the epoch has reached Finalized.
+// FAIL CLOSED: an unknown / untracked epoch is NOT releasable.
+func (b *Backend) CanRelease(epochID EpochID) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.canReleaseLocked(cgroupID)
-}
-
-// canReleaseLocked implements CanRelease. Must be called with b.mu held.
-func (b *Backend) canReleaseLocked(cgroupID string) bool {
-	agent, ok := b.agents[cgroupID]
+	ep, ok := b.epochs[epochID]
 	if !ok {
-		return false // fail closed: unknown cgroup is never releasable
+		return false // fail closed: unknown epoch is never releasable
 	}
-	return agent.State == Finalized
+	return ep.State == Finalized
 }
 
-// --- Inspection ---
+// --- Inspection (tests / control API) ---
 
-// Len returns the total number of log entries across all agents.
-func (b *Backend) Len() int {
+// VersionCount returns the total number of live speculative versions.
+func (b *Backend) VersionCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	total := 0
-	for _, a := range b.agents {
-		total += len(a.UndoLog)
-	}
-	return total
+	return len(b.versionByID)
 }
 
-// AgentLen returns the number of log entries for a specific agent.
-func (b *Backend) AgentLen(cgroupID string) int {
+// EpochVersionCount returns the number of live versions owned by an epoch.
+func (b *Backend) EpochVersionCount(epochID EpochID) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	a, ok := b.agents[cgroupID]
+	ep, ok := b.epochs[epochID]
 	if !ok {
 		return 0
 	}
-	return len(a.UndoLog)
+	return len(ep.Versions)
 }
 
 // DependsOn reports whether rolling back `on` would cascade to `dependent`.
-func (b *Backend) DependsOn(dependent, on string) bool {
+func (b *Backend) DependsOn(dependent, on EpochID) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	_, ok := b.reachableFrom(on)[dependent]
 	return ok
 }
 
-// --- Helpers ---
-
-// copyUpDir recursively copies the directory tree rooted at src into dst.
-// Symlinks are recreated; regular files are copied; directories preserve
-// their mode.
-func copyUpDir(src, dst string) error {
-	stat, err := os.Lstat(src)
-	if err != nil {
-		return err
+// HeadVersion reports the visible head of a logical path: its VersionID and
+// producer epoch (0/"" when the backing file is visible).
+func (b *Backend) HeadVersion(origPath string) (VersionID, EpochID) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v := b.headVersionLocked(filepath.Clean(origPath))
+	if v == nil {
+		return 0, ""
 	}
-	if !stat.IsDir() {
-		return fmt.Errorf("copyUpDir: %q is not a directory", src)
-	}
-	if err := os.MkdirAll(dst, stat.Mode().Perm()); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		s := filepath.Join(src, e.Name())
-		d := filepath.Join(dst, e.Name())
-		info, err := e.Info()
-		if err != nil {
-			return err
-		}
-		switch {
-		case info.IsDir():
-			if err := copyUpDir(s, d); err != nil {
-				return err
-			}
-		case info.Mode()&os.ModeSymlink != 0:
-			target, err := os.Readlink(s)
-			if err != nil {
-				return err
-			}
-			if err := os.Symlink(target, d); err != nil {
-				return err
-			}
-		default:
-			if err := copyUpFileOrEmpty(s, d); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return v.ID, v.Owner
 }
 
-func copyUpFileOrEmpty(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
+// --- Group-level finalization (Phase 3) ---
+
+// PrepareResolutionResult is returned by PrepareResolution.
+type PrepareResolutionResult struct {
+	GroupID         int      `json:"group_id"`
+	Members         []string `json:"members"`
+	GraphGeneration int64    `json:"graph_generation"`
+}
+
+// PrepareResolution computes the SCC containing the given epoch and returns
+// its members plus the current dependency-graph generation. The orchestrator
+// freezes all members, then calls BeginFinalize with the same graph_generation
+// to detect TOCTOU changes (a new dependency inserted between prepare and
+// finalize would change the generation and cause BeginFinalize to refuse).
+func (b *Backend) PrepareResolution(epochID EpochID) (PrepareResolutionResult, error) {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	ep, ok := b.epochs[epochID]
+	if !ok {
+		return PrepareResolutionResult{}, fmt.Errorf("prepare_resolution: epoch %q not found", epochID)
 	}
-	defer in.Close()
-	stat, err := in.Stat()
-	if err != nil {
-		return err
+	if ep.State >= Finalizing {
+		return PrepareResolutionResult{}, fmt.Errorf("prepare_resolution: epoch %q already %s", epochID, ep.State)
 	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, stat.Mode().Perm())
-	if err != nil {
-		return err
+
+	sccs := b.computeSCCs()
+	var group []EpochID
+	for _, scc := range sccs {
+		for _, id := range scc {
+			if id == epochID {
+				group = scc
+				break
+			}
+		}
+		if group != nil {
+			break
+		}
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
+	if group == nil {
+		return PrepareResolutionResult{}, fmt.Errorf("prepare_resolution: epoch %q not in any SCC", epochID)
 	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		return fmt.Errorf("fsync overlay %q: %w", dst, err)
+
+	b.nextGroupID++
+	gid := b.nextGroupID
+	members := make([]string, 0, len(group))
+	for _, id := range group {
+		members = append(members, string(id))
 	}
-	if err := out.Close(); err != nil {
-		return err
+	sort.Strings(members)
+
+	b.activeGroups[gid] = &finalizeGroup{
+		id:       gid,
+		members:  group,
+		graphGen: b.graphGen,
+		state:    "pending",
 	}
-	// Preserve ownership (best-effort: EPERM is non-fatal for non-root).
-	if lstat, err := os.Lstat(src); err == nil {
-		if sys, ok := lstat.Sys().(*syscall.Stat_t); ok {
-			if err := syscall.Lchown(dst, int(sys.Uid), int(sys.Gid)); err != nil && err != syscall.EPERM {
-				return fmt.Errorf("lchown overlay %q: %w", dst, err)
+
+	log.Printf("[backend] PrepareResolution: epoch=%q group_id=%d members=%v graph_gen=%d",
+		epochID, gid, members, b.graphGen)
+	return PrepareResolutionResult{
+		GroupID:         gid,
+		Members:         members,
+		GraphGeneration: b.graphGen,
+	}, nil
+}
+
+// BeginFinalizeResult reports the outcome of starting group finalization.
+type BeginFinalizeResult struct {
+	Status string `json:"status"` // "pending", "finalized", "failed"
+}
+
+// BeginFinalize starts the promote/finalize pass for an entire group (SCC).
+// The graph_generation must match the current b.graphGen; a mismatch means
+// the dependency graph changed between PrepareResolution and BeginFinalize
+// (TOCTOU) and the call is refused. Each member is authorized and driven
+// through the same commitInternal path as an individual Commit. All WAL
+// commit records are submitted as a single batch for group-atomic durability.
+func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (BeginFinalizeResult, error) {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+
+	b.mu.Lock()
+	g, ok := b.activeGroups[groupID]
+	if !ok {
+		b.mu.Unlock()
+		return BeginFinalizeResult{}, fmt.Errorf("begin_finalize: group %d not found", groupID)
+	}
+	if g.state == "finalized" {
+		b.mu.Unlock()
+		return BeginFinalizeResult{Status: "finalized"}, nil
+	}
+	if b.graphGen != graphGeneration {
+		b.mu.Unlock()
+		return BeginFinalizeResult{}, fmt.Errorf(
+			"begin_finalize: graph_generation mismatch (caller=%d, current=%d): dependency graph changed (TOCTOU)",
+			graphGeneration, b.graphGen)
+	}
+	// Verify every member is still present and not yet finalizing.
+	for _, id := range g.members {
+		ep, ok := b.epochs[id]
+		if !ok {
+			b.mu.Unlock()
+			return BeginFinalizeResult{}, fmt.Errorf("begin_finalize: member %q disappeared", id)
+		}
+		if ep.State >= Finalizing {
+			b.mu.Unlock()
+			return BeginFinalizeResult{}, fmt.Errorf("begin_finalize: member %q already %s", id, ep.State)
+		}
+	}
+
+	members := g.members
+	seqNums := make([]int64, len(members))
+	recs := make([]WALRecord, len(members))
+	for i, id := range members {
+		seqNums[i] = b.nextSeq()
+		recs[i] = WALRecord{EpochID: string(id), SeqNum: seqNums[i], ControlOp: "commit"}
+	}
+	b.mu.Unlock()
+
+	// Submit all WAL records as a single batch for group-atomic durability.
+	if err := <-b.submitWAL(recs...); err != nil {
+		for _, sn := range seqNums {
+			b.applyTurnAbort(sn)
+		}
+		return BeginFinalizeResult{}, fmt.Errorf("begin_finalize WAL: %w", err)
+	}
+
+	// Apply each seq in order: authorize each member.
+	b.mu.Lock()
+	for i, sn := range seqNums {
+		b.applyTurnWait(sn)
+		ep := b.ensureEpoch(members[i], "")
+		if ep.State < AuthorizedPending {
+			ep.State = AuthorizedPending
+			log.Printf("[backend] BeginFinalize: epoch=%q authorized (group %d)", members[i], groupID)
+		}
+		b.applyTurnDone(sn)
+	}
+	// Still holding mu from the last applyTurnDone.
+	defer b.mu.Unlock()
+
+	// Quiesce + flush each member, then promote.
+	var firstErr string
+	for _, id := range members {
+		ep := b.epochs[id]
+		if ep == nil || ep.State >= Finalized {
+			continue
+		}
+		if err := b.quiesceMappings(ep); err != nil {
+			ep.FinalizeErr = fmt.Sprintf("mmap quiesce: %v", err)
+			if firstErr == "" {
+				firstErr = fmt.Sprintf("member %q: mmap quiesce: %v", id, err)
+			}
+			log.Printf("[backend] BeginFinalize: epoch=%q ABORTED: %v", id, err)
+			continue
+		}
+		b.flushEpochFDs(id)
+	}
+	_ = b.tryPromoteAll()
+
+	// Update group state based on member outcomes.
+	allFinalized := true
+	for _, id := range members {
+		ep := b.epochs[id]
+		if ep == nil || ep.State != Finalized {
+			allFinalized = false
+			if ep != nil && ep.FinalizeErr != "" && firstErr == "" {
+				firstErr = ep.FinalizeErr
 			}
 		}
 	}
+	if allFinalized {
+		g.state = "finalized"
+		g.finalizeErr = ""
+	} else if firstErr != "" {
+		g.state = "failed"
+		g.finalizeErr = firstErr
+	} else {
+		g.state = "pending"
+	}
+
+	log.Printf("[backend] BeginFinalize: group=%d state=%s", groupID, g.state)
+	return BeginFinalizeResult{Status: g.state}, nil
+}
+
+// GetFinalizeStatusResult reports the current state of a group finalization.
+type GetFinalizeStatusResult struct {
+	State       string `json:"state"`        // "pending", "finalized", "failed"
+	FinalizeErr string `json:"finalize_err"` // first error if failed
+}
+
+// GetFinalizeStatus reports the current state of a group. Re-evaluates member
+// states so that external retry_finalize calls are reflected.
+func (b *Backend) GetFinalizeStatus(groupID int) (GetFinalizeStatusResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	g, ok := b.activeGroups[groupID]
+	if !ok {
+		return GetFinalizeStatusResult{}, fmt.Errorf("get_finalize_status: group %d not found", groupID)
+	}
+	// Re-evaluate state from member epochs.
+	allFinalized := true
+	var firstErr string
+	for _, id := range g.members {
+		ep, ok := b.epochs[id]
+		if !ok {
+			allFinalized = false
+			continue
+		}
+		if ep.State != Finalized {
+			allFinalized = false
+			if ep.FinalizeErr != "" && firstErr == "" {
+				firstErr = ep.FinalizeErr
+			}
+		}
+	}
+	if allFinalized {
+		g.state = "finalized"
+		g.finalizeErr = ""
+	} else if firstErr != "" {
+		g.state = "failed"
+		g.finalizeErr = firstErr
+	} else {
+		g.state = "pending"
+	}
+	return GetFinalizeStatusResult{State: g.state, FinalizeErr: g.finalizeErr}, nil
+}
+
+// AckReleaseGroup releases all members of a finalized group. Writes WAL
+// release_ack records for all members as a single batch, then drops their
+// terminal records. Refuses if the group has not reached "finalized".
+func (b *Backend) AckReleaseGroup(groupID int) error {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+
+	b.mu.Lock()
+	g, ok := b.activeGroups[groupID]
+	if !ok {
+		b.mu.Unlock()
+		return fmt.Errorf("ack_release_group: group %d not found", groupID)
+	}
+	if g.state != "finalized" {
+		state := g.state
+		b.mu.Unlock()
+		return fmt.Errorf("ack_release_group: group %d is %s, not finalized", groupID, state)
+	}
+	// Filter to members that still exist and are Finalized.
+	pending := make([]EpochID, 0, len(g.members))
+	for _, id := range g.members {
+		if ep, ok := b.epochs[id]; ok && ep.State == Finalized {
+			pending = append(pending, id)
+		}
+	}
+	if len(pending) == 0 {
+		delete(b.activeGroups, groupID)
+		b.mu.Unlock()
+		log.Printf("[backend] AckReleaseGroup: group=%d already fully acked", groupID)
+		return nil
+	}
+
+	seqNums := make([]int64, len(pending))
+	recs := make([]WALRecord, len(pending))
+	for i, id := range pending {
+		seqNums[i] = b.nextSeq()
+		recs[i] = WALRecord{EpochID: string(id), SeqNum: seqNums[i], ControlOp: "release_ack"}
+	}
+	b.mu.Unlock()
+
+	if err := <-b.submitWAL(recs...); err != nil {
+		for _, sn := range seqNums {
+			b.applyTurnAbort(sn)
+		}
+		return fmt.Errorf("ack_release_group WAL: %w", err)
+	}
+
+	b.mu.Lock()
+	for i, sn := range seqNums {
+		b.applyTurnWait(sn)
+		b.ackReleaseInternal(pending[i])
+		b.applyTurnDone(sn)
+	}
+	delete(b.activeGroups, groupID)
+	b.mu.Unlock()
+
+	log.Printf("[backend] AckReleaseGroup: group=%d released (%d members)", groupID, len(pending))
 	return nil
 }

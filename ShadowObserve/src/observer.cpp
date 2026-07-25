@@ -67,6 +67,9 @@ static const char *event_type_name(uint16_t event_type) {
     case PROC_EVENT_PTRACE: return "PTRACE";
     case PROC_EVENT_SETUID: return "SETUID";
     case PROC_EVENT_CAPSET: return "CAPSET";
+    /* PROC_EVENT_EXEC_PRIV has the same encoded value as PROC_EVENT_EXEC
+     * (both map to CLASS_PRIVILEGE/OP_EXEC_PRIV); the EXEC case above
+     * already handles it, so a separate case label would be a duplicate. */
     default:                return "UNKNOWN";
     }
 }
@@ -80,7 +83,9 @@ static std::string evt_to_json(const struct observ_event &e) {
       << ",\"uid\":"           << e.uid
       << ",\"gid\":"           << e.gid
       << ",\"cgroup_id\":"     << e.cgroup_id
-      << ",\"event\":\""       << event_type_name(e.event_type) << "\""
+      << ",\"seq\":"           << e.seq
+      << ",\"event\":\""        << event_type_name(e.event_type) << "\""
+      << ",\"source\":"         << (unsigned)e.source
       << ",\"arg1\":"          << e.arg1
       << ",\"arg2\":"          << e.arg2
       << ",\"arg3\":"          << e.arg3
@@ -88,6 +93,23 @@ static std::string evt_to_json(const struct observ_event &e) {
       << ",\"path\":\""        << json_escape(e.path) << "\""
       << ",\"new_path\":\""    << json_escape(e.new_path) << "\""
       << "}\n";
+    return s.str();
+}
+
+/* FNV-1a 64-bit hash for log integrity digest. Not cryptographic, but
+ * sufficient for detecting log corruption or truncation. */
+static constexpr uint64_t FNV_OFFSET = 14695981039346656037ULL;
+static constexpr uint64_t FNV_PRIME  = 1099511628211ULL;
+
+static uint64_t fnv1a_update(uint64_t hash, const std::string &s) {
+    for (unsigned char c : s)
+        hash = (hash ^ c) * FNV_PRIME;
+    return hash;
+}
+
+static std::string fnv1a_hex(uint64_t hash) {
+    std::ostringstream s;
+    s << std::hex << std::setfill('0') << std::setw(16) << hash;
     return s.str();
 }
 
@@ -102,6 +124,23 @@ struct Observer::Impl {
     uint64_t            cgroup_id = 0;
     bool                running   = false;
     bool                write_error = false;   /* a log write/flush failed */
+    std::string         epoch_id;              /* written to log header */
+    uint64_t            event_count = 0;       /* events written this epoch */
+    uint64_t            path_errors = 0;       /* events with an unrepresentable
+                                                  canonical path (resource
+                                                  identity unknown) */
+    uint64_t            digest_hash = FNV_OFFSET;  /* running FNV-1a of event lines */
+
+    /* Read the BPF per-cgroup sequence counter (seq_counter[cgroup_id]). */
+    uint64_t read_end_seq() {
+        if (!skel) return 0;
+        __u64 val = 0;
+        if (bpf_map__lookup_elem(skel->maps.seq_counter,
+                                 &cgroup_id, sizeof(cgroup_id),
+                                 &val, sizeof(val), 0) != 0)
+            return 0;
+        return val;
+    }
 
     ~Impl() {
         if (running) {
@@ -128,8 +167,17 @@ struct Observer::Impl {
     static int handle_event(void *ctx, void *data, size_t /*data_sz*/) {
         auto *impl = static_cast<Impl *>(ctx);
         auto &evt  = *static_cast<struct observ_event *>(data);
-        impl->log_file << evt_to_json(evt);
+        std::string line = evt_to_json(evt);
+        impl->log_file << line;
         impl->log_file.flush();
+        /* Update the running digest and event count for integrity checking. */
+        impl->digest_hash = fnv1a_update(impl->digest_hash, line);
+        impl->event_count++;
+        /* cri_build_path() failed closed for this event: its resource
+         * identity is unknown, so no policy can be checked against it. The
+         * epoch log must be treated as incomplete. */
+        if (evt.arg3 & OBSERV_FL_PATH_ERROR)
+            impl->path_errors++;
         /* A failed write/flush means the on-disk log is missing this event:
          * remember it so stop() can fail the epoch closed. */
         if (!impl->log_file)
@@ -159,16 +207,27 @@ Observer::~Observer() = default;
 Observer::Observer(Observer &&) noexcept            = default;
 Observer &Observer::operator=(Observer &&) noexcept = default;
 
-bool Observer::start(uint64_t cgroup_id, const std::string &output_path) {
+bool Observer::start(uint64_t cgroup_id, const std::string &output_path,
+                     const std::string &epoch_id) {
     if (impl_->running) stop();
 
-    /* Reset the per-epoch integrity state and drop counter. */
+    /* Reset the per-epoch integrity state, drop counter, and seq counter. */
     impl_->write_error = false;
+    impl_->epoch_id    = epoch_id;
+    impl_->event_count = 0;
+    impl_->path_errors = 0;
+    impl_->digest_hash = FNV_OFFSET;
     {
         __u32 key = 0;
         __u64 zero = 0;
         bpf_map__update_elem(impl_->skel->maps.dropped,
                              &key, sizeof(key), &zero, sizeof(zero), BPF_ANY);
+    }
+    {
+        __u64 zero = 0;
+        bpf_map__update_elem(impl_->skel->maps.seq_counter,
+                             &cgroup_id, sizeof(cgroup_id),
+                             &zero, sizeof(zero), BPF_ANY);
     }
 
     __u8 one = 1;
@@ -197,6 +256,12 @@ bool Observer::start(uint64_t cgroup_id, const std::string &output_path) {
                              &cgroup_id, sizeof(cgroup_id), 0);
         return false;
     }
+
+    /* Write a header line with the epoch_id so the log is self-describing. */
+    impl_->log_file << "{\"type\":\"header\",\"epoch_id\":\""
+                    << json_escape(epoch_id)
+                    << "\",\"cgroup_id\":" << cgroup_id << "}\n";
+    impl_->log_file.flush();
 
     impl_->cgroup_id = cgroup_id;
     impl_->running    = true;
@@ -231,19 +296,37 @@ IntegrityReport Observer::stop() {
         impl_->rb = nullptr;
     }
 
-    /* 3. Flush + close the log, detecting any write failure. */
+    /* 3. Read the final per-cgroup sequence counter BEFORE closing the log. */
+    rep.end_seq = impl_->read_end_seq();
+
+    /* 4. Write the end marker (not included in the event digest). */
+    impl_->log_file << "{\"type\":\"end\",\"end_seq\":" << rep.end_seq
+                    << ",\"total_events\":" << impl_->event_count
+                    << ",\"digest\":\"" << fnv1a_hex(impl_->digest_hash)
+                    << "\"}\n";
+
+    /* 5. Flush + close the log, detecting any write failure. */
     impl_->log_file.flush();
     if (!impl_->log_file) impl_->write_error = true;
     impl_->log_file.close();
 
-    /* 4. Read the BPF drop counter and compose the completeness verdict. */
+    /* 6. Read the BPF drop counter and compose the completeness verdict.
+     *    path_errors counts events whose canonical path could not be built
+     *    (too deep / oversized component / buffer exhaustion): their resource
+     *    identity is unknown, so the log cannot be audited against any
+     *    policy and the epoch must fail closed. */
     rep.dropped_events = impl_->read_dropped();
+    rep.total_events   = impl_->event_count;
+    rep.path_errors    = impl_->path_errors;
+    rep.digest         = fnv1a_hex(impl_->digest_hash);
     rep.write_error    = impl_->write_error;
-    rep.complete = (rep.dropped_events == 0) && !rep.write_error && !rep.drain_error;
+    rep.complete = (rep.dropped_events == 0) && (rep.path_errors == 0)
+                   && !rep.write_error && !rep.drain_error;
     if (!rep.complete) {
         std::ostringstream r;
         r << "incomplete log:";
         if (rep.dropped_events) r << " dropped_events=" << rep.dropped_events;
+        if (rep.path_errors)    r << " path_errors=" << rep.path_errors;
         if (rep.write_error)    r << " write_error";
         if (rep.drain_error)    r << " drain_error";
         rep.reason = r.str();

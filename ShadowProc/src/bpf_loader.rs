@@ -20,6 +20,104 @@ use shadow_proc_skel::*;
 
 use crate::event_handler::InterceptEvent;
 
+/// Key for the class_policy BPF hash map.
+/// Matches `struct class_policy_key` in shadow_proc.bpf.c.
+#[repr(C)]
+struct ClassPolicyKey {
+    cgroup_id: u64,
+    effect_class: u8,
+}
+
+/// Value for the restart_token BPF hash map.
+/// Matches `struct restart_token_val` in shadow_proc.bpf.c.
+#[repr(C)]
+struct RestartTokenVal {
+    syscall_nr: u32,
+    effect_class: u8,
+    _pad0: [u8; 3],
+}
+
+/// Key for the network_policy BPF hash map.
+/// Matches `struct net_policy_key` in shadow_proc.bpf.c.
+/// addr/port are HOST order; 0 is the wildcard at that position.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NetPolicyKey {
+    pub cgroup_id: u64,
+    pub family: u8,
+    pub _pad0: u8,
+    pub port: u16,
+    pub addr: u32,
+}
+
+/// Key for the ipc_policy BPF hash map.
+/// Matches `struct ipc_policy_key` in shadow_proc.bpf.c.
+/// target 0 is the per-ipc_type wildcard.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IpcPolicyKey {
+    pub cgroup_id: u64,
+    pub ipc_type: u8,
+    pub _pad0: [u8; 7],
+    pub target: u64,
+}
+
+/// Key for the signal_policy BPF hash map.
+/// Matches `struct sig_policy_key` in shadow_proc.bpf.c.
+/// target_cgroup 0 is the any-target wildcard.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SigPolicyKey {
+    pub cgroup_id: u64,
+    pub target_cgroup: u64,
+}
+
+/// One fine-grained network endpoint entry (host-order addr/port;
+/// 0 is the wildcard at that position).
+#[derive(Debug, Clone, Copy)]
+pub struct NetPolicyEntry {
+    pub family: u8,
+    pub addr: u32,
+    pub port: u16,
+    pub allow: u8,
+}
+
+/// One fine-grained IPC entry (ipc_type: IPC_TYPE_* from the BPF side;
+/// target 0 = any target of that type).
+#[derive(Debug, Clone, Copy)]
+pub struct IpcPolicyEntry {
+    pub ipc_type: u8,
+    pub target: u64,
+    pub allow: u8,
+}
+
+/// One fine-grained signal entry (target_cgroup 0 = any target).
+#[derive(Debug, Clone, Copy)]
+pub struct SigPolicyEntry {
+    pub target_cgroup: u64,
+    pub allow: u8,
+}
+
+/// Fine-grained process-layer policy for one cgroup (P0-5).
+/// classes: (effect_class, mode) — mode 1 = class-wide allow,
+/// mode 2 = fine-grained (the per-endpoint maps decide, default-deny).
+#[derive(Debug, Clone, Default)]
+pub struct ProcPolicy {
+    pub classes: Vec<(u8, u8)>,
+    pub network: Vec<NetPolicyEntry>,
+    pub ipc: Vec<IpcPolicyEntry>,
+    pub signal: Vec<SigPolicyEntry>,
+}
+
+/// Fine-grained keys installed for a cgroup, tracked so clear_all_policies()
+/// can delete them (BPF hash maps have no "delete by prefix" operation).
+#[derive(Default)]
+struct FinePolicyKeys {
+    net: Vec<NetPolicyKey>,
+    ipc: Vec<IpcPolicyKey>,
+    sig: Vec<SigPolicyKey>,
+}
+
 /// Raw bpf() syscall wrapper for MAP_DELETE_ELEM
 unsafe fn libc_bpf_map_delete_elem(map_fd: i32, key: *const std::ffi::c_void) -> i64 {
     #[repr(C)]
@@ -74,6 +172,25 @@ unsafe fn libc_bpf_map_update_elem(
     )
 }
 
+/// Fail-closed variant of libc_bpf_map_update_elem: policy installation
+/// must surface a failed map write instead of silently continuing (a lost
+/// entry could turn a deny into an allow — or wedge a release mid-way).
+unsafe fn bpf_map_update_checked(
+    map_fd: i32,
+    key: *const std::ffi::c_void,
+    value: *const std::ffi::c_void,
+) -> Result<()> {
+    let ret = libc_bpf_map_update_elem(map_fd, key, value);
+    if ret != 0 {
+        anyhow::bail!(
+            "BPF map update failed (fd {}): {}",
+            map_fd,
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
 /// Tracks cgroup_map slot allocation so cgroups can be added AND removed.
 ///
 /// The old design used a monotonic index + append-only Vec of fds, so slots
@@ -97,8 +214,18 @@ pub struct BpfManager {
     poll_thread: Option<thread::JoinHandle<()>>,
     /// Raw fd of stopped_pids map
     stopped_pids_fd: i32,
-    /// Raw fd of allowed_pids map
-    allowed_pids_fd: i32,
+    /// Raw fd of epoch_mode map (Phase 2)
+    epoch_mode_fd: i32,
+    /// Raw fd of class_policy map (Phase 2)
+    class_policy_fd: i32,
+    /// Raw fd of network_policy map (fine-grained, P0-5)
+    network_policy_fd: i32,
+    /// Raw fd of ipc_policy map (fine-grained, P0-5)
+    ipc_policy_fd: i32,
+    /// Raw fd of signal_policy map (fine-grained, P0-5)
+    signal_policy_fd: i32,
+    /// Raw fd of restart_token map (Phase 2)
+    restart_token_fd: i32,
     /// Raw fd of cgroup_map
     cgroup_map_fd: i32,
     /// Raw fd of cgroup_count map
@@ -107,6 +234,8 @@ pub struct BpfManager {
     cow_enabled_fd: i32,
     /// cgroup_map slot bookkeeping (add/remove with index recycling).
     cgroup_slots: Mutex<CgroupSlots>,
+    /// Fine-grained policy keys installed per cgroup (epoch-end cleanup).
+    fine_keys: Mutex<HashMap<u64, FinePolicyKeys>>,
 }
 
 impl BpfManager {
@@ -119,7 +248,12 @@ impl BpfManager {
 
         // Get map fds before moving skel into thread
         let stopped_pids_fd = skel.maps().stopped_pids().as_fd().as_raw_fd();
-        let allowed_pids_fd = skel.maps().allowed_pids().as_fd().as_raw_fd();
+        let epoch_mode_fd = skel.maps().epoch_mode().as_fd().as_raw_fd();
+        let class_policy_fd = skel.maps().class_policy().as_fd().as_raw_fd();
+        let network_policy_fd = skel.maps().network_policy().as_fd().as_raw_fd();
+        let ipc_policy_fd = skel.maps().ipc_policy().as_fd().as_raw_fd();
+        let signal_policy_fd = skel.maps().signal_policy().as_fd().as_raw_fd();
+        let restart_token_fd = skel.maps().restart_token().as_fd().as_raw_fd();
         let cgroup_map_fd = skel.maps().cgroup_map().as_fd().as_raw_fd();
         let cgroup_count_fd = skel.maps().cgroup_count().as_fd().as_raw_fd();
         let cow_enabled_fd = skel.maps().cow_enabled().as_fd().as_raw_fd();
@@ -176,7 +310,12 @@ impl BpfManager {
             running,
             poll_thread: Some(poll_thread),
             stopped_pids_fd,
-            allowed_pids_fd,
+            epoch_mode_fd,
+            class_policy_fd,
+            network_policy_fd,
+            ipc_policy_fd,
+            signal_policy_fd,
+            restart_token_fd,
             cgroup_map_fd,
             cgroup_count_fd,
             cow_enabled_fd,
@@ -186,6 +325,7 @@ impl BpfManager {
                 free: Vec::new(),
                 high_water: 0,
             }),
+            fine_keys: Mutex::new(HashMap::new()),
         };
 
         // Add initial cgroup if provided
@@ -298,73 +438,336 @@ impl BpfManager {
         }
     }
 
-    /// Allow a process to pass all future interception, then remove from stopped list.
-    /// MUST be called before SIGCONT.
-    /// Flow: add to allowed_pids → delete from stopped_pids → SIGCONT
-    ///       → kernel restarts syscall → hook sees allowed → passes through
-    pub fn clear_stopped(&self, tgid: u32) -> Result<()> {
-        let key_bytes = tgid.to_ne_bytes();
-        let val: u32 = 1;
-        let val_bytes = val.to_ne_bytes();
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 2: Three-state model API
+    // ═══════════════════════════════════════════════════════════════
 
-        // 1. Add to allowed_pids (so restarted syscall passes through)
-        unsafe {
-            libc_bpf_map_update_elem(
-                self.allowed_pids_fd,
-                key_bytes.as_ptr() as *const _,
-                val_bytes.as_ptr() as *const _,
-            );
-        }
-
-        // 2. Remove from stopped_pids
-        unsafe {
-            libc_bpf_map_delete_elem(self.stopped_pids_fd, key_bytes.as_ptr() as *const _);
-        }
-
-        Ok(())
-    }
-
-    /// Fully release a tgid: like `clear_stopped`, but marks allowed_pids with
-    /// value 2 instead of 1. Value 2 means EVEN the exit-hold sentinel
-    /// (192.0.2.255:65535) is let through, so the process can run to completion
-    /// and actually exit. A normal `clear_stopped` (value 1) still stops the
-    /// process at its exit-hold sentinel. Used by continue/commit paths.
-    /// Flow: set allowed_pids=2 → delete from stopped_pids → caller SIGCONTs.
-    pub fn clear_stopped_full(&self, tgid: u32) -> Result<()> {
-        let key_bytes = tgid.to_ne_bytes();
-        let val: u32 = 2;
-        let val_bytes = val.to_ne_bytes();
-
-        unsafe {
-            libc_bpf_map_update_elem(
-                self.allowed_pids_fd,
-                key_bytes.as_ptr() as *const _,
-                val_bytes.as_ptr() as *const _,
-            );
-        }
-        unsafe {
-            libc_bpf_map_delete_elem(self.stopped_pids_fd, key_bytes.as_ptr() as *const _);
-        }
-
-        Ok(())
-    }
-
-    /// Re-arm interception for a tgid at an epoch boundary by removing its
-    /// PERMANENT allow_pids entry. After this, the tgid's next interceptable
-    /// syscall is caught again.
+    /// Remove the stopped_pids entry for a tgid (no allow pass granted).
+    /// MUST be called before SIGCONT so the restarted syscall is not
+    /// treated as an in-flight stop dedup.
     ///
-    /// This is the counterpart of `clear_stopped`'s permanent allow: resume /
-    /// commit grant a permanent pass so the process runs the whole epoch
-    /// uninterrupted (per-epoch, not per-syscall, granularity); this call, made
-    /// when a NEW epoch begins, revokes that pass so the process is guarded
-    /// again. A freshly cloned candidate has a new tgid and is armed by default,
-    /// so re-arming mainly matters for a pid reused as a new epoch's baseline.
-    pub fn rearm_intercept(&self, tgid: u32) -> Result<()> {
+    /// This replaces the old `clear_stopped` / `clear_stopped_full` which
+    /// also set a PERMANENT allow in allowed_pids. In the three-state model,
+    /// a resumed process is allowed via one-shot restart tokens
+    /// (grant_restart_token) or ENFORCED-mode policy, NOT a permanent bypass.
+    pub fn clear_stopped_mark(&self, tgid: u32) -> Result<()> {
         let key_bytes = tgid.to_ne_bytes();
         unsafe {
-            libc_bpf_map_delete_elem(self.allowed_pids_fd, key_bytes.as_ptr() as *const _);
+            libc_bpf_map_delete_elem(self.stopped_pids_fd, key_bytes.as_ptr() as *const _);
         }
         Ok(())
+    }
+
+    /// Grant a one-shot restart token for a tid + syscall_nr.
+    ///
+    /// When the thread with this tid next calls syscall_nr, check_policy()
+    /// finds the token, CONSUMES it (deletes the entry), and returns
+    /// DECISION_ALLOW. The token grants exactly ONE syscall pass — the
+    /// next intercepted syscall is subject to the normal mode-based decision.
+    ///
+    /// This replaces the old permanent allowed_pids bypass with per-syscall
+    /// granularity: only the specific authorized syscall passes.
+    pub fn grant_restart_token(
+        &self,
+        tid: u32,
+        syscall_nr: u32,
+        effect_class: u8,
+    ) -> Result<()> {
+        let key_bytes = tid.to_ne_bytes();
+        let val = RestartTokenVal {
+            syscall_nr,
+            effect_class,
+            _pad0: [0u8; 3],
+        };
+        unsafe {
+            libc_bpf_map_update_elem(
+                self.restart_token_fd,
+                key_bytes.as_ptr() as *const _,
+                &val as *const _ as *const _,
+            );
+        }
+        Ok(())
+    }
+
+    /// Set the epoch mode for a cgroup.
+    ///
+    /// MODE_SPECULATIVE (default): fence all external effects.
+    /// MODE_AUTHORIZED_PENDING: still fence (process not running).
+    /// MODE_ENFORCED: consult policy maps; allow if policy permits, deny otherwise.
+    pub fn set_epoch_mode(&self, cgroup_id: u64, mode: u8) -> Result<()> {
+        let key_bytes = cgroup_id.to_ne_bytes();
+        let val_bytes = mode.to_ne_bytes();
+        unsafe {
+            libc_bpf_map_update_elem(
+                self.epoch_mode_fd,
+                key_bytes.as_ptr() as *const _,
+                val_bytes.as_ptr() as *const _,
+            );
+        }
+        Ok(())
+    }
+
+    /// Install a class-level policy entry: per (cgroup, effect_class) -> allow/deny.
+    /// Only consulted in MODE_ENFORCED. Default-deny: absent entry = deny.
+    pub fn install_class_policy(
+        &self,
+        cgroup_id: u64,
+        effect_class: u8,
+        allow: u8,
+    ) -> Result<()> {
+        let key = ClassPolicyKey {
+            cgroup_id,
+            effect_class,
+        };
+        unsafe {
+            libc_bpf_map_update_elem(
+                self.class_policy_fd,
+                &key as *const _ as *const _,
+                &allow as *const _ as *const _,
+            );
+        }
+        Ok(())
+    }
+
+    /// Clear the epoch mode for a cgroup, resetting it to MODE_SPECULATIVE
+    /// (the default when no entry exists). Called at epoch end.
+    pub fn clear_epoch_mode(&self, cgroup_id: u64) -> Result<()> {
+        let key_bytes = cgroup_id.to_ne_bytes();
+        unsafe {
+            libc_bpf_map_delete_elem(self.epoch_mode_fd, key_bytes.as_ptr() as *const _);
+        }
+        Ok(())
+    }
+
+    /// Clear a restart token for a tid (e.g., on reject/abort).
+    pub fn clear_restart_token(&self, tid: u32) -> Result<()> {
+        let key_bytes = tid.to_ne_bytes();
+        unsafe {
+            libc_bpf_map_delete_elem(self.restart_token_fd, key_bytes.as_ptr() as *const _);
+        }
+        Ok(())
+    }
+
+    /// Install allow-all class policies for a cgroup and set ENFORCED mode.
+    ///
+    /// This is the equivalent of the old `clear_stopped_full` (permanent
+    /// full release): it lets the process run to completion by allowing
+    /// all effect classes. The process's pending syscall still needs a
+    /// restart token to pass on the first restart (grant_restart_token).
+    pub fn enforce_allow_all(&self, cgroup_id: u64) -> Result<()> {
+        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_NETWORK, 1)?;
+        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_IPC, 1)?;
+        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_SIGNAL, 1)?;
+        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_PRIVILEGE, 1)?;
+        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_OUTPUT, 1)?;
+        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_SYSTEM, 1)?;
+        self.set_epoch_mode(cgroup_id, crate::policy_generated::MODE_ENFORCED)?;
+        Ok(())
+    }
+
+    /// Delete a single class_policy entry for a cgroup + effect_class.
+    pub fn clear_class_policy(&self, cgroup_id: u64, effect_class: u8) -> Result<()> {
+        let key = ClassPolicyKey {
+            cgroup_id,
+            effect_class,
+        };
+        unsafe {
+            libc_bpf_map_delete_elem(self.class_policy_fd, &key as *const _ as *const _);
+        }
+        Ok(())
+    }
+
+    /// Install one fine-grained network policy entry (host-order addr/port;
+    /// 0 is the wildcard at that position).
+    pub fn install_net_policy(
+        &self,
+        cgroup_id: u64,
+        family: u8,
+        addr: u32,
+        port: u16,
+        allow: u8,
+    ) -> Result<()> {
+        let key = NetPolicyKey { cgroup_id, family, _pad0: 0, port, addr };
+        unsafe {
+            bpf_map_update_checked(
+                self.network_policy_fd,
+                &key as *const _ as *const _,
+                &allow as *const _ as *const _,
+            )
+        }
+    }
+
+    /// Install one fine-grained IPC policy entry (target 0 = any target).
+    pub fn install_ipc_policy(
+        &self,
+        cgroup_id: u64,
+        ipc_type: u8,
+        target: u64,
+        allow: u8,
+    ) -> Result<()> {
+        let key = IpcPolicyKey { cgroup_id, ipc_type, _pad0: [0; 7], target };
+        unsafe {
+            bpf_map_update_checked(
+                self.ipc_policy_fd,
+                &key as *const _ as *const _,
+                &allow as *const _ as *const _,
+            )
+        }
+    }
+
+    /// Install one fine-grained signal policy entry (target_cgroup 0 = any).
+    pub fn install_signal_policy(
+        &self,
+        cgroup_id: u64,
+        target_cgroup: u64,
+        allow: u8,
+    ) -> Result<()> {
+        let key = SigPolicyKey { cgroup_id, target_cgroup };
+        unsafe {
+            bpf_map_update_checked(
+                self.signal_policy_fd,
+                &key as *const _ as *const _,
+                &allow as *const _ as *const _,
+            )
+        }
+    }
+
+    /// Atomically install a full process-layer policy for a cgroup and switch
+    /// it to MODE_ENFORCED (P0-5). Fine-grained endpoint entries are written
+    /// first, class modes second, ENFORCED last; on ANY failure everything
+    /// installed so far is rolled back and the epoch mode is reset, so a
+    /// half-installed policy can never take effect.
+    pub fn enforce_policy(&self, cgroup_id: u64, policy: &ProcPolicy) -> Result<()> {
+        let mut keys = FinePolicyKeys::default();
+        let mut classes_done: Vec<u8> = Vec::new();
+        let result = (|| -> Result<()> {
+            for e in &policy.network {
+                let key = NetPolicyKey {
+                    cgroup_id, family: e.family, _pad0: 0,
+                    port: e.port, addr: e.addr,
+                };
+                unsafe {
+                    bpf_map_update_checked(
+                        self.network_policy_fd,
+                        &key as *const _ as *const _,
+                        &e.allow as *const _ as *const _,
+                    )?;
+                }
+                keys.net.push(key);
+            }
+            for e in &policy.ipc {
+                let key = IpcPolicyKey {
+                    cgroup_id, ipc_type: e.ipc_type, _pad0: [0; 7], target: e.target,
+                };
+                unsafe {
+                    bpf_map_update_checked(
+                        self.ipc_policy_fd,
+                        &key as *const _ as *const _,
+                        &e.allow as *const _ as *const _,
+                    )?;
+                }
+                keys.ipc.push(key);
+            }
+            for e in &policy.signal {
+                let key = SigPolicyKey { cgroup_id, target_cgroup: e.target_cgroup };
+                unsafe {
+                    bpf_map_update_checked(
+                        self.signal_policy_fd,
+                        &key as *const _ as *const _,
+                        &e.allow as *const _ as *const _,
+                    )?;
+                }
+                keys.sig.push(key);
+            }
+            for &(cls, mode) in &policy.classes {
+                let ckey = ClassPolicyKey { cgroup_id, effect_class: cls };
+                unsafe {
+                    bpf_map_update_checked(
+                        self.class_policy_fd,
+                        &ckey as *const _ as *const _,
+                        &mode as *const _ as *const _,
+                    )?;
+                }
+                classes_done.push(cls);
+            }
+            self.set_epoch_mode(cgroup_id, crate::policy_generated::MODE_ENFORCED)?;
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            // Roll back to the pre-install state (fail-closed).
+            for k in &keys.net {
+                unsafe { libc_bpf_map_delete_elem(self.network_policy_fd, k as *const _ as *const _); }
+            }
+            for k in &keys.ipc {
+                unsafe { libc_bpf_map_delete_elem(self.ipc_policy_fd, k as *const _ as *const _); }
+            }
+            for k in &keys.sig {
+                unsafe { libc_bpf_map_delete_elem(self.signal_policy_fd, k as *const _ as *const _); }
+            }
+            for &cls in &classes_done {
+                let _ = self.clear_class_policy(cgroup_id, cls);
+            }
+            let _ = self.clear_epoch_mode(cgroup_id);
+            return Err(e);
+        }
+
+        // Track the installed keys so clear_all_policies() can delete them.
+        let mut fine = self.fine_keys.lock().unwrap();
+        let entry = fine.entry(cgroup_id).or_default();
+        entry.net.extend(keys.net);
+        entry.ipc.extend(keys.ipc);
+        entry.sig.extend(keys.sig);
+        Ok(())
+    }
+
+    /// Delete every tracked fine-grained policy key for a cgroup.
+    pub fn clear_fine_policies(&self, cgroup_id: u64) -> Result<()> {
+        let keys = {
+            let mut fine = self.fine_keys.lock().unwrap();
+            fine.remove(&cgroup_id).unwrap_or_default()
+        };
+        for k in &keys.net {
+            unsafe { libc_bpf_map_delete_elem(self.network_policy_fd, k as *const _ as *const _); }
+        }
+        for k in &keys.ipc {
+            unsafe { libc_bpf_map_delete_elem(self.ipc_policy_fd, k as *const _ as *const _); }
+        }
+        for k in &keys.sig {
+            unsafe { libc_bpf_map_delete_elem(self.signal_policy_fd, k as *const _ as *const _); }
+        }
+        Ok(())
+    }
+
+    /// Clear all policies for a cgroup: reset epoch_mode to SPECULATIVE
+    /// (default when no entry exists), delete all class_policy entries and
+    /// every tracked fine-grained endpoint entry. Called at epoch boundaries
+    /// to ensure a clean SPECULATIVE start.
+    pub fn clear_all_policies(&self, cgroup_id: u64) -> Result<()> {
+        self.clear_epoch_mode(cgroup_id)?;
+        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_NETWORK)?;
+        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_IPC)?;
+        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_SIGNAL)?;
+        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_PRIVILEGE)?;
+        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_OUTPUT)?;
+        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_SYSTEM)?;
+        self.clear_fine_policies(cgroup_id)?;
+        Ok(())
+    }
+
+    /// Resolve a cgroup path to its kernel cgroup_id (inode number).
+    /// This is what bpf_get_current_cgroup_id() returns in BPF, and what
+    /// the epoch_mode/class_policy maps are keyed by.
+    pub fn cgroup_id_from_path(&self, cgroup_path: &str) -> Result<u64> {
+        let path = if cgroup_path.starts_with('/') {
+            format!("/sys/fs/cgroup{}", cgroup_path)
+        } else {
+            format!("/sys/fs/cgroup/{}", cgroup_path)
+        };
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&path)
+            .with_context(|| format!("Failed to stat cgroup path: {}", path))
+            .map(|m| m.ino())
     }
 
     pub fn stop(&mut self) {

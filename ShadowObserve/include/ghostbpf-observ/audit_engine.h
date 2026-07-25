@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "ghostbpf-observ/effect_schema.hpp"
+
 namespace ghostbpf_observ {
 
 /* ---- types ------------------------------------------------------------ */
@@ -21,7 +23,10 @@ struct ObservEvent {
     uint32_t uid;
     uint32_t gid;
     uint64_t cgroup_id;
-    uint16_t event_type;  /* FS_EVENT_* or PROC_EVENT_* */
+    uint64_t seq;         /* monotonic per-cgroup sequence */
+    uint16_t event_type;  /* encoded (class|op<<8), see effect_schema.hpp */
+    uint8_t  source;      /* EFFECT_SOURCE_* */
+    uint8_t  _pad0;
     uint32_t arg1;
     uint32_t arg2;
     uint32_t arg3;
@@ -35,7 +40,7 @@ struct ObservEvent {
 
 /** One rule – path prefix + action. */
 struct AuditRule {
-    int         event_type;       /* FS_EVENT_*, or -1 for any */
+    int         event_type;       /* encoded class+op, or -1 for any */
     int         action;           /* AUDIT_ALLOW or AUDIT_DENY */
     std::string path_pattern;     /* prefix to match */
 };

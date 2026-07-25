@@ -174,14 +174,17 @@ class TestReleaseProcFailClosed(unittest.TestCase):
                 return {"status": "error", "message": "resume boom"}
             return {"status": "ok"}
 
-        fs_calls = {"can_release": 0}
-
         def fs(req):
-            if req["action"] == "can_release":
-                fs_calls["can_release"] += 1
+            a = req["action"]
+            if a == "prepare_resolution":
+                return {"status": "ok", "group_id": 1,
+                        "members": ["epoch-1"], "graph_generation": 1}
+            if a == "begin_finalize":
+                return {"status": "ok", "state": "finalized"}
+            if a == "can_release":
                 return {"status": "ok", "releasable": True}
-            if req["action"] == "commit":
-                return {"status": "ok", "state": "Finalized", "releasable": True}
+            if a == "ack_release_group":
+                return {"status": "ok"}
             return {"status": "ok"}
 
         orch = _bare_orch(proc, fs)
@@ -258,7 +261,7 @@ class TestReleaseProcFailClosed(unittest.TestCase):
 
         self.assertTrue(ok, "external effects released even though ack failed")
         self.assertEqual(out, "out\n")
-        self.assertIn(cg, orch._pending_ack, "failed ack must be parked for retry")
+        self.assertIn((cg, ""), orch._pending_ack, "failed ack must be parked for retry")
         # Output was consumed (processes were resumed), so the file is gone.
         self.assertNotIn(cg, orch._output_buffers)
         self.assertFalse(os.path.exists(path))
@@ -266,7 +269,7 @@ class TestReleaseProcFailClosed(unittest.TestCase):
         # Ack-only retry: succeeds and must NOT resume or re-query processes.
         orch._retry_pending_acks()
 
-        self.assertNotIn(cg, orch._pending_ack, "ack should clear on retry")
+        self.assertNotIn((cg, ""), orch._pending_ack, "ack should clear on retry")
         self.assertEqual(orch.proc_client.actions().count("continue_by_cgroup"), 1,
                          "ack retry must NOT resume processes again")
         self.assertEqual(orch.proc_client.actions().count("list_frozen"), 1,

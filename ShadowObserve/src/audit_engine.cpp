@@ -39,6 +39,9 @@ const char *ObservEvent::event_name() const {
     case PROC_EVENT_PTRACE: return "PTRACE";
     case PROC_EVENT_SETUID: return "SETUID";
     case PROC_EVENT_CAPSET: return "CAPSET";
+    /* PROC_EVENT_EXEC_PRIV has the same encoded value as PROC_EVENT_EXEC
+     * (both map to CLASS_PRIVILEGE/OP_EXEC_PRIV); the EXEC case above
+     * already handles it, so a separate case label would be a duplicate. */
     default:                return "UNKNOWN";
     }
 }
@@ -113,6 +116,8 @@ static bool parse_json_line(const std::string &line, ObservEvent &evt) {
         else if (key == "uid")      evt.uid          = static_cast<uint32_t>(std::stoul(val));
         else if (key == "gid")      evt.gid          = static_cast<uint32_t>(std::stoul(val));
         else if (key == "cgroup_id") evt.cgroup_id   = static_cast<uint64_t>(std::stoull(val));
+        else if (key == "seq")       evt.seq         = static_cast<uint64_t>(std::stoull(val));
+        else if (key == "source")    evt.source      = static_cast<uint8_t>(std::stoul(val));
         else if (key == "arg1")     evt.arg1         = static_cast<uint32_t>(std::stoul(val));
         else if (key == "arg2")     evt.arg2         = static_cast<uint32_t>(std::stoul(val));
         else if (key == "arg3")     evt.arg3         = static_cast<uint32_t>(std::stoul(val));
@@ -136,6 +141,7 @@ static bool parse_json_line(const std::string &line, ObservEvent &evt) {
             else if (val == "PTRACE") evt.event_type = PROC_EVENT_PTRACE;
             else if (val == "SETUID") evt.event_type = PROC_EVENT_SETUID;
             else if (val == "CAPSET") evt.event_type = PROC_EVENT_CAPSET;
+            else if (val == "EXEC_PRIV") evt.event_type = PROC_EVENT_EXEC_PRIV;
         }
         else if (key == "comm")     std::strncpy(evt.comm, val.c_str(), sizeof(evt.comm) - 1);
         else if (key == "path")     std::strncpy(evt.path, val.c_str(), sizeof(evt.path) - 1);
@@ -157,6 +163,13 @@ bool AuditEngine::path_matches(const std::string &pattern,
     // this historical audit is enforced the same way at runtime -- e.g. "/tmp"
     // matches "/tmp/a/b" but NOT "/tmpfoo".
     if (pattern.empty()) return true;
+
+    // Fail-closed: a path too long to fit in the BPF enforcer's fixed-size
+    // buffers cannot be matched there (cri_check_whitelist denies it), so the
+    // audit must not treat it as allow-matched either. This keeps observe==enforce
+    // consistent: a too-long path is a violation under any rule set.
+    if (path.size() >= MAX_PATH)
+        return false;
 
     // Normalize away trailing slashes (keep a lone "/" as the root marker).
     std::string p = pattern;
@@ -206,9 +219,10 @@ bool AuditEngine::endpoint_violation(int event_type, const std::string &path,
         matched_out = *deny_rule;
         return true;
     }
-    // Default-deny: a non-empty rule set with no matching allow rule is a
-    // violation. An empty rule set audits nothing (allows all).
-    if (!has_allow && !rules_.empty()) {
+    // Default-deny: no matching allow rule is a violation. An empty rule set
+    // is deny-all (not allow-all); only an explicit ANY allow (event_type == -1
+    // with an empty path pattern) sets has_allow and permits everything.
+    if (!has_allow) {
         matched_out = {-1, AUDIT_DENY, "(default-deny)"};
         return true;
     }

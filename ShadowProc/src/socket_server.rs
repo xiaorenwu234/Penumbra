@@ -20,6 +20,21 @@ struct Request {
     cgroup_id: Option<String>,
     #[serde(default)]
     pid: Option<u32>,
+    // Phase 2 three-state model parameters
+    #[serde(default)]
+    mode: Option<u8>,
+    #[serde(default)]
+    effect_class: Option<u8>,
+    #[serde(default)]
+    allow: Option<u8>,
+    #[serde(default)]
+    tid: Option<u32>,
+    #[serde(default)]
+    syscall_nr: Option<u32>,
+    /// Optional fine-grained process-layer policy for continue_by_cgroup
+    /// (P0-5). See ProcessManager::parse_proc_policy for the schema.
+    #[serde(default)]
+    policy: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -371,7 +386,7 @@ impl SocketServer {
                 let pm = process_manager.lock().unwrap();
                 let filter_cgroup = req.cgroup_id.as_deref();
                 let completed: Vec<FrozenInfo> = pm.list_frozen().iter()
-                    .filter(|p| p.event.event_type == 8) // EVENT_EXIT_HOLD
+                    .filter(|p| p.event.is_exit_hold())
                     .filter(|p| filter_cgroup.is_none_or(|cg| p.cgroup_path == cg))
                     .map(|p| FrozenInfo {
                         pid: p.pid,
@@ -398,8 +413,25 @@ impl SocketServer {
                         pids: None,
                     };
                 };
+                // Optional fine-grained policy (P0-5). Fail-closed: a
+                // malformed policy aborts the release instead of silently
+                // falling back to allow-all.
+                let policy = match &req.policy {
+                    Some(v) => match ProcessManager::parse_proc_policy(v) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            return Response {
+                                status: "error".into(),
+                                message: Some(format!("invalid policy: {}", e)),
+                                frozen: None,
+                                pids: None,
+                            };
+                        }
+                    },
+                    None => None,
+                };
                 let mut pm = process_manager.lock().unwrap();
-                match pm.continue_by_cgroup(cgroup_id) {
+                match pm.continue_by_cgroup_with_policy(cgroup_id, policy.as_ref()) {
                     Ok(pids) => Response {
                         status: "ok".into(),
                         message: None,
@@ -480,7 +512,7 @@ impl SocketServer {
                 match pm.resume_process(pid) {
                     Ok(()) => Response {
                         status: "ok".into(),
-                        message: Some(format!("Resumed pid {} (will be intercepted again)", pid)),
+                        message: Some(format!("Resumed pid {} (one-shot token granted, next syscall will be intercepted again)", pid)),
                         frozen: None,
                         pids: None,
                     },
@@ -493,13 +525,13 @@ impl SocketServer {
                 }
             }
 
-            // Wake a speculative candidate WITHOUT granting any allow-map pass.
-            // Unlike resume_pid (which sets allowed_pids=1, a permanent
-            // per-epoch bypass), this is a plain SIGCONT: the candidate runs
+            // Wake a speculative candidate WITHOUT granting a restart token.
+            // Unlike resume_pid (which grants a one-shot restart token for the
+            // pending syscall), this is a plain SIGCONT: the candidate runs
             // ARMED, so its first external effect is intercepted and frozen.
             // This is the correct primitive for starting a candidate at the
             // input gate; full release only happens after finalization via
-            // continue/commit (allowed_pids=2).
+            // continue/commit (ENFORCED + allow-all).
             "resume_candidate" => {
                 let Some(pid) = req.pid else {
                     return Response {
@@ -630,10 +662,10 @@ impl SocketServer {
 
             // One-shot speculative fork: freeze the target, inject a COW clone,
             // and wake the candidate with a plain SIGCONT — all in a single
-            // call. Deliberately does NOT touch the eBPF allow maps: the
-            // candidate is a fresh tgid armed by default and frozen at a
-            // non-intercepted boundary, so it needs no allow-pass; its later
-            // intercepted syscalls are caught normally. The baseline stays
+            // call. Deliberately does NOT grant a restart token: the
+            // candidate is a fresh tgid armed by default (SPECULATIVE mode) and
+            // frozen at a non-intercepted boundary, so it needs no token; its
+            // later intercepted syscalls are caught normally. The baseline stays
             // frozen as the pristine rollback copy. Collapses the old
             // freeze_by_cgroup -> begin_speculative -> resume_pid sequence.
             "spec_fork" => {
@@ -826,6 +858,160 @@ impl SocketServer {
                         message: Some(format!("Froze {} processes", pids.len())),
                         frozen: None,
                         pids: Some(pids),
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                    },
+                }
+            }
+
+            // ══════════════════════════════════════════════════════
+            // Phase 2: Three-state model API
+            // ══════════════════════════════════════════════════════
+
+            "set_epoch_mode" => {
+                let Some(cgroup_path) = &req.cgroup_path else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("cgroup_path required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                let Some(mode) = req.mode else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("mode required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                match bpf_manager.cgroup_id_from_path(cgroup_path) {
+                    Ok(cg_id) => match bpf_manager.set_epoch_mode(cg_id, mode) {
+                        Ok(()) => Response {
+                            status: "ok".into(),
+                            message: Some(format!("Set epoch mode {} for cgroup {}", mode, cgroup_path)),
+                            frozen: None,
+                            pids: None,
+                        },
+                        Err(e) => Response {
+                            status: "error".into(),
+                            message: Some(e.to_string()),
+                            frozen: None,
+                            pids: None,
+                        },
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                    },
+                }
+            }
+
+            "install_class_policy" => {
+                let Some(cgroup_path) = &req.cgroup_path else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("cgroup_path required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                let Some(effect_class) = req.effect_class else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("effect_class required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                let allow = req.allow.unwrap_or(0);
+                match bpf_manager.cgroup_id_from_path(cgroup_path) {
+                    Ok(cg_id) => match bpf_manager.install_class_policy(cg_id, effect_class, allow) {
+                        Ok(()) => Response {
+                            status: "ok".into(),
+                            message: Some(format!("Installed class_policy({})={} for cgroup {}", effect_class, allow, cgroup_path)),
+                            frozen: None,
+                            pids: None,
+                        },
+                        Err(e) => Response {
+                            status: "error".into(),
+                            message: Some(e.to_string()),
+                            frozen: None,
+                            pids: None,
+                        },
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                    },
+                }
+            }
+
+            "clear_all_policies" => {
+                let Some(cgroup_path) = &req.cgroup_path else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("cgroup_path required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                match bpf_manager.cgroup_id_from_path(cgroup_path) {
+                    Ok(cg_id) => match bpf_manager.clear_all_policies(cg_id) {
+                        Ok(()) => Response {
+                            status: "ok".into(),
+                            message: Some(format!("Cleared all policies for cgroup {} (reset to SPECULATIVE)", cgroup_path)),
+                            frozen: None,
+                            pids: None,
+                        },
+                        Err(e) => Response {
+                            status: "error".into(),
+                            message: Some(e.to_string()),
+                            frozen: None,
+                            pids: None,
+                        },
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                    },
+                }
+            }
+
+            "grant_restart_token" => {
+                let Some(tid) = req.tid else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("tid required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                let Some(syscall_nr) = req.syscall_nr else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("syscall_nr required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
+                let effect_class = req.effect_class.unwrap_or(crate::policy_generated::CLASS_NETWORK);
+                match bpf_manager.grant_restart_token(tid, syscall_nr, effect_class) {
+                    Ok(()) => Response {
+                        status: "ok".into(),
+                        message: Some(format!("Granted restart token: tid={} syscall={} class={}", tid, syscall_nr, effect_class)),
+                        frozen: None,
+                        pids: None,
                     },
                     Err(e) => Response {
                         status: "error".into(),

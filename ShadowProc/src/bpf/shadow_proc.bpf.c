@@ -12,23 +12,112 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include <bpf/bpf_endian.h>
 
 // -ERESTARTSYS: kernel will auto-restart syscall after signal handling
 #define ERESTARTSYS 512
 
-// Event types
-#define EVENT_NETWORK     1
-#define EVENT_IPC         2
-#define EVENT_WRITE_OUT   3
-#define EVENT_SIGNAL      4
-#define EVENT_PTRACE      5
-#define EVENT_FORK        7
-#define EVENT_EXIT_HOLD   8
-#define EVENT_PRIV_EXEC   9   // Attempt to execute setuid/setgid binary
-#define EVENT_PRIV_SETUID 10  // Attempt to change UID
+// Operations per class (from unified schema, policy_generated.rs).
+// These must match EFFECT_OP_* in policy_generated.rs exactly.
+#define EFFECT_OP_CONNECT         1
+#define EFFECT_OP_BIND            2
+#define EFFECT_OP_SEND            3
+#define EFFECT_OP_PIPE_WRITE      1
+#define EFFECT_OP_UNIX_WRITE      2
+#define EFFECT_OP_SYSV_SHM        3
+#define EFFECT_OP_SYSV_MSG        4
+#define EFFECT_OP_SYSV_SEM        5
+#define EFFECT_OP_POSIX_MQ        6
+#define EFFECT_OP_SHARED_MAPPING  7
+#define EFFECT_OP_KILL            1
+#define EFFECT_OP_PTRACE          2
+#define EFFECT_OP_EXEC_PRIV       1
+#define EFFECT_OP_SETUID          2
+#define EFFECT_OP_SETGID          3
+#define EFFECT_OP_SETGROUPS       4
+#define EFFECT_OP_CAPSET          5
+#define EFFECT_OP_WRITE_OUT       1
+#define EFFECT_OP_SENDFILE        2
+#define EFFECT_OP_SPLICE          3
+#define EFFECT_OP_IO_URING        4
+#define EFFECT_OP_MOUNT           1
+#define EFFECT_OP_NAMESPACE       2
+#define EFFECT_OP_KEYRING         3
+#define EFFECT_OP_BPF             4
+#define EFFECT_OP_PERF            5
+#define EFFECT_OP_TTY_IOCTL       6
+#define EFFECT_OP_PROCESS_VM      7
+
+// Encode (effect_class, operation) into a single uint16 event_type.
+// Layout: low byte = effect_class, high byte = operation. This matches
+// encode_event_type() in policy_generated.rs and the anonymous-union overlay
+// in struct effect_event, so every consumer decodes via (ty & 0xFF) / (ty>>8).
+#define ENCODE_EVENT(cls, op) ((__u32)(cls) | ((__u32)(op) << 8))
+
+// Event types — unified schema encoding (P0-6). Each hook emits the specific
+// (class, op) pair so userspace can route on effect_class without a hand-
+// maintained 1..N table. EXIT_HOLD reuses NETWORK/CONNECT because the
+// sentinel is a cooperative connect(); syscall_nr=231 (exit_group)
+// distinguishes it at the consumers (see InterceptEvent::is_exit_hold).
+#define EVENT_NETWORK_CONNECT  ENCODE_EVENT(EFFECT_CLASS_NETWORK, EFFECT_OP_CONNECT)     // 258
+#define EVENT_NETWORK_BIND     ENCODE_EVENT(EFFECT_CLASS_NETWORK, EFFECT_OP_BIND)        // 514
+#define EVENT_NETWORK_SEND     ENCODE_EVENT(EFFECT_CLASS_NETWORK, EFFECT_OP_SEND)        // 770
+#define EVENT_IPC_SHM          ENCODE_EVENT(EFFECT_CLASS_IPC, EFFECT_OP_SYSV_SHM)        // 771
+#define EVENT_IPC_MSG          ENCODE_EVENT(EFFECT_CLASS_IPC, EFFECT_OP_SYSV_MSG)        // 1027
+#define EVENT_IPC_SEM          ENCODE_EVENT(EFFECT_CLASS_IPC, EFFECT_OP_SYSV_SEM)        // 1283
+#define EVENT_IPC_MQ           ENCODE_EVENT(EFFECT_CLASS_IPC, EFFECT_OP_POSIX_MQ)        // 1539
+#define EVENT_IPC_MMAP         ENCODE_EVENT(EFFECT_CLASS_IPC, EFFECT_OP_SHARED_MAPPING)  // 1795
+#define EVENT_SIGNAL_KILL      ENCODE_EVENT(EFFECT_CLASS_SIGNAL, EFFECT_OP_KILL)         // 260
+#define EVENT_SIGNAL_PTRACE    ENCODE_EVENT(EFFECT_CLASS_SIGNAL, EFFECT_OP_PTRACE)       // 516
+#define EVENT_PRIV_EXEC        ENCODE_EVENT(EFFECT_CLASS_PRIVILEGE, EFFECT_OP_EXEC_PRIV) // 261
+#define EVENT_PRIV_SETUID      ENCODE_EVENT(EFFECT_CLASS_PRIVILEGE, EFFECT_OP_SETUID)   // 517
+#define EVENT_PRIV_SETGID      ENCODE_EVENT(EFFECT_CLASS_PRIVILEGE, EFFECT_OP_SETGID)   // 773
+#define EVENT_PRIV_SETGROUPS   ENCODE_EVENT(EFFECT_CLASS_PRIVILEGE, EFFECT_OP_SETGROUPS)// 1029
+#define EVENT_PRIV_CAPSET      ENCODE_EVENT(EFFECT_CLASS_PRIVILEGE, EFFECT_OP_CAPSET)   // 1285
+#define EVENT_OUTPUT_WRITE     ENCODE_EVENT(EFFECT_CLASS_OUTPUT, EFFECT_OP_WRITE_OUT)    // 262
+#define EVENT_OUTPUT_SENDFILE  ENCODE_EVENT(EFFECT_CLASS_OUTPUT, EFFECT_OP_SENDFILE)     // 518
+#define EVENT_OUTPUT_SPLICE    ENCODE_EVENT(EFFECT_CLASS_OUTPUT, EFFECT_OP_SPLICE)       // 774
+#define EVENT_OUTPUT_IO_URING  ENCODE_EVENT(EFFECT_CLASS_OUTPUT, EFFECT_OP_IO_URING)     // 1030
+#define EVENT_SYSTEM_MOUNT     ENCODE_EVENT(EFFECT_CLASS_SYSTEM, EFFECT_OP_MOUNT)        // 263
+#define EVENT_SYSTEM_NAMESPACE ENCODE_EVENT(EFFECT_CLASS_SYSTEM, EFFECT_OP_NAMESPACE)    // 519
+#define EVENT_SYSTEM_KEYRING   ENCODE_EVENT(EFFECT_CLASS_SYSTEM, EFFECT_OP_KEYRING)      // 775
+#define EVENT_SYSTEM_BPF       ENCODE_EVENT(EFFECT_CLASS_SYSTEM, EFFECT_OP_BPF)          // 1031
+#define EVENT_SYSTEM_PERF      ENCODE_EVENT(EFFECT_CLASS_SYSTEM, EFFECT_OP_PERF)         // 1287
+#define EVENT_SYSTEM_TTY_IOCTL ENCODE_EVENT(EFFECT_CLASS_SYSTEM, EFFECT_OP_TTY_IOCTL)    // 1543
+#define EVENT_SYSTEM_PROCESS_VM ENCODE_EVENT(EFFECT_CLASS_SYSTEM, EFFECT_OP_PROCESS_VM)  // 1799
+#define EVENT_EXIT_HOLD        ENCODE_EVENT(EFFECT_CLASS_NETWORK, EFFECT_OP_CONNECT)     // 258 (syscall_nr=231)
+// FORK is a process lifecycle event, not an auditable effect; it uses the
+// legacy_unmapped value (101) so it is never confused with an effect class.
+#define EVENT_FORK             101
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 2: Three-state model constants
+// ═══════════════════════════════════════════════════════════════
+
+// Epoch modes per cgroup
+#define MODE_SPECULATIVE        0  // fence all external effects (reversible)
+#define MODE_AUTHORIZED_PENDING 1  // policy pending; still fence (process not running)
+#define MODE_ENFORCED           2  // policy installed; deny unallowed, allow allowed
+
+// Decisions returned by check_policy()
+#define DECISION_ALLOW  0  // let syscall proceed
+#define DECISION_FENCE  1  // block + SIGSTOP + notify (reversible)
+#define DECISION_DENY   2  // hard -EPERM (policy is final)
+
+// Effect classes (from unified schema, policy_generated.rs)
+#define EFFECT_CLASS_NETWORK    2
+#define EFFECT_CLASS_IPC        3
+#define EFFECT_CLASS_SIGNAL     4
+#define EFFECT_CLASS_PRIVILEGE  5
+#define EFFECT_CLASS_OUTPUT     6
+#define EFFECT_CLASS_SYSTEM     7
+
+// EPERM for hard deny
+#define EPERM 1
 
 // File types
 #define S_IFIFO  0010000
+#define S_IFCHR  0020000
 #define S_IFSOCK 0140000
 #define S_IFMT   0170000
 
@@ -75,7 +164,7 @@ struct {
 // Key: tgid, Value: 1 = stopped
 // Userspace MUST delete the entry before sending SIGCONT
 //
-// SIZING (applies to stopped_pids / allowed_pids below): 4096
+// SIZING (applies to stopped_pids): 4096
 // entries, keyed by tgid. Entries are reclaimed by the sched_process_exit hook
 // when a tracked process dies, so steady-state occupancy tracks the number of
 // live monitored tgids, not cumulative history. This bounds normal use well;
@@ -89,20 +178,6 @@ struct {
     __type(key, __u32);
     __type(value, __u32);
 } stopped_pids SEC(".maps");
-
-// Tracks which tgids are allowed to pass normal interception.
-// Key: tgid. Value encodes HOW fully the process is released:
-//   1 = normal permanent allow: normal syscalls pass, but the exit-hold
-//       sentinel (192.0.2.255:65535) is STILL intercepted. Granted by resume.
-//   2 = full release: even the exit-hold sentinel passes, so the process can
-//       run to completion and exit. Granted by continue/commit.
-// Interception is re-armed at the next epoch boundary by deleting the entry.
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
-    __type(key, __u32);
-    __type(value, __u32);
-} allowed_pids SEC(".maps");
 
 // Tracks which cgroups have COW auto-tracking enabled
 // Key: 0, Value: 1 = enabled (all monitored cgroups auto-track forks)
@@ -126,6 +201,115 @@ struct {
     __type(key, __u64);
     __type(value, __u64);
 } shared_map_owner SEC(".maps");
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 2: Three-state model maps
+// ═══════════════════════════════════════════════════════════════
+
+// Epoch mode per cgroup. Absent = MODE_SPECULATIVE (default fence-all).
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 256);
+    __type(key, __u64);    // cgroup id
+    __type(value, __u8);   // MODE_*
+} epoch_mode SEC(".maps");
+
+// Class-level policy: per (cgroup, effect_class) -> allow/deny.
+// Only consulted in MODE_ENFORCED.
+struct class_policy_key {
+    __u64 cgroup_id;
+    __u8  effect_class;
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, struct class_policy_key);
+    __type(value, __u8);  // 1=allow, 0=deny
+} class_policy SEC(".maps");
+
+// Network policy: per (cgroup, family, addr, port) -> allow/deny.
+struct net_policy_key {
+    __u64 cgroup_id;
+    __u8  family;
+    __u8  _pad0;
+    __u16 port;
+    __u32 addr;
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, struct net_policy_key);
+    __type(value, __u8);
+} network_policy SEC(".maps");
+
+// IPC policy: per (cgroup, ipc_type, target) -> allow/deny.
+struct ipc_policy_key {
+    __u64 cgroup_id;
+    __u8  ipc_type;
+    __u8  _pad0[7];
+    __u64 target;
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, struct ipc_policy_key);
+    __type(value, __u8);
+} ipc_policy SEC(".maps");
+
+// Signal policy: per (cgroup, target_cgroup) -> allow/deny.
+struct sig_policy_key {
+    __u64 cgroup_id;
+    __u64 target_cgroup;
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 512);
+    __type(key, struct sig_policy_key);
+    __type(value, __u8);
+} signal_policy SEC(".maps");
+
+// ═══════════════════════════════════════════════════════════════
+// Fine-grained policy (P0-5): per-effect endpoint descriptor.
+// Hooks fill what they can parse; in MODE_ENFORCED a class_policy value of
+// CLASS_POLICY_FINE makes check_policy_detail() consult the per-endpoint
+// maps above (default-deny at the endpoint level). Endpoints the hook could
+// not parse can never match a fine entry — they fail closed (DENY).
+// ═══════════════════════════════════════════════════════════════
+
+// class_policy value semantics:
+#define CLASS_POLICY_ALLOW 1  // class-wide allow
+#define CLASS_POLICY_FINE  2  // consult network/ipc/signal fine-grained maps
+
+// IPC sub-types for ipc_policy_key.ipc_type / effect_detail.ipc_type
+#define IPC_TYPE_SHM   1
+#define IPC_TYPE_MSG   2
+#define IPC_TYPE_SEM   3
+#define IPC_TYPE_MQ    4
+#define IPC_TYPE_MMAP  5
+
+struct effect_detail {
+    __u8  family;     // network: AF_* (0 = unparsed)
+    __u8  _pad0;
+    __u16 port;       // network: host-order port (0 = any/none)
+    __u32 addr;       // network: host-order IPv4 (0 = any/none)
+    __u8  ipc_type;   // ipc: IPC_TYPE_* (0 = none)
+    __u8  _pad1[7];
+    __u64 target;     // ipc: SysV key / inode no; signal: target cgroup id
+};
+
+// One-shot restart token: per tid -> (syscall_nr, effect_class).
+// Consumed (deleted) on first match. Grants a single syscall pass.
+struct restart_token_val {
+    __u32 syscall_nr;
+    __u8  effect_class;
+    __u8  _pad0[3];
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u32);    // tid (not tgid)
+    __type(value, struct restart_token_val);
+} restart_token SEC(".maps");
 
 static __always_inline int check_cgroup(void)
 {
@@ -155,69 +339,171 @@ static __always_inline int is_enabled(void)
     return *val == 1;
 }
 
-// Returns 1 if we should intercept this process
-// Returns 0 if we should let it pass
-static __always_inline int should_intercept(void)
+// ═══════════════════════════════════════════════════════════════
+// Phase 2: Three-state decision logic
+//
+// check_policy() replaces should_intercept(). It returns:
+//   DECISION_ALLOW  - let the syscall proceed
+//   DECISION_FENCE  - block + SIGSTOP + notify userspace (reversible)
+//   DECISION_DENY   - hard -EPERM (policy is final, irreversible)
+//
+// The decision depends on the cgroup's epoch mode:
+//   MODE_SPECULATIVE        - fence all external effects
+//   MODE_AUTHORIZED_PENDING - still fence (process not running until policy installed)
+//   MODE_ENFORCED           - consult policy maps; allow if policy permits, deny otherwise
+//
+// A one-shot restart token (per tid) is checked FIRST in all modes:
+// if a token matches the current syscall, it is consumed and the syscall
+// is allowed. This replaces the old permanent allowed_pids bypass with
+// per-syscall granularity: only the specific authorized syscall passes,
+// and the token is deleted immediately after use.
+// ═══════════════════════════════════════════════════════════════
+
+// Fine-grained network check (MODE_ENFORCED + class mode CLASS_POLICY_FINE).
+// Most-specific entry first: (family,addr,port) -> (family,addr,any-port) ->
+// (family,any-addr,port) -> (family,any-endpoint). A found entry's value
+// decides (1=allow, 0=explicit deny, short-circuiting the fallback chain);
+// no entry anywhere = deny. An endpoint the hook could not parse
+// (family == 0) can never match -> deny (fail-closed).
+static __always_inline int net_detail_allows(__u64 cg, const struct effect_detail *d)
 {
-    if (!is_enabled())
+    if (!d || d->family == 0)
         return 0;
-    if (!check_cgroup())
-        return 0;
-
-    __u32 tgid = bpf_get_current_pid_tgid() >> 32;
-
-    // If process is in allowed list, always let it pass. This is a PERMANENT
-    // pass granted at resume/commit time: the process runs the whole epoch
-    // (and beyond) uninterrupted. Interception is re-armed at the next epoch
-    // boundary by deleting this entry (see rearm_intercept in bpf_loader.rs),
-    // giving per-epoch (not per-syscall) enforcement granularity.
-    __u32 *allowed = bpf_map_lookup_elem(&allowed_pids, &tgid);
-    if (allowed)
-        return 0;
-
-    // NOTE: we deliberately do NOT pass merely because stopped_pids is set.
-    // A set mark means a group-directed SIGSTOP is already in flight for this
-    // tgid, but its sibling threads keep running until the stop actually lands.
-    // If such a sibling reaches an external syscall in that window and we
-    // returned 0 (pass) here, its irreversible effect would ESCAPE the freeze.
-    // Instead we still report "intercept": the hook proceeds to do_intercept(),
-    // which recognises the in-flight stop, SKIPS the duplicate event/SIGSTOP,
-    // and lets the caller return -ERESTARTSYS so the sibling's syscall is
-    // BLOCKED and auto-restarted after resume. (The resume path sets
-    // allowed_pids above, so a resumed process is passed there, not caught
-    // here.)
-    return 1;
+    struct net_policy_key key = {};
+    key.cgroup_id = cg;
+    key.family = d->family;
+    __u8 *v;
+    key.addr = d->addr;
+    key.port = d->port;
+    v = bpf_map_lookup_elem(&network_policy, &key);
+    if (v)
+        return *v ? 1 : 0;
+    if (d->port) {
+        key.port = 0;
+        v = bpf_map_lookup_elem(&network_policy, &key);
+        if (v)
+            return *v ? 1 : 0;
+    }
+    if (d->addr) {
+        key.addr = 0;
+        key.port = d->port;
+        v = bpf_map_lookup_elem(&network_policy, &key);
+        if (v)
+            return *v ? 1 : 0;
+    }
+    key.addr = 0;
+    key.port = 0;
+    v = bpf_map_lookup_elem(&network_policy, &key);
+    if (v)
+        return *v ? 1 : 0;
+    return 0;
 }
 
-// Like should_intercept(), but for the exit-hold sentinel connect. The sentinel
-// is a cooperative "hold me at exit" marker, so it must fire even for a process
-// that already holds a NORMAL permanent allow (allowed_pids == 1) from an
-// earlier resume. Only a FULL release (allowed_pids == 2, granted by
-// continue/commit) lets the sentinel pass so the process can finally exit.
-// Still respects the enabled flag, cgroup membership, and the stopped mark
-// (so an already-held process is not re-stopped on the syscall auto-restart).
-static __always_inline int should_intercept_sentinel(void)
+// Fine-grained IPC check: (ipc_type,target) -> (ipc_type,any-target).
+// An unparsed endpoint (ipc_type == 0) can never match -> deny.
+static __always_inline int ipc_detail_allows(__u64 cg, const struct effect_detail *d)
 {
-    if (!is_enabled())
+    if (!d || d->ipc_type == 0)
         return 0;
-    if (!check_cgroup())
-        return 0;
+    struct ipc_policy_key key = {};
+    key.cgroup_id = cg;
+    key.ipc_type = d->ipc_type;
+    __u8 *v;
+    key.target = d->target;
+    v = bpf_map_lookup_elem(&ipc_policy, &key);
+    if (v)
+        return *v ? 1 : 0;
+    if (d->target) {
+        key.target = 0;
+        v = bpf_map_lookup_elem(&ipc_policy, &key);
+        if (v)
+            return *v ? 1 : 0;
+    }
+    return 0;
+}
 
-    __u32 tgid = bpf_get_current_pid_tgid() >> 32;
+// Fine-grained signal check: (target_cgroup) -> (any-target).
+// d == NULL or target == 0 means the hook could not resolve the target
+// cgroup: only an explicit any-target entry can allow it.
+static __always_inline int sig_detail_allows(__u64 cg, const struct effect_detail *d)
+{
+    struct sig_policy_key key = {};
+    key.cgroup_id = cg;
+    key.target_cgroup = d ? d->target : 0;
+    __u8 *v = bpf_map_lookup_elem(&signal_policy, &key);
+    if (v)
+        return *v ? 1 : 0;
+    if (key.target_cgroup) {
+        key.target_cgroup = 0;
+        v = bpf_map_lookup_elem(&signal_policy, &key);
+        if (v)
+            return *v ? 1 : 0;
+    }
+    return 0;
+}
 
-    // Fully released (post continue/commit) -> let the sentinel pass.
-    __u32 *allowed = bpf_map_lookup_elem(&allowed_pids, &tgid);
-    if (allowed && *allowed == 2)
-        return 0;
+// Three-state decision for a syscall + effect_class (+ endpoint detail).
+static __always_inline int check_policy_detail(__u32 syscall_nr, __u8 effect_class,
+                                               const struct effect_detail *d)
+{
+    if (!is_enabled() || !check_cgroup())
+        return DECISION_ALLOW;  // not monitored -> no interception
 
-    // Like should_intercept(): do NOT pass merely because a stop is already in
-    // flight. Returning 1 routes the sentinel through do_intercept(), which
-    // dedups the in-flight stop (no second event/SIGSTOP) while the hook still
-    // returns -ERESTARTSYS — keeping the process HELD at its exit boundary
-    // instead of letting the sentinel slip past during the stop-propagation
-    // window. Only a FULL release (allowed_pids == 2, checked above) lets the
-    // sentinel through so the process can finally exit.
-    return 1;
+    __u64 cg = bpf_get_current_cgroup_id();
+    __u8 *mode_p = bpf_map_lookup_elem(&epoch_mode, &cg);
+    __u8 mode = mode_p ? *mode_p : MODE_SPECULATIVE;
+
+    // One-shot restart token: checked first in ALL modes.
+    // If a token matches this tid + syscall_nr, consume it and allow.
+    __u32 tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
+    struct restart_token_val *tok = bpf_map_lookup_elem(&restart_token, &tid);
+    if (tok && tok->syscall_nr == syscall_nr) {
+        bpf_map_delete_elem(&restart_token, &tid);  // consume
+        return DECISION_ALLOW;
+    }
+
+    if (mode == MODE_SPECULATIVE || mode == MODE_AUTHORIZED_PENDING)
+        return DECISION_FENCE;  // block + notify, reversible
+
+    // MODE_ENFORCED: consult the class policy first.
+    // NOTE: we deliberately do NOT pass merely because stopped_pids is set.
+    // A set mark means a group-directed SIGSTOP is already in flight for this
+    // tgid, but sibling threads keep running until the stop lands. In ENFORCED
+    // mode those siblings get DECISION_DENY (hard -EPERM), which is fail-closed:
+    // the syscall does not execute. In SPECULATIVE/AUTHORIZED_PENDING they get
+    // DECISION_FENCE, routed through do_intercept() which dedups the in-flight
+    // stop (no duplicate event/SIGSTOP) while still returning -ERESTARTSYS.
+    struct class_policy_key ckey = {};
+    ckey.cgroup_id = cg;
+    ckey.effect_class = effect_class;
+    __u8 *cv = bpf_map_lookup_elem(&class_policy, &ckey);
+    __u8 cval = cv ? *cv : 0;
+    if (cval == CLASS_POLICY_ALLOW)
+        return DECISION_ALLOW;
+    if (cval != CLASS_POLICY_FINE)
+        return DECISION_DENY;  // absent / explicit class-level deny
+
+    // CLASS_POLICY_FINE: consult the per-endpoint maps (default-deny at the
+    // endpoint level; unparseable endpoints fail closed inside the helpers).
+    switch (effect_class) {
+    case EFFECT_CLASS_NETWORK:
+        return net_detail_allows(cg, d) ? DECISION_ALLOW : DECISION_DENY;
+    case EFFECT_CLASS_IPC:
+        return ipc_detail_allows(cg, d) ? DECISION_ALLOW : DECISION_DENY;
+    case EFFECT_CLASS_SIGNAL:
+        return sig_detail_allows(cg, d) ? DECISION_ALLOW : DECISION_DENY;
+    default:
+        // PRIVILEGE / OUTPUT have no fine-grained map: fine mode is
+        // unenforceable for them -> deny (fail-closed).
+        return DECISION_DENY;
+    }
+}
+
+// Three-state decision without endpoint detail. In MODE_ENFORCED fine mode
+// the missing endpoint can never match a fine entry -> deny (fail-closed).
+static __always_inline int check_policy(__u32 syscall_nr, __u8 effect_class)
+{
+    return check_policy_detail(syscall_nr, effect_class, NULL);
 }
 
 // Emit event + SIGSTOP + mark as stopped. Returns bpf_send_signal()'s result
@@ -261,7 +547,7 @@ static __always_inline int do_intercept(__u32 syscall_nr, __u32 event_type)
     }
 
     // SIGSTOP the process. If the signal could not be queued we must NOT leave
-    // the tgid marked stopped: otherwise should_intercept() would treat a
+    // the tgid marked stopped: otherwise check_policy() would treat a
     // never-stopped process as already handled and silently let its future
     // external syscalls through. Drop the mark so interception re-arms; the
     // caller still returns -ERESTARTSYS, so the kernel auto-restarts the syscall
@@ -381,10 +667,11 @@ int BPF_PROG(shadow_socket_connect, struct socket *sock,
 {
     // Check for exit-hold sentinel address FIRST: 192.0.2.255:65535.
     // This is a cooperative marker from libexithold.so (LD_PRELOAD) signalling
-    // process completion. It is checked BEFORE should_intercept() so that it
-    // fires even for a process holding a normal permanent allow (allowed_pids
-    // == 1); only a full release (allowed_pids == 2) lets it pass. See
-    // should_intercept_sentinel().
+    // process completion. In the three-state model, the sentinel is handled
+    // by check_policy(): if the orchestrator has granted a restart_token for
+    // this tid+syscall, the token is consumed and the sentinel passes (full
+    // release). Without a token, SPECULATIVE/AUTHORIZED_PENDING fence it,
+    // and ENFORCED denies it (policy is final).
     if (addrlen >= 16) { // sizeof(struct sockaddr_in)
         __u16 family = 0;
         __u16 port = 0;
@@ -394,24 +681,47 @@ int BPF_PROG(shadow_socket_connect, struct socket *sock,
         bpf_probe_read_kernel(&ip, 4, (void *)address + 4);
         // AF_INET=2, port=65535 (0xFFFF in network order), ip=192.0.2.255 (0xFF0200C0 on LE)
         if (family == 2 && port == 0xFFFF && ip == 0xFF0200C0) {
-            if (should_intercept_sentinel()) {
+            int d = check_policy(42, EFFECT_CLASS_NETWORK);
+            if (d == DECISION_ALLOW)
+                return 0;
+            if (d == DECISION_FENCE) {
                 do_intercept(231, EVENT_EXIT_HOLD);
                 return -ERESTARTSYS;
             }
-            return 0;
+            return -EPERM;  // DECISION_DENY: hard deny sentinel
         }
     }
 
-    // General (non-sentinel) case: normal per-epoch enforcement.
-    if (!should_intercept())
+    // General (non-sentinel) case: three-state enforcement. Parse the
+    // endpoint for the fine-grained network policy (host-order addr/port;
+    // unparsed fields stay 0 and can only match wildcard entries).
+    struct effect_detail det = {};
+    __u16 cfam = 0;
+    if (addrlen >= 2)
+        bpf_probe_read_kernel(&cfam, 2, (void *)address);
+    det.family = (__u8)cfam;
+    if (cfam == AF_INET && addrlen >= 8) {
+        __u16 port_be = 0;
+        __u32 addr_n = 0;
+        bpf_probe_read_kernel(&port_be, 2, (void *)address + 2);
+        bpf_probe_read_kernel(&addr_n, 4, (void *)address + 4);
+        det.port = __bpf_ntohs(port_be);
+        det.addr = __bpf_ntohl(addr_n);
+    }
+    int d = check_policy_detail(42, EFFECT_CLASS_NETWORK, &det);
+    if (d == DECISION_ALLOW)
         return 0;
 
-    // Classify by address family + AF_UNIX whitelist.
-    if (net_addr_should_block(address, addrlen)) {
-        do_intercept(42, EVENT_NETWORK);
+    // For FENCE and DENY, still check address exemption (system sockets,
+    // AF_UNSPEC, AF_NETLINK) — these are always allowed regardless of mode.
+    if (!net_addr_should_block(address, addrlen))
+        return 0;  // exempt address -> always allow
+
+    if (d == DECISION_FENCE) {
+        do_intercept(42, EVENT_NETWORK_CONNECT);
         return -ERESTARTSYS;
     }
-    return 0;
+    return -EPERM;  // DECISION_DENY
 }
 
 // --- Network: sendmsg (covers sendto, sendmsg) ---
@@ -419,11 +729,19 @@ SEC("lsm/socket_sendmsg")
 int BPF_PROG(shadow_socket_sendmsg, struct socket *sock,
              struct msghdr *msg, int size)
 {
-    if (!should_intercept())
-        return 0;
-
+    // Resolve the endpoint up front: the fine-grained network policy is
+    // keyed by (family, addr, port) when class_policy selects fine mode.
     struct sock *sk = BPF_CORE_READ(sock, sk);
     __u16 family = sk ? BPF_CORE_READ(sk, __sk_common.skc_family) : 0;
+    struct effect_detail det = {};
+    det.family = (__u8)family;
+    if (family == AF_INET && sk) {
+        det.addr = __bpf_ntohl(BPF_CORE_READ(sk, __sk_common.skc_daddr));
+        det.port = __bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+    }
+    int d = check_policy_detail(46, EFFECT_CLASS_NETWORK, &det);
+    if (d == DECISION_ALLOW)
+        return 0;
 
     if (family == AF_UNSPEC || family == AF_NETLINK)
         return 0;  // exempt
@@ -437,7 +755,7 @@ int BPF_PROG(shadow_socket_sendmsg, struct socket *sock,
             // Unconnected datagram sendto(): explicit destination in msg_name.
             bpf_probe_read_kernel(path, 108, (char *)msg_name + SUN_PATH_OFF);
             if (unix_path_whitelisted(path))
-                return 0;
+                return 0;  // system socket -> exempt
         } else {
             // Connected AF_UNIX stream: recover the peer's bound path so the
             // whitelist still applies (e.g. writes to the D-Bus socket).
@@ -455,16 +773,17 @@ int BPF_PROG(shadow_socket_sendmsg, struct socket *sock,
                     (char *)uaddr + offsetof(struct unix_address, name) + SUN_PATH_OFF);
             }
             if (unix_path_whitelisted(path))
-                return 0;
+                return 0;  // system socket -> exempt
         }
-
-        do_intercept(46, EVENT_NETWORK);
-        return -ERESTARTSYS;
+        // Non-whitelisted AF_UNIX: fall through to FENCE/DENY below.
     }
 
-    // AF_INET / AF_INET6 / other external family
-    do_intercept(46, EVENT_NETWORK);
-    return -ERESTARTSYS;
+    // External destination (AF_INET / AF_INET6 / non-whitelisted AF_UNIX / other).
+    if (d == DECISION_FENCE) {
+        do_intercept(46, EVENT_NETWORK_SEND);
+        return -ERESTARTSYS;
+    }
+    return -EPERM;  // DECISION_DENY
 }
 
 // --- Network: bind ---
@@ -472,13 +791,30 @@ SEC("lsm/socket_bind")
 int BPF_PROG(shadow_socket_bind, struct socket *sock,
              struct sockaddr *address, int addrlen)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    __u16 bfam = 0;
+    if (addrlen >= 2)
+        bpf_probe_read_kernel(&bfam, 2, (void *)address);
+    det.family = (__u8)bfam;
+    if (bfam == AF_INET && addrlen >= 8) {
+        __u16 port_be = 0;
+        __u32 addr_n = 0;
+        bpf_probe_read_kernel(&port_be, 2, (void *)address + 2);
+        bpf_probe_read_kernel(&addr_n, 4, (void *)address + 4);
+        det.port = __bpf_ntohs(port_be);
+        det.addr = __bpf_ntohl(addr_n);
+    }
+    int d = check_policy_detail(49, EFFECT_CLASS_NETWORK, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    if (net_addr_should_block(address, addrlen)) {
-        do_intercept(49, EVENT_NETWORK);
+    // For FENCE and DENY, check address exemption.
+    if (!net_addr_should_block(address, addrlen))
+        return 0;  // exempt address -> always allow
+    if (d == DECISION_FENCE) {
+        do_intercept(49, EVENT_NETWORK_BIND);
         return -ERESTARTSYS;
     }
-    return 0;
+    return -EPERM;  // DECISION_DENY
 }
 
 // ── SysV shared memory (shm) ──────────────────────────────────
@@ -488,19 +824,33 @@ int BPF_PROG(shadow_socket_bind, struct socket *sock,
 SEC("lsm/shm_alloc_security")
 int BPF_PROG(shadow_shm_alloc, struct kern_ipc_perm *perm)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_SHM;
+    det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
+    int d = check_policy_detail(29, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(29, EVENT_IPC); // 29 = shmget
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(29, EVENT_IPC_SHM); // 29 = shmget
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("lsm/shm_associate")
 int BPF_PROG(shadow_shm_associate, struct kern_ipc_perm *perm, int shmflg)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_SHM;
+    det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
+    int d = check_policy_detail(29, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(29, EVENT_IPC); // 29 = shmget
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(29, EVENT_IPC_SHM); // 29 = shmget
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- IPC: shmat ---
@@ -508,20 +858,34 @@ SEC("lsm/shm_shmat")
 int BPF_PROG(shadow_shm_shmat, struct kern_ipc_perm *shp,
              char *shmaddr, int shmflg)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_SHM;
+    det.target = (__u64)(__u32)BPF_CORE_READ(shp, key);
+    int d = check_policy_detail(30, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(30, EVENT_IPC); // 30 = shmat
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(30, EVENT_IPC_SHM); // 30 = shmat
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- IPC: shmctl ---
 SEC("lsm/shm_shmctl")
 int BPF_PROG(shadow_shm_shmctl, struct kern_ipc_perm *perm, int cmd)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_SHM;
+    det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
+    int d = check_policy_detail(31, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(31, EVENT_IPC); // 31 = shmctl
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(31, EVENT_IPC_SHM); // 31 = shmctl
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- IPC: mmap file-backed shared memory (POSIX shm via shm_open + mmap) ---
@@ -535,23 +899,27 @@ SEC("lsm/mmap_file")
 int BPF_PROG(shadow_mmap_file, struct file *file,
              unsigned long reqprot, unsigned long prot, unsigned long flags)
 {
-    if (!should_intercept())
+    // Resolve the target inode for the fine-grained IPC policy
+    // (IPC_TYPE_MMAP entries are keyed by inode number).
+    struct inode *ino_p = file ? BPF_CORE_READ(file, f_inode) : NULL;
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_MMAP;
+    if (ino_p)
+        det.target = BPF_CORE_READ(ino_p, i_ino);
+    int d = check_policy_detail(9, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
 
+    // Exemptions (apply regardless of mode):
     // Only intercept MAP_SHARED mappings
     if (!(flags & MAP_SHARED))
         return 0;
-
     // Anonymous shared mapping (file == NULL) = parent-child IPC -> EXEMPT
     if (!file)
         return 0;
-
     // Read-only shared file mappings are NOT a write/exfil channel and must be
     // exempt: the dynamic loader maps ld.so.cache / locale-archive / gconv cache
     // as PROT_READ|MAP_SHARED during process startup (e.g. every bash launch).
-    // A POSIX shm IPC data channel has to be writable to carry data out, so we
-    // only intercept writable shared mappings. (reqprot is what the caller asked
-    // for; prot is the effective protection — OR them so neither can slip past.)
     if (!((reqprot | prot) & PROT_WRITE))
         return 0;
 
@@ -561,10 +929,12 @@ int BPF_PROG(shadow_mmap_file, struct file *file,
     // because a host peer may already share the file; once it is authorized and
     // released, later same-cgroup mappers are exempt while a DIFFERENT cgroup
     // is still intercepted as a cross-epoch channel.
-    struct inode *ino_p = BPF_CORE_READ(file, f_inode);
     if (!ino_p) {
-        do_intercept(9, EVENT_IPC);
-        return -ERESTARTSYS;
+        if (d == DECISION_FENCE) {
+            do_intercept(9, EVENT_IPC_MMAP);
+            return -ERESTARTSYS;
+        }
+        return -EPERM;
     }
     __u64 ino_key = (__u64)(unsigned long)ino_p;
     __u64 cur_cg = bpf_get_current_cgroup_id();
@@ -577,8 +947,11 @@ int BPF_PROG(shadow_mmap_file, struct file *file,
         // First monitored mapping: claim ownership for this cgroup, then block.
         bpf_map_update_elem(&shared_map_owner, &ino_key, &cur_cg, BPF_ANY);
     }
-    do_intercept(9, EVENT_IPC); // 9 = mmap syscall number
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(9, EVENT_IPC_MMAP); // 9 = mmap syscall number
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // ── SysV message queues (msg) ─────────────────────────────────
@@ -586,19 +959,33 @@ int BPF_PROG(shadow_mmap_file, struct file *file,
 SEC("lsm/msg_queue_alloc_security")
 int BPF_PROG(shadow_msg_alloc, struct kern_ipc_perm *perm)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_MSG;
+    det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
+    int d = check_policy_detail(68, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(68, EVENT_IPC); // 68 = msgget
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(68, EVENT_IPC_MSG); // 68 = msgget
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("lsm/msg_queue_associate")
 int BPF_PROG(shadow_msg_associate, struct kern_ipc_perm *perm, int msqflg)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_MSG;
+    det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
+    int d = check_policy_detail(68, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(68, EVENT_IPC); // 68 = msgget
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(68, EVENT_IPC_MSG); // 68 = msgget
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- IPC: msg send ---
@@ -606,10 +993,17 @@ SEC("lsm/msg_queue_msgsnd")
 int BPF_PROG(shadow_msg_msgsnd, struct kern_ipc_perm *msq,
              struct msg_msg *msg, int msqflg)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_MSG;
+    det.target = (__u64)(__u32)BPF_CORE_READ(msq, key);
+    int d = check_policy_detail(69, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(69, EVENT_IPC); // 69 = msgsnd
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(69, EVENT_IPC_MSG); // 69 = msgsnd
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- IPC: msg receive ---
@@ -618,20 +1012,34 @@ int BPF_PROG(shadow_msg_msgrcv, struct kern_ipc_perm *msq,
              struct msg_msg *msg, struct task_struct *target,
              long type, int mode)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_MSG;
+    det.target = (__u64)(__u32)BPF_CORE_READ(msq, key);
+    int d = check_policy_detail(70, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(70, EVENT_IPC); // 70 = msgrcv
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(70, EVENT_IPC_MSG); // 70 = msgrcv
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- IPC: msgctl ---
 SEC("lsm/msg_queue_msgctl")
 int BPF_PROG(shadow_msg_msgctl, struct kern_ipc_perm *perm, int cmd)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_MSG;
+    det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
+    int d = check_policy_detail(71, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(71, EVENT_IPC); // 71 = msgctl
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(71, EVENT_IPC_MSG); // 71 = msgctl
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // ── SysV semaphores (sem) ─────────────────────────────────────
@@ -639,19 +1047,33 @@ int BPF_PROG(shadow_msg_msgctl, struct kern_ipc_perm *perm, int cmd)
 SEC("lsm/sem_alloc_security")
 int BPF_PROG(shadow_sem_alloc, struct kern_ipc_perm *perm)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_SEM;
+    det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
+    int d = check_policy_detail(64, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(64, EVENT_IPC); // 64 = semget
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(64, EVENT_IPC_SEM); // 64 = semget
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("lsm/sem_associate")
 int BPF_PROG(shadow_sem_associate, struct kern_ipc_perm *perm, int semflg)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_SEM;
+    det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
+    int d = check_policy_detail(64, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(64, EVENT_IPC); // 64 = semget
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(64, EVENT_IPC_SEM); // 64 = semget
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- IPC: semop / semtimedop ---
@@ -659,20 +1081,34 @@ SEC("lsm/sem_semop")
 int BPF_PROG(shadow_sem_semop, struct kern_ipc_perm *perm,
              struct sembuf *sops, unsigned int nsops, int alter)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_SEM;
+    det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
+    int d = check_policy_detail(65, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(65, EVENT_IPC); // 65 = semop
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(65, EVENT_IPC_SEM); // 65 = semop
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- IPC: semctl ---
 SEC("lsm/sem_semctl")
 int BPF_PROG(shadow_sem_semctl, struct kern_ipc_perm *perm, int cmd)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_SEM;
+    det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
+    int d = check_policy_detail(66, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(66, EVENT_IPC); // 66 = semctl
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(66, EVENT_IPC_SEM); // 66 = semctl
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- Signal: kill/tkill/tgkill to other processes ---
@@ -687,9 +1123,6 @@ int BPF_PROG(shadow_task_kill, struct task_struct *p,
              struct kernel_siginfo *info, int sig,
              const struct cred *cred)
 {
-    if (!should_intercept())
-        return 0;
-
     struct task_struct *cur = (struct task_struct *)bpf_get_current_task();
     __u32 my_tgid = BPF_CORE_READ(cur, tgid);
     __u32 target_tgid = BPF_CORE_READ(p, tgid);
@@ -698,29 +1131,41 @@ int BPF_PROG(shadow_task_kill, struct task_struct *p,
     if (target_tgid == my_tgid)
         return 0;
 
-    // 2. Same monitored cgroup (== same speculative epoch) -> exempt.
-    // Tightened from the old same-session test (issue #5): a session can span
-    // processes OUTSIDE this epoch's cgroup, so signalling them is an external
-    // effect that must be fenced. Comparing the cgroup v2 id confines
-    // "internal" to the epoch's own cgroup. self via the fast helper; target
-    // via its default cgroup's kernfs id.
+    // Resolve the target cgroup up front: it is both the same-epoch
+    // exemption key and the signal-policy endpoint.
     __u64 my_cg = bpf_get_current_cgroup_id();
     __u64 tgt_cg = BPF_CORE_READ(p, cgroups, dfl_cgrp, kn, id);
+    struct effect_detail det = {};
+    det.target = tgt_cg;
+    int d = check_policy_detail(62, EFFECT_CLASS_SIGNAL, &det);
+    if (d == DECISION_ALLOW)
+        return 0;
+
+    // 2. Same monitored cgroup (== same speculative epoch) -> exempt.
+    // Only checked for monitored processes (check_policy already filtered
+    // non-monitored ones above).
     if (my_cg && my_cg == tgt_cg)
         return 0;
 
-    do_intercept(62, EVENT_SIGNAL);
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(62, EVENT_SIGNAL_KILL);
+        return -ERESTARTSYS;
+    }
+    return -EPERM;  // DECISION_DENY
 }
 
 // --- Ptrace ---
 SEC("lsm/ptrace_access_check")
 int BPF_PROG(shadow_ptrace, struct task_struct *child, unsigned int mode)
 {
-    if (!should_intercept())
+    int d = check_policy(101, EFFECT_CLASS_SIGNAL);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(101, EVENT_PTRACE);
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(101, EVENT_SIGNAL_PTRACE);
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -732,7 +1177,8 @@ int BPF_PROG(shadow_ptrace, struct task_struct *child, unsigned int mode)
 SEC("fmod_ret/__x64_sys_write")
 int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    int d = check_policy(1, EFFECT_CLASS_OUTPUT);
+    if (d == DECISION_ALLOW)
         return 0;
 
     // Get fd from first argument (rdi on x86_64)
@@ -758,11 +1204,14 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
     // fd_array[fd] past max_fds would read past the array and could
     // misclassify the fd. max_fds is the true size of the current table.
     // An fd we cannot inspect is treated as a possible pipe/socket carrying
-    // data out, so we FAIL CLOSED (intercept) rather than pass.
+    // data out, so we FAIL CLOSED rather than pass.
     unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
     if (fd >= max_fds) {
-        do_intercept(1, EVENT_WRITE_OUT);
-        return -ERESTARTSYS;
+        if (d == DECISION_FENCE) {
+            do_intercept(1, EVENT_OUTPUT_WRITE);
+            return -ERESTARTSYS;
+        }
+        return -EPERM;
     }
 
     struct file **fd_array = BPF_CORE_READ(fdt, fd);
@@ -770,11 +1219,13 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
         return 0;
 
     // Above this constant bound the verifier cannot prove fd_array[fd] is in
-    // range, so the fd type is un-inspectable. FAIL CLOSED (intercept): a high
-    // fd may well be a pipe/socket exfil channel.
+    // range, so the fd type is un-inspectable. FAIL CLOSED.
     if (fd > 1023) {
-        do_intercept(1, EVENT_WRITE_OUT);
-        return -ERESTARTSYS;
+        if (d == DECISION_FENCE) {
+            do_intercept(1, EVENT_OUTPUT_WRITE);
+            return -ERESTARTSYS;
+        }
+        return -EPERM;
     }
 
     struct file *f = NULL;
@@ -788,8 +1239,11 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
 
     unsigned short mode = BPF_CORE_READ(inode, i_mode);
     if ((mode & S_IFMT) == S_IFIFO || (mode & S_IFMT) == S_IFSOCK) {
-        do_intercept(1, EVENT_WRITE_OUT);
-        return -ERESTARTSYS;
+        if (d == DECISION_FENCE) {
+            do_intercept(1, EVENT_OUTPUT_WRITE);
+            return -ERESTARTSYS;
+        }
+        return -EPERM;
     }
 
     return 0;
@@ -799,7 +1253,8 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_writev")
 int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    int d = check_policy(20, EFFECT_CLASS_OUTPUT);
+    if (d == DECISION_ALLOW)
         return 0;
 
     unsigned long fd = PT_REGS_PARM1_CORE_SYSCALL(regs);
@@ -818,12 +1273,15 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
     if (!fdt)
         return 0;
 
-    // Reject fds beyond the process's actual fd-table capacity (see write hook).
-    // Un-inspectable fd => FAIL CLOSED (intercept).
+    // Reject fds beyond the process's actual fd-table capacity.
+    // Un-inspectable fd => FAIL CLOSED.
     unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
     if (fd >= max_fds) {
-        do_intercept(20, EVENT_WRITE_OUT);
-        return -ERESTARTSYS;
+        if (d == DECISION_FENCE) {
+            do_intercept(20, EVENT_OUTPUT_WRITE);
+            return -ERESTARTSYS;
+        }
+        return -EPERM;
     }
 
     struct file **fd_array = BPF_CORE_READ(fdt, fd);
@@ -831,10 +1289,13 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
         return 0;
 
     // Above this constant bound the verifier cannot prove fd_array[fd] is in
-    // range. FAIL CLOSED (intercept) rather than pass an un-inspectable fd.
+    // range. FAIL CLOSED.
     if (fd > 1023) {
-        do_intercept(20, EVENT_WRITE_OUT);
-        return -ERESTARTSYS;
+        if (d == DECISION_FENCE) {
+            do_intercept(20, EVENT_OUTPUT_WRITE);
+            return -ERESTARTSYS;
+        }
+        return -EPERM;
     }
 
     struct file *f = NULL;
@@ -848,8 +1309,11 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
 
     unsigned short mode = BPF_CORE_READ(inode, i_mode);
     if ((mode & S_IFMT) == S_IFIFO || (mode & S_IFMT) == S_IFSOCK) {
-        do_intercept(20, EVENT_WRITE_OUT);
-        return -ERESTARTSYS;
+        if (d == DECISION_FENCE) {
+            do_intercept(20, EVENT_OUTPUT_WRITE);
+            return -ERESTARTSYS;
+        }
+        return -EPERM;
     }
 
     return 0;
@@ -864,45 +1328,61 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
 //     another zero-copy path data can leave by.
 // These bypass the write()/sendmsg() hooks entirely, so they were previously
 // UNCOVERED exfil channels. We DEFAULT-DENY: while a monitored process is
-// armed (should_intercept()), any of these is intercepted and the process is
-// frozen at its first use, exactly like an external write. Fine-grained
-// same-epoch fd-pair inspection is deferred; failing closed is the safe base.
+// armed, any of these is intercepted and the process is frozen at its first
+// use, exactly like an external write. Fine-grained same-epoch fd-pair
+// inspection is deferred; failing closed is the safe base.
 // ═══════════════════════════════════════════════════════════════
 
 SEC("fmod_ret/__x64_sys_sendfile64")
 int BPF_PROG(shadow_sys_sendfile, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    int d = check_policy(40, EFFECT_CLASS_OUTPUT);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(40, EVENT_WRITE_OUT); // 40 = sendfile
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(40, EVENT_OUTPUT_SENDFILE); // 40 = sendfile
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("fmod_ret/__x64_sys_splice")
 int BPF_PROG(shadow_sys_splice, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    int d = check_policy(275, EFFECT_CLASS_OUTPUT);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(275, EVENT_WRITE_OUT); // 275 = splice
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(275, EVENT_OUTPUT_SPLICE); // 275 = splice
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("fmod_ret/__x64_sys_vmsplice")
 int BPF_PROG(shadow_sys_vmsplice, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    int d = check_policy(278, EFFECT_CLASS_OUTPUT);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(278, EVENT_WRITE_OUT); // 278 = vmsplice
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(278, EVENT_OUTPUT_SPLICE); // 278 = vmsplice
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("fmod_ret/__x64_sys_tee")
 int BPF_PROG(shadow_sys_tee, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    int d = check_policy(276, EFFECT_CLASS_OUTPUT);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(276, EVENT_WRITE_OUT); // 276 = tee
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(276, EVENT_OUTPUT_SPLICE); // 276 = tee
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // io_uring: async submission of network/file I/O can move data out WITHOUT the
@@ -912,28 +1392,167 @@ int BPF_PROG(shadow_sys_tee, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_io_uring_setup")
 int BPF_PROG(shadow_sys_io_uring_setup, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    int d = check_policy(425, EFFECT_CLASS_OUTPUT);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(425, EVENT_WRITE_OUT); // 425 = io_uring_setup
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(425, EVENT_OUTPUT_IO_URING); // 425 = io_uring_setup
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("fmod_ret/__x64_sys_io_uring_enter")
 int BPF_PROG(shadow_sys_io_uring_enter, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    int d = check_policy(426, EFFECT_CLASS_OUTPUT);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(426, EVENT_WRITE_OUT); // 426 = io_uring_enter
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(426, EVENT_OUTPUT_IO_URING); // 426 = io_uring_enter
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("fmod_ret/__x64_sys_io_uring_register")
 int BPF_PROG(shadow_sys_io_uring_register, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    int d = check_policy(427, EFFECT_CLASS_OUTPUT);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(427, EVENT_WRITE_OUT); // 427 = io_uring_register
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(427, EVENT_OUTPUT_IO_URING); // 427 = io_uring_register
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SYSTEM fail-closed hooks for dangerous kernel-control interfaces.
+// These syscalls can change namespaces/mounts, install kernel programs,
+// inspect other processes, or reach terminal device state.  They previously
+// had no schema entry and no hook, so ENFORCED mode could not control them.
+// They now share EFFECT_CLASS_SYSTEM: SPECULATIVE/AUTHORIZED_PENDING fence;
+// ENFORCED defaults to EPERM unless a class-wide SYSTEM allow is installed.
+// ═══════════════════════════════════════════════════════════════
+
+static __always_inline int system_guard(__u32 syscall_nr, __u32 event_type)
+{
+    int d = check_policy(syscall_nr, EFFECT_CLASS_SYSTEM);
+    if (d == DECISION_ALLOW)
+        return 0;
+    if (d == DECISION_FENCE) {
+        do_intercept(syscall_nr, event_type);
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
+}
+
+SEC("fmod_ret/__x64_sys_mount")
+int BPF_PROG(shadow_sys_mount, struct pt_regs *regs)
+{
+    return system_guard(165, EVENT_SYSTEM_MOUNT);
+}
+
+SEC("fmod_ret/__x64_sys_umount2")
+int BPF_PROG(shadow_sys_umount2, struct pt_regs *regs)
+{
+    return system_guard(166, EVENT_SYSTEM_MOUNT);
+}
+
+SEC("fmod_ret/__x64_sys_unshare")
+int BPF_PROG(shadow_sys_unshare, struct pt_regs *regs)
+{
+    return system_guard(272, EVENT_SYSTEM_NAMESPACE);
+}
+
+SEC("fmod_ret/__x64_sys_setns")
+int BPF_PROG(shadow_sys_setns, struct pt_regs *regs)
+{
+    return system_guard(308, EVENT_SYSTEM_NAMESPACE);
+}
+
+SEC("fmod_ret/__x64_sys_keyctl")
+int BPF_PROG(shadow_sys_keyctl, struct pt_regs *regs)
+{
+    return system_guard(250, EVENT_SYSTEM_KEYRING);
+}
+
+SEC("fmod_ret/__x64_sys_add_key")
+int BPF_PROG(shadow_sys_add_key, struct pt_regs *regs)
+{
+    return system_guard(248, EVENT_SYSTEM_KEYRING);
+}
+
+SEC("fmod_ret/__x64_sys_request_key")
+int BPF_PROG(shadow_sys_request_key, struct pt_regs *regs)
+{
+    return system_guard(249, EVENT_SYSTEM_KEYRING);
+}
+
+SEC("fmod_ret/__x64_sys_bpf")
+int BPF_PROG(shadow_sys_bpf, struct pt_regs *regs)
+{
+    return system_guard(321, EVENT_SYSTEM_BPF);
+}
+
+SEC("fmod_ret/__x64_sys_perf_event_open")
+int BPF_PROG(shadow_sys_perf_event_open, struct pt_regs *regs)
+{
+    return system_guard(298, EVENT_SYSTEM_PERF);
+}
+
+SEC("fmod_ret/__x64_sys_process_vm_readv")
+int BPF_PROG(shadow_sys_process_vm_readv, struct pt_regs *regs)
+{
+    return system_guard(310, EVENT_SYSTEM_PROCESS_VM);
+}
+
+SEC("fmod_ret/__x64_sys_process_vm_writev")
+int BPF_PROG(shadow_sys_process_vm_writev, struct pt_regs *regs)
+{
+    return system_guard(311, EVENT_SYSTEM_PROCESS_VM);
+}
+
+SEC("fmod_ret/__x64_sys_ioctl")
+int BPF_PROG(shadow_sys_ioctl, struct pt_regs *regs)
+{
+    int d = check_policy(16, EFFECT_CLASS_SYSTEM);
+    if (d == DECISION_ALLOW)
+        return 0;
+
+    unsigned long fd = PT_REGS_PARM1_CORE_SYSCALL(regs);
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct files_struct *files = BPF_CORE_READ(task, files);
+    if (!files)
+        goto block;
+    struct fdtable *fdt = BPF_CORE_READ(files, fdt);
+    if (!fdt)
+        goto block;
+    unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
+    if (fd >= max_fds || fd > 1023)
+        goto block;
+    struct file **fd_array = BPF_CORE_READ(fdt, fd);
+    if (!fd_array)
+        goto block;
+    struct file *f = NULL;
+    bpf_probe_read_kernel(&f, sizeof(f), &fd_array[fd]);
+    if (!f)
+        goto block;
+    struct inode *inode = BPF_CORE_READ(f, f_inode);
+    if (!inode)
+        goto block;
+    unsigned short mode = BPF_CORE_READ(inode, i_mode);
+    if ((mode & S_IFMT) != S_IFCHR)
+        return 0;
+
+block:
+    if (d == DECISION_FENCE) {
+        do_intercept(16, EVENT_SYSTEM_TTY_IOCTL);
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -947,46 +1566,76 @@ int BPF_PROG(shadow_sys_io_uring_register, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_shmdt")
 int BPF_PROG(shadow_sys_shmdt, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_SHM;  // detach: target unknown -> wildcard only
+    int d = check_policy_detail(67, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(67, EVENT_IPC); // 67 = shmdt
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(67, EVENT_IPC_SHM); // 67 = shmdt
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("fmod_ret/__x64_sys_mq_open")
 int BPF_PROG(shadow_sys_mq_open, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_MQ;  // queue name not parsed -> wildcard only
+    int d = check_policy_detail(240, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(240, EVENT_IPC); // 240 = mq_open
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(240, EVENT_IPC_MQ); // 240 = mq_open
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("fmod_ret/__x64_sys_mq_timedsend")
 int BPF_PROG(shadow_sys_mq_timedsend, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_MQ;
+    int d = check_policy_detail(242, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(242, EVENT_IPC); // 242 = mq_timedsend (mq_send)
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(242, EVENT_IPC_MQ); // 242 = mq_timedsend (mq_send)
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("fmod_ret/__x64_sys_mq_timedreceive")
 int BPF_PROG(shadow_sys_mq_timedreceive, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_MQ;
+    int d = check_policy_detail(243, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(243, EVENT_IPC); // 243 = mq_timedreceive (mq_receive)
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(243, EVENT_IPC_MQ); // 243 = mq_timedreceive (mq_receive)
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 SEC("fmod_ret/__x64_sys_mq_notify")
 int BPF_PROG(shadow_sys_mq_notify, struct pt_regs *regs)
 {
-    if (!should_intercept())
+    struct effect_detail det = {};
+    det.ipc_type = IPC_TYPE_MQ;
+    int d = check_policy_detail(244, EFFECT_CLASS_IPC, &det);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(244, EVENT_IPC); // 244 = mq_notify
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(244, EVENT_IPC_MQ); // 244 = mq_notify
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1006,7 +1655,8 @@ int BPF_PROG(shadow_sys_mq_notify, struct pt_regs *regs)
 SEC("lsm/bprm_check_security")
 int BPF_PROG(shadow_bprm_check, struct linux_binprm *bprm)
 {
-    if (!should_intercept())
+    int d = check_policy(59, EFFECT_CLASS_PRIVILEGE);
+    if (d == DECISION_ALLOW)
         return 0;
 
     // Check if the binary has setuid or setgid bit set
@@ -1018,8 +1668,11 @@ int BPF_PROG(shadow_bprm_check, struct linux_binprm *bprm)
     if (!(mode & S_ISUID) && !(mode & S_ISGID))
         return 0;  // not setuid/setgid, allow
 
-    do_intercept(59, EVENT_PRIV_EXEC);  // 59 = execve syscall nr
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(59, EVENT_PRIV_EXEC);  // 59 = execve syscall nr
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- Privilege: UID changes (setuid/setreuid/setresuid/setfsuid) ---
@@ -1027,10 +1680,14 @@ SEC("lsm/task_fix_setuid")
 int BPF_PROG(shadow_task_fix_setuid, struct cred *new_cred,
              const struct cred *old, int flags)
 {
-    if (!should_intercept())
+    int d = check_policy(105, EFFECT_CLASS_PRIVILEGE);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(105, EVENT_PRIV_SETUID);  // 105 = setuid
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(105, EVENT_PRIV_SETUID);  // 105 = setuid
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- Privilege: GID changes (setgid/setregid/setresgid/setfsgid) ---
@@ -1038,10 +1695,14 @@ SEC("lsm/task_fix_setgid")
 int BPF_PROG(shadow_task_fix_setgid, struct cred *new_cred,
              const struct cred *old, int flags)
 {
-    if (!should_intercept())
+    int d = check_policy(106, EFFECT_CLASS_PRIVILEGE);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(106, EVENT_PRIV_SETUID);  // 106 = setgid
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(106, EVENT_PRIV_SETGID);  // 106 = setgid
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- Privilege: setgroups ---
@@ -1049,10 +1710,14 @@ SEC("lsm/task_fix_setgroups")
 int BPF_PROG(shadow_task_fix_setgroups, struct cred *new_cred,
              const struct cred *old)
 {
-    if (!should_intercept())
+    int d = check_policy(116, EFFECT_CLASS_PRIVILEGE);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(116, EVENT_PRIV_SETUID);  // 116 = setgroups
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(116, EVENT_PRIV_SETGROUPS);  // 116 = setgroups
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 // --- Privilege: capset (capability changes) ---
@@ -1061,10 +1726,14 @@ int BPF_PROG(shadow_capset, struct cred *new_cred, const struct cred *old,
              const kernel_cap_t *effective, const kernel_cap_t *inheritable,
              const kernel_cap_t *permitted)
 {
-    if (!should_intercept())
+    int d = check_policy(126, EFFECT_CLASS_PRIVILEGE);
+    if (d == DECISION_ALLOW)
         return 0;
-    do_intercept(126, EVENT_PRIV_SETUID);  // 126 = capset
-    return -ERESTARTSYS;
+    if (d == DECISION_FENCE) {
+        do_intercept(126, EVENT_PRIV_CAPSET);  // 126 = capset
+        return -ERESTARTSYS;
+    }
+    return -EPERM;
 }
 
 char LICENSE[] SEC("license") = "GPL";
@@ -1116,22 +1785,27 @@ int BPF_PROG(shadow_sched_fork, struct task_struct *parent, struct task_struct *
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Process-exit cleanup - drop all per-tgid state when a process leaves.
+// Process-exit cleanup - drop all per-tgid / per-tid state when a process
+// leaves.
 //
-// stopped_pids / allowed_pids are keyed by tgid. Without cleanup, a stale
-// "allowed" flag would survive process death, and a later pid-reuse inside a
-// monitored cgroup could inherit it and be silently exempt from interception.
-// Fires on thread-group-leader exit only.
+// restart_token is keyed by tid (thread id): clean on EVERY thread exit.
+// stopped_pids is keyed by tgid: clean only on thread-group-leader exit.
+// epoch_mode / class_policy / etc. are cgroup-scoped and cleaned by userspace
+// (clear_all_policies) at epoch end, NOT here.
 // ═══════════════════════════════════════════════════════════════
 SEC("tp_btf/sched_process_exit")
 int BPF_PROG(shadow_sched_exit, struct task_struct *task)
 {
     __u32 tgid = BPF_CORE_READ(task, tgid);
     __u32 pid  = BPF_CORE_READ(task, pid);
-    // Only clean up when the whole thread group is gone (leader exit).
+
+    // Clean restart_token for this thread (tid = pid).
+    // Tokens are per-thread, so every exiting thread's token is stale.
+    bpf_map_delete_elem(&restart_token, &pid);
+
+    // Only clean tgid-keyed state when the whole thread group is gone.
     if (pid != tgid)
         return 0;
-    bpf_map_delete_elem(&allowed_pids, &tgid);
     bpf_map_delete_elem(&stopped_pids, &tgid);
     return 0;
 }

@@ -75,7 +75,8 @@ private:
 
     /* Internal handlers */
     std::string handle_request(const std::string &json_line);
-    std::string handle_start_observe(uint64_t cgroup_id, const std::string &log_path);
+    std::string handle_start_observe(uint64_t cgroup_id, const std::string &log_path,
+                                       const std::string &epoch_id = "");
     std::string handle_stop_observe(uint64_t cgroup_id);
     std::string handle_audit(const std::string &log_path, const std::string &rules_json);
     std::string handle_get_events(const std::string &log_path, int limit);

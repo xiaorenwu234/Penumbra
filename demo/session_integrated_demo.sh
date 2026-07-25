@@ -169,7 +169,9 @@ setup_stack() {
 
     step "Starting Orchestrator..."
     python3 "$ORCH_SCRIPT" --shadowfs-sock "$SHADOWFS_SOCK" \
-        --shadowproc-sock "$SHADOWPROC_SOCK" --listen "$ORCH_SOCK" &
+        --shadowproc-sock "$SHADOWPROC_SOCK" --listen "$ORCH_SOCK" \
+        --shadowfs-mount "$ORIG_DIR" \
+        --backing-dir "$STAGING_DIR:$LOWER_DIR" &
     ORCH_PID=$!
     sleep 1
     kill -0 "$ORCH_PID" 2>/dev/null || { fail "Orchestrator failed to start"; exit 1; }

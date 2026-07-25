@@ -46,6 +46,19 @@ struct {
     __type(value, __u64);
 } dropped SEC(".maps");
 
+/*
+ * seq_counter[cgroup_id] holds the monotonic per-cgroup event sequence number.
+ * Atomically incremented in reserve_event() so every recorded event carries a
+ * gap-free sequence. Userspace resets it to 0 at start() and reads the final
+ * value at stop() to verify the log has no missing events (end_seq check).
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u64);       /* cgroup_id */
+    __type(value, __u64);     /* seq counter */
+} seq_counter SEC(".maps");
+
 /* ---- helpers ---------------------------------------------------------- */
 
 static __always_inline struct observ_event *
@@ -77,6 +90,15 @@ reserve_event(void) {
     evt->uid          = uid_gid & 0xFFFFFFFF;
     evt->gid          = uid_gid >> 32;
     evt->cgroup_id    = cgroup_id;
+
+    /* Assign a monotonic per-cgroup sequence number so the audit can detect
+     * gaps (lost events) even when the dropped counter is zero. */
+    __u64 *seqp = bpf_map_lookup_elem(&seq_counter, &cgroup_id);
+    if (seqp)
+        evt->seq = __sync_fetch_and_add(seqp, 1);
+    else
+        evt->seq = 0;
+
     bpf_get_current_comm(&evt->comm, sizeof(evt->comm));
 
     return evt;
@@ -85,6 +107,19 @@ reserve_event(void) {
 static __always_inline void
 submit_event(struct observ_event *evt) {
     bpf_ringbuf_submit(evt, 0);
+}
+
+/* Build the canonical path for an FS event field. cri_build_path() fails
+ * closed (negative) when the path cannot be represented exactly; in that
+ * case the field is cleared and the event is flagged so userspace marks the
+ * epoch log incomplete rather than auditing a truncated, fabricated path. */
+static __always_inline void
+observ_set_path(struct observ_event *evt, struct dentry *dentry, char *buf) {
+    int plen = cri_build_path(dentry, buf);
+    if (plen < 0) {
+        buf[0] = '\0';
+        evt->arg3 |= OBSERV_FL_PATH_ERROR;
+    }
 }
 
 static __always_inline const char *
@@ -111,7 +146,7 @@ int BPF_PROG(observ_file_open, struct file *file, int ret) {
     unsigned int flags = BPF_CORE_READ(file, f_flags);
     evt->arg1 = flags;
     evt->event_type = (flags & O_CREAT) ? FS_EVENT_CREATE : FS_EVENT_OPEN;
-    cri_build_path(BPF_CORE_READ(file, f_path.dentry), evt->path);
+    observ_set_path(evt, BPF_CORE_READ(file, f_path.dentry), evt->path);
     submit_event(evt);
     return 0;
 }
@@ -124,7 +159,7 @@ int BPF_PROG(observ_inode_create, struct inode *dir, struct dentry *dentry,
     if (!evt) return 0;
     evt->event_type = FS_EVENT_CREATE;
     evt->arg1 = mode;
-    cri_build_path(dentry, evt->path);
+    observ_set_path(evt, dentry, evt->path);
     submit_event(evt);
     return 0;
 }
@@ -136,7 +171,7 @@ int BPF_PROG(observ_inode_unlink, struct inode *dir, struct dentry *dentry,
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_DELETE;
-    cri_build_path(dentry, evt->path);
+    observ_set_path(evt, dentry, evt->path);
     submit_event(evt);
     return 0;
 }
@@ -149,8 +184,8 @@ int BPF_PROG(observ_inode_rename, struct inode *old_dir,
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_RENAME;
-    cri_build_path(old_dentry, evt->path);       /* source (enforced) */
-    cri_build_path(new_dentry, evt->new_path);   /* destination */
+    observ_set_path(evt, old_dentry, evt->path);       /* source (enforced) */
+    observ_set_path(evt, new_dentry, evt->new_path);   /* destination */
     submit_event(evt);
     return 0;
 }
@@ -163,7 +198,7 @@ int BPF_PROG(observ_inode_mkdir, struct inode *dir, struct dentry *dentry,
     if (!evt) return 0;
     evt->event_type = FS_EVENT_MKDIR;
     evt->arg1 = mode;
-    cri_build_path(dentry, evt->path);
+    observ_set_path(evt, dentry, evt->path);
     submit_event(evt);
     return 0;
 }
@@ -175,7 +210,7 @@ int BPF_PROG(observ_inode_rmdir, struct inode *dir, struct dentry *dentry,
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_RMDIR;
-    cri_build_path(dentry, evt->path);
+    observ_set_path(evt, dentry, evt->path);
     submit_event(evt);
     return 0;
 }
@@ -187,8 +222,8 @@ int BPF_PROG(observ_inode_link, struct dentry *old_dentry, struct inode *dir,
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_LINK;
-    cri_build_path(new_dentry, evt->path);       /* created link (enforced) */
-    cri_build_path(old_dentry, evt->new_path);   /* existing target */
+    observ_set_path(evt, new_dentry, evt->path);       /* created link (enforced) */
+    observ_set_path(evt, old_dentry, evt->new_path);   /* existing target */
     submit_event(evt);
     return 0;
 }
@@ -200,7 +235,7 @@ int BPF_PROG(observ_inode_symlink, struct inode *dir, struct dentry *dentry,
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = FS_EVENT_SYMLINK;
-    cri_build_path(dentry, evt->path);           /* created symlink (enforced) */
+    observ_set_path(evt, dentry, evt->path);           /* created symlink (enforced) */
     bpf_probe_read_kernel_str(&evt->new_path, sizeof(evt->new_path), old_name);
     submit_event(evt);
     return 0;
@@ -219,7 +254,7 @@ int BPF_PROG(observ_inode_setattr, struct mnt_idmap *idmap,
     if (!evt) return 0;
     evt->event_type = event_type;
     evt->arg1 = ia_valid;
-    cri_build_path(dentry, evt->path);
+    observ_set_path(evt, dentry, evt->path);
     submit_event(evt);
     return 0;
 }
@@ -233,6 +268,7 @@ int tp_sched_exec(struct trace_event_raw_sched_process_exec *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_EXEC;
+    evt->source = EFFECT_SOURCE_PROC;
     __u32 data_loc = BPF_CORE_READ(ctx, __data_loc_filename);
     const char *filename = get_data_loc_str(ctx, data_loc);
     bpf_probe_read_kernel_str(&evt->path, sizeof(evt->path), filename);
@@ -245,6 +281,7 @@ int tp_sched_fork(struct trace_event_raw_sched_process_fork *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_FORK;
+    evt->source = EFFECT_SOURCE_PROC;
     evt->arg1 = BPF_CORE_READ(ctx, child_pid);
     __u32 data_loc = BPF_CORE_READ(ctx, __data_loc_child_comm);
     const char *child_comm = get_data_loc_str(ctx, data_loc);
@@ -258,6 +295,7 @@ int tp_sched_exit(struct trace_event_raw_sched_process_exit *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_EXIT;
+    evt->source = EFFECT_SOURCE_PROC;
     evt->arg1 = BPF_CORE_READ(ctx, group_dead) ? 1 : 0;
     submit_event(evt);
     return 0;
@@ -268,6 +306,7 @@ int tp_kill(struct trace_event_raw_sys_enter *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_KILL;
+    evt->source = EFFECT_SOURCE_PROC;
     __kernel_pid_t target_pid; int sig;
     bpf_probe_read(&target_pid, sizeof(target_pid), &ctx->args[0]);
     bpf_probe_read(&sig,        sizeof(sig),         &ctx->args[1]);
@@ -282,6 +321,7 @@ int tp_tkill(struct trace_event_raw_sys_enter *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_KILL;
+    evt->source = EFFECT_SOURCE_PROC;
     int tid, sig;
     bpf_probe_read(&tid, sizeof(tid), &ctx->args[0]);
     bpf_probe_read(&sig, sizeof(sig), &ctx->args[1]);
@@ -296,6 +336,7 @@ int tp_tgkill(struct trace_event_raw_sys_enter *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_KILL;
+    evt->source = EFFECT_SOURCE_PROC;
     int tgid, tid, sig;
     bpf_probe_read(&tgid, sizeof(tgid), &ctx->args[0]);
     bpf_probe_read(&tid,  sizeof(tid),  &ctx->args[1]);
@@ -312,6 +353,7 @@ int tp_prctl(struct trace_event_raw_sys_enter *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_PRCTL;
+    evt->source = EFFECT_SOURCE_PROC;
     int option;
     bpf_probe_read(&option, sizeof(option), &ctx->args[0]);
     evt->arg1 = (__u32)option;
@@ -324,6 +366,7 @@ int tp_ptrace(struct trace_event_raw_sys_enter *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_PTRACE;
+    evt->source = EFFECT_SOURCE_PROC;
     int request; __kernel_pid_t target_pid;
     bpf_probe_read(&request,    sizeof(request),    &ctx->args[0]);
     bpf_probe_read(&target_pid, sizeof(target_pid), &ctx->args[1]);
@@ -338,6 +381,7 @@ int tp_setuid(struct trace_event_raw_sys_enter *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_SETUID;
+    evt->source = EFFECT_SOURCE_PROC;
     uid_t uid;
     bpf_probe_read(&uid, sizeof(uid), &ctx->args[0]);
     evt->arg1 = (__u32)uid;
@@ -350,6 +394,7 @@ int tp_setreuid(struct trace_event_raw_sys_enter *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_SETUID;
+    evt->source = EFFECT_SOURCE_PROC;
     uid_t ruid, euid;
     bpf_probe_read(&ruid, sizeof(ruid), &ctx->args[0]);
     bpf_probe_read(&euid, sizeof(euid), &ctx->args[1]);
@@ -364,6 +409,7 @@ int tp_setresuid(struct trace_event_raw_sys_enter *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_SETUID;
+    evt->source = EFFECT_SOURCE_PROC;
     uid_t ruid, euid, suid;
     bpf_probe_read(&ruid, sizeof(ruid), &ctx->args[0]);
     bpf_probe_read(&euid, sizeof(euid), &ctx->args[1]);
@@ -380,6 +426,7 @@ int tp_capset(struct trace_event_raw_sys_enter *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_CAPSET;
+    evt->source = EFFECT_SOURCE_PROC;
     submit_event(evt);
     return 0;
 }

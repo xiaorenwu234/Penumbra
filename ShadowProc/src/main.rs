@@ -16,6 +16,7 @@ mod bpf_loader;
 mod cli;
 mod event_handler;
 mod memory_tracker;
+mod policy_generated;
 mod process_manager;
 mod socket_server;
 

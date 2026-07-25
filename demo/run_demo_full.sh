@@ -208,7 +208,9 @@ setup_env() {
         --shadowfs-sock "$SHADOWFS_SOCK" \
         --shadowproc-sock "$SHADOWPROC_SOCK" \
         --shadowobserve-sock "$SHADOWOBSERVE_SOCK" \
-        --listen "$ORCH_SOCK" &
+        --listen "$ORCH_SOCK" \
+        --shadowfs-mount "$ORIG_DIR" \
+        --backing-dir "$STAGING_DIR" &
     ORCH_PID=$!
     sleep 1
     info "Orchestrator running (PID $ORCH_PID), socket=$ORCH_SOCK"

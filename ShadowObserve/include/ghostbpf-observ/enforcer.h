@@ -69,11 +69,13 @@ public:
     bool add_rule(const WhitelistRule &rule);
 
     /**
-     * Add multiple whitelist rules at once.
+     * Add multiple whitelist rules atomically.
      * @param rules  Vector of rules to add.
-     * @return number of rules successfully added.
+     * @return true if ALL rules were installed; false if any failed (in which
+     *         case all already-installed rules are rolled back, leaving the
+     *         whitelist in its prior state).
      */
-    size_t add_rules(const std::vector<WhitelistRule> &rules);
+    bool add_rules(const std::vector<WhitelistRule> &rules);
 
     /**
      * Clear all whitelist rules for a specific cgroup.

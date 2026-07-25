@@ -58,9 +58,11 @@
 #define ATTR_SIZE (1 << 3)
 
 /* ---- whitelist key (shared with enforcer userspace bpf_whitelist_key) ---- */
+/* event_type is the encoded (effect_class | operation<<8) value, or 0xFFFF
+ * for "any event".  See effect_schema.h for the encoding and legacy aliases. */
 struct whitelist_key {
     __u64 cgroup_id;
-    __u16 event_type;           /* FS_EVENT_*, or 0xFFFF for "any event" */
+    __u16 event_type;           /* encoded class+op, or 0xFFFF for wildcard */
     __u16 _pad;
     char  path_prefix[MAX_PREFIX_LEN];
 };
@@ -68,15 +70,30 @@ struct whitelist_key {
 /*
  * cri_build_path - build the canonical absolute path of `dentry` into `buf`.
  *
- * `buf` MUST be at least CRI_MAX_PATH bytes. Returns the string length (>=1).
- * The result is a normalized absolute path: leading '/', single-'/' separators,
- * no trailing '/' (root is "/"). Long paths / components are truncated at the
- * fixed caps above - deterministically, so both sides agree.
+ * `buf` MUST be at least CRI_MAX_PATH bytes.
+ *
+ * Returns the string length (>=1) on success. The result is a normalized
+ * absolute path: leading '/', single-'/' separators, no trailing '/' (root
+ * is "/").
+ *
+ * FAIL-CLOSED: returns a NEGATIVE value when the path cannot be represented
+ * EXACTLY, instead of emitting a truncated path that "looks valid" — such a
+ * path could match a shorter whitelist prefix and diverge observation from
+ * enforcement:
+ *   -1  path deeper than CRI_MAX_DEPTH (walk never reached the fs root, so
+ *       the top ancestors are unknown)
+ *   -2  a path component could not be read
+ *   -3  a path component exceeds CRI_NAME_MAX (would be truncated)
+ *   -4  the CRI_MAX_PATH buffer filled before the leaf (suffix would be lost)
+ * Callers MUST deny (enforce side) or flag the event (observe side) on any
+ * negative return. cri_check_whitelist() already denies path_len <= 0, so
+ * the enforce side fails closed automatically.
  */
 static __always_inline int cri_build_path(struct dentry *dentry, char *buf)
 {
     struct dentry *dents[CRI_MAX_DEPTH] = {};
     int n = 0;
+    int hit_root = 0;
 
     /* Collect dentries from the leaf up toward the filesystem root. */
     #pragma unroll
@@ -86,10 +103,18 @@ static __always_inline int cri_build_path(struct dentry *dentry, char *buf)
         dents[n] = dentry;
         n++;
         struct dentry *parent = BPF_CORE_READ(dentry, d_parent);
-        if (parent == dentry || !parent)
-            break;              /* reached the fs root (d_parent == self) */
+        if (parent == dentry || !parent) {
+            hit_root = 1;       /* reached the fs root (d_parent == self) */
+            break;
+        }
         dentry = parent;
     }
+
+    /* The walk MUST converge on the filesystem root. If it stopped because
+     * the depth cap was hit, the path's top ancestors are unknown and any
+     * path built here would be a shorter, DIFFERENT path — deny. */
+    if (!hit_root)
+        return -1;
 
     int pos = 0;
     /* Assemble forward from just-below-root (index n-2) down to the leaf
@@ -98,17 +123,20 @@ static __always_inline int cri_build_path(struct dentry *dentry, char *buf)
     for (int i = CRI_MAX_DEPTH - 1; i >= 0; i--) {
         if (i >= n - 1)
             continue;           /* skip out-of-range slots and the root slot */
-        /* Stop if there is no room for a '/' plus a full component read; both
-         * sides stop at the same point, so truncation stays consistent. */
+        /* No room for a '/' plus a full component read: the remaining
+         * components would be silently dropped, truncating the path — deny. */
         if (pos > CRI_MAX_PATH - CRI_NAME_MAX - 1)
-            break;
+            return -4;
         struct dentry *d = dents[i];
         const unsigned char *name = BPF_CORE_READ(d, d_name.name);
         buf[pos] = '/';
         pos++;
         long l = bpf_probe_read_kernel_str(&buf[pos], CRI_NAME_MAX, name);
-        if (l > 1)
-            pos += (int)l - 1;  /* exclude the NUL terminator */
+        if (l <= 0)
+            return -2;          /* component unreadable */
+        if (l >= CRI_NAME_MAX)
+            return -3;          /* component truncated */
+        pos += (int)l - 1;      /* exclude the NUL terminator */
     }
 
     if (pos <= 0) {
@@ -180,7 +208,8 @@ static __always_inline int cri_check_whitelist(void *map, __u64 cgroup_id,
     if (path_len <= 0)
         return -1;
     if (path_len > CRI_MAX_PATH - 1)
-        path_len = CRI_MAX_PATH - 1;
+        return -1;   /* path cannot be fully represented -> deny (fail-closed),
+                       * NOT match a short truncated prefix that could widen */
 
     /* Candidates: every ancestor dir boundary, plus the full path itself. */
     for (int L = 1; L <= CRI_MAX_PATH - 1; L++) {

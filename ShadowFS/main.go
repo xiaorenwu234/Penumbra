@@ -41,18 +41,19 @@ type cgroupCacheKey struct {
 
 var cgroupCache sync.Map // cgroupCacheKey -> string
 
-// shadowBackend is the global rollback backend, initialized in main.
+// shadowBackend is the global MVCC backend, initialized in main.
 var shadowBackend *backend.Backend
 
-// OverlayRoot is the shared state of the overlay mount: orig (read-only
-// source of truth), overlay (write-side staging) and the backend that owns
-// rollback/commit semantics.
+// OverlayRoot is the shared state of the versioned mount: orig (read-only
+// source of truth) plus the backend that owns version resolution and
+// rollback/commit semantics. There is NO shared overlay directory anymore:
+// each epoch has a private stage tree and visibility is decided by the
+// backend's version graph (Resolve).
 type OverlayRoot struct {
-	origDir    string
-	overlayDir string
+	origDir string
 }
 
-// OverlayNode is a single inode in the merged orig+overlay view.
+// OverlayNode is a single inode in the merged versioned view.
 type OverlayNode struct {
 	fs.Inode
 	root *OverlayRoot
@@ -84,29 +85,27 @@ var (
 // embedded LoopbackFile delegates all file operations (Read, Write,
 // Flush, Fsync, etc.) to the raw fd. We override Release so that the
 // TrackedFD is closed exactly once — either by a cascade rollback
-// (CloseAgentFDs) or by the kernel's RELEASE, whichever comes first.
+// (CloseEpochFDs) or by the kernel's RELEASE, whichever comes first.
 //
-// onOverlay records whether the embedded fd points at an overlay copy
-// (true) or directly at the orig file (false). Setattr uses this to
-// decide whether the fast-path fh.Setattr is safe: applying chmod /
-// chown / utimens / truncate via an orig-bound fd would mutate the
+// onStage records whether the embedded fd points at the epoch's stage
+// copy (true) or directly at the backing file (false). Setattr uses this
+// to decide whether the fast-path fh.Setattr is safe: applying chmod /
+// chown / utimens / truncate via a backing-bound fd would mutate the
 // supposedly-immutable orig file and bypass PrepareWrite entirely.
 type trackedHandle struct {
 	*fs.LoopbackFile
-	tfd       *backend.TrackedFD
-	cgroupID  string
-	onOverlay bool
+	tfd     *backend.TrackedFD
+	epochID backend.EpochID
+	onStage bool
 }
 
 var _ fs.FileReleaser = (*trackedHandle)(nil)
 
-// Advisory file locks pass through to the underlying overlay/orig fd: the
-// embedded *fs.LoopbackFile already implements the lock operations, so these
-// assertions simply confirm trackedHandle exposes them. Both POSIX (fcntl)
-// and BSD (flock) locks arrive via Setlk/Setlkw (flock carries a LOCK_* flag),
-// so there is no separate Flock interface. Locks are ephemeral process state
-// (per the design): a rollback force-closes the agent's fds (CloseAgentFDs),
-// which releases any locks it held; no lock state is recorded in the undo log.
+// Advisory file locks pass through to the underlying stage/orig fd: the
+// embedded *fs.LoopbackFile already implements the lock operations. Locks
+// are ephemeral process state: a rollback force-closes the epoch's fds
+// (CloseEpochFDs), which releases any locks it held; no lock state is
+// recorded in the version graph.
 var (
 	_ fs.FileGetlker  = (*trackedHandle)(nil)
 	_ fs.FileSetlker  = (*trackedHandle)(nil)
@@ -114,8 +113,8 @@ var (
 )
 
 func (h *trackedHandle) Release(ctx context.Context) syscall.Errno {
-	// Unregister from backend so CloseAgentFDs won't double-close.
-	shadowBackend.UnregisterFD(h.cgroupID, h.tfd)
+	// Unregister from backend so CloseEpochFDs won't double-close.
+	shadowBackend.UnregisterFD(h.epochID, h.tfd)
 	// Close via TrackedFD (idempotent). If rollback already closed it,
 	// this is a no-op.
 	_ = h.tfd.Close()
@@ -139,15 +138,6 @@ func (n *OverlayNode) origPath() string {
 func (n *OverlayNode) origChildPath(name string) string {
 	return filepath.Join(n.root.origDir, n.relPath(), name)
 }
-
-// --- Control file ---
-//
-// The in-mount virtual control file (.shadow.ctl) has been REMOVED: it exposed
-// rollback/commit to any process that could write into the mount (i.e. the
-// sandboxed agent itself), letting the agent drive its own finalization. The
-// only control interface is now the ShadowFS Unix control socket
-// (socket_server.go), which is not reachable through the filesystem view and
-// is peer-authenticated to the orchestrator's uid.
 
 // --- cgroup id helper ---
 
@@ -229,13 +219,18 @@ func readCgroupRaw(pid int) (string, error) {
 // getCgroupID reads the cgroup ID of the calling process. Successful
 // resolutions are cached by (pid, starttime) so that subsequent
 // /proc/<pid>/cgroup read failures (observed as persistent EBADF on
-// some kernels) fall back to the previously-known good answer instead
-// of synthesising a bogus "pid-N" identifier that would split the
-// process's operations across two distinct agent IDs.
-func getCgroupID(ctx context.Context) string {
+// some kernels) fall back to the previously-known good answer.
+//
+// Fail-closed policy: if the cgroup path cannot be resolved AND there is
+// no cached value, the function returns an error. The caller (epochForCtx)
+// translates this into an EIO on the FUSE operation, refusing the request.
+// This prevents a synthetic "pid-N" identifier from fragmenting the
+// process's operations across two distinct identities — which would break
+// commit/rollback grouping and dependency tracking.
+func getCgroupID(ctx context.Context) (string, error) {
 	caller, ok := fuse.FromContext(ctx)
 	if !ok {
-		return "unknown"
+		return "", fmt.Errorf("no caller pid in FUSE context")
 	}
 	pid := int(caller.Pid)
 	start := procStarttime(pid)
@@ -246,77 +241,56 @@ func getCgroupID(ctx context.Context) string {
 		if start != "" {
 			cgroupCache.Store(key, cgroup)
 		}
-		return cgroup
+		return cgroup, nil
 	}
 	// Read failed: prefer a cached value for the same (pid, starttime)
-	// so a transient EBADF doesn't fragment the agent.
+	// so a transient EBADF doesn't fragment the identity.
 	if start != "" {
 		if cached, ok := cgroupCache.Load(key); ok {
-			return cached.(string)
+			return cached.(string), nil
 		}
 	}
 	comm, _ := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-	log.Printf("[cgroup] read /proc/%d/cgroup failed: %v comm=%q (no cache hit, falling back to pid-N)",
-		pid, err, strings.TrimSpace(string(comm)))
-	return fmt.Sprintf("pid-%d", pid)
+	return "", fmt.Errorf("cgroup read failed for pid %d (comm=%q): %w — no cache hit, refusing synthetic identity (fail-closed)",
+		pid, strings.TrimSpace(string(comm)), err)
+}
+
+// epochForCtx maps the calling process to the epoch its operations are
+// attributed to: the cgroup's registered active epoch, or an auto-created
+// implicit epoch for cgroup-only legacy flows.
+//
+// Fail-closed: if cgroup identification fails (no path, no cache), the
+// FUSE operation returns EIO instead of attributing the write to a
+// synthetic identity.
+func epochForCtx(ctx context.Context) (backend.EpochID, syscall.Errno) {
+	cgID, err := getCgroupID(ctx)
+	if err != nil {
+		log.Printf("[overlay] cgroup identification failed (fail-closed): %v", err)
+		return "", syscall.EIO
+	}
+	epochID, err := shadowBackend.EpochForCgroup(cgID)
+	if err != nil {
+		log.Printf("[overlay] epoch attribution failed: %v", err)
+		return "", syscall.EIO
+	}
+	return epochID, 0
 }
 
 // --- Stat helpers ---
 
-// resolveStat picks the effective stat for childPath: overlay (if visible)
-// else orig. Returns (path used, stat, found).
-func (r *OverlayRoot) resolveStat(rel string) (string, *syscall.Stat_t, bool) {
-	origPath := filepath.Join(r.origDir, rel)
-	overlayPath := filepath.Join(r.overlayDir, rel)
-
-	whiteout := whiteoutPath(r.overlayDir, rel)
-	if whiteout != "" {
-		if _, err := os.Lstat(whiteout); err == nil {
-			return "", nil, false
-		}
-	}
-	// Check ancestor whiteouts: if any ancestor dir is deleted, this path is hidden.
-	if hasAncestorWhiteout(r.overlayDir, rel) {
+// resolveStat resolves rel in the caller's epoch view and stats the
+// resolved physical path. Returns (physical path, stat, found). Recording of
+// the read-from dependency happens inside backend.Resolve.
+func (n *OverlayNode) resolveStat(epochID backend.EpochID, rel string) (string, *syscall.Stat_t, bool) {
+	res := shadowBackend.Resolve(epochID, filepath.Join(n.root.origDir, rel))
+	if !res.Exists {
 		return "", nil, false
 	}
-
 	var st syscall.Stat_t
-	if err := syscall.Lstat(overlayPath, &st); err == nil {
-		return overlayPath, &st, true
+	if err := syscall.Lstat(res.PhysicalPath, &st); err != nil {
+		return "", nil, false
 	}
-	if err := syscall.Lstat(origPath, &st); err == nil {
-		return origPath, &st, true
-	}
-	return "", nil, false
-}
-
-// whiteoutPath returns the whiteout marker path for rel, or "" if rel is
-// the root itself.
-func whiteoutPath(overlayDir, rel string) string {
-	if rel == "" {
-		return ""
-	}
-	dir, base := filepath.Split(rel)
-	return filepath.Join(overlayDir, dir, ".shadow.wh."+base)
-}
-
-// hasAncestorWhiteout checks if any ancestor directory of rel has a whiteout marker.
-func hasAncestorWhiteout(overlayDir, rel string) bool {
-	dir := filepath.Dir(rel)
-	for dir != "." && dir != "/" && dir != "" {
-		wp := whiteoutPath(overlayDir, dir)
-		if wp != "" {
-			if _, err := os.Lstat(wp); err == nil {
-				return true
-			}
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return false
+	return res.PhysicalPath, &st, true
 }
 
 func attrFromStat(st *syscall.Stat_t, out *fuse.Attr) {
@@ -339,8 +313,11 @@ func attrFromStat(st *syscall.Stat_t, out *fuse.Attr) {
 // --- FUSE methods ---
 
 func (n *OverlayNode) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	rel := n.relPath()
-	_, st, ok := n.root.resolveStat(rel)
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return errno
+	}
+	_, st, ok := n.resolveStat(epochID, n.relPath())
 	if !ok {
 		return syscall.ENOENT
 	}
@@ -349,8 +326,12 @@ func (n *OverlayNode) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.At
 }
 
 func (n *OverlayNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return nil, errno
+	}
 	rel := filepath.Join(n.relPath(), name)
-	_, st, ok := n.root.resolveStat(rel)
+	_, st, ok := n.resolveStat(epochID, rel)
 	if !ok {
 		return nil, syscall.ENOENT
 	}
@@ -360,7 +341,7 @@ func (n *OverlayNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	return child, 0
 }
 
-// readdirEntry pairs a fuse.DirEntry with a sentinel for control file.
+// sliceDirStream serves a pre-merged directory listing.
 type sliceDirStream struct {
 	entries []fuse.DirEntry
 	idx     int
@@ -375,36 +356,26 @@ func (s *sliceDirStream) Next() (fuse.DirEntry, syscall.Errno) {
 func (s *sliceDirStream) Close() {}
 
 func (n *OverlayNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return nil, errno
+	}
 	rel := n.relPath()
-	// Check whiteout on the directory itself: if it was rmdir'd, a stale
-	// cached inode should not list its contents.
-	if wp := whiteoutPath(n.root.overlayDir, rel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
+	// Resolve the directory itself: a whiteout (own or ancestor) hides it
+	// even when the kernel served a stale cached inode.
+	if rel != "" {
+		res := shadowBackend.Resolve(epochID, n.origPath())
+		if !res.Exists {
 			return nil, syscall.ENOENT
 		}
 	}
-	// Check ancestor whiteouts: if a parent dir is deleted, this dir is hidden.
-	if rel != "" && hasAncestorWhiteout(n.root.overlayDir, rel) {
-		return nil, syscall.ENOENT
-	}
-
-	cgroupID := getCgroupID(ctx)
-	// Always record the read dependency, mirroring Open(R). Skipping it for
-	// agents without active write state is unsafe: a purely-read agent may
-	// later perform its first write to an unrelated path. At that moment
-	// markDirty only links dependencies via fileDirty[origPath]/ancestors,
-	// so any prior writers of paths the agent had merely *read* would be
-	// missed and a cascaded rollback could fail to roll this agent back
-	// even though its written content was derived from now-rolled-back data.
-	shadowBackend.RecordReadOpen(cgroupID, n.origPath())
-	origDir := filepath.Join(n.root.origDir, rel)
-	overlayDir := filepath.Join(n.root.overlayDir, rel)
-
-	merged, err := backend.MergeReaddir(origDir, overlayDir)
+	// MergeReaddirVersions records a read-from edge for every foreign
+	// version the enumeration observes (directory namespace reads).
+	merged, err := shadowBackend.MergeReaddirVersions(epochID, n.origPath())
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	entries := make([]fuse.DirEntry, 0, len(merged)+1)
+	entries := make([]fuse.DirEntry, 0, len(merged))
 	for _, e := range merged {
 		entries = append(entries, fuse.DirEntry{
 			Name: e.Name,
@@ -416,50 +387,41 @@ func (n *OverlayNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 }
 
 func (n *OverlayNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	rel := n.relPath()
-	cgroupID := getCgroupID(ctx)
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return nil, 0, errno
+	}
 	isWrite := flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0
 
-	// Check whiteout: if the file is marked as deleted, reject the open
-	// even if the kernel served a stale cached inode.
-	if wp := whiteoutPath(n.root.overlayDir, rel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
+	var openPath string
+	onStage := false
+	if isWrite {
+		// Version-on-write: any writable open creates (or reuses) the
+		// epoch's own version. A writable MAP_SHARED mapping requires an
+		// O_RDWR fd, so its page writeback flows through this stage fd and
+		// is captured here (mmap write tracking). NOTE: dirty pages of a
+		// still-live MAP_SHARED mapping that a frozen process has not yet
+		// written back are captured by quiesceMappings at commit time.
+		res := shadowBackend.Resolve(epochID, n.origPath())
+		if !res.Exists {
 			return nil, 0, syscall.ENOENT
 		}
-	}
-	// Check ancestor whiteouts: a deleted parent hides this file.
-	if hasAncestorWhiteout(n.root.overlayDir, rel) {
-		return nil, 0, syscall.ENOENT
-	}
-
-	var openPath string
-	onOverlay := false
-	if isWrite {
-		// Copy-up on any writable open. A writable MAP_SHARED mapping requires
-		// an O_RDWR fd, so its page writeback flows through this overlay fd and
-		// is captured + marked dirty here (mmap write tracking). MAP_PRIVATE
-		// mappings never reach the file and need no tracking. NOTE: dirty pages
-		// of a still-live MAP_SHARED mapping that a frozen process has not yet
-		// written back are outside the rollback/commit guarantee until full
-		// mapping pin + writeback quiescence is implemented; flushAgentFDs at
-		// commit captures already-written-back pages.
-		op, err := shadowBackend.PrepareWrite(cgroupID, n.origPath())
+		sp, err := shadowBackend.PrepareWrite(epochID, n.origPath())
 		if err != nil {
 			log.Printf("[overlay] PrepareWrite failed: %v", err)
-			return nil, 0, syscall.EIO
+			return nil, 0, fs.ToErrno(err)
 		}
-		openPath = op
-		onOverlay = true
+		openPath = sp
+		onStage = true
 	} else {
-		shadowBackend.RecordReadOpen(cgroupID, n.origPath())
-		// Read: prefer overlay if it has a copy.
-		overlayPath := filepath.Join(n.root.overlayDir, rel)
-		if _, err := os.Lstat(overlayPath); err == nil {
-			openPath = overlayPath
-			onOverlay = true
-		} else {
-			openPath = filepath.Join(n.root.origDir, rel)
+		// Read: resolve the epoch's view; Resolve records the read-from
+		// edge on the actually-observed version.
+		res := shadowBackend.Resolve(epochID, n.origPath())
+		if !res.Exists {
+			return nil, 0, syscall.ENOENT
 		}
+		openPath = res.PhysicalPath
+		onStage = res.Version != 0
 	}
 
 	fd, err := syscall.Open(openPath, int(flags), 0)
@@ -467,31 +429,34 @@ func (n *OverlayNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 		return nil, 0, fs.ToErrno(err)
 	}
 	tfd := backend.NewTrackedFD(fd)
-	shadowBackend.RegisterFD(cgroupID, tfd)
+	shadowBackend.RegisterFD(epochID, tfd)
 	return &trackedHandle{
 		LoopbackFile: fs.NewLoopbackFile(fd).(*fs.LoopbackFile),
 		tfd:          tfd,
-		cgroupID:     cgroupID,
-		onOverlay:    onOverlay,
+		epochID:      epochID,
+		onStage:      onStage,
 	}, 0, 0
 }
 
 func (n *OverlayNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	cgroupID := getCgroupID(ctx)
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return nil, nil, 0, errno
+	}
 	origChild := n.origChildPath(name)
-	// Check ancestor whiteouts: reject create inside a deleted directory
-	// even if the kernel served a stale cached inode for the parent.
-	childRel := filepath.Join(n.relPath(), name)
-	if hasAncestorWhiteout(n.root.overlayDir, childRel) {
+	// Reject create inside a deleted directory even if the kernel served a
+	// stale cached inode for the parent (ancestor whiteout check happens
+	// inside Resolve on the PARENT path).
+	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" && !parentRes.Exists {
 		return nil, nil, 0, syscall.ENOENT
 	}
-	overlayPath, err := shadowBackend.PrepareWrite(cgroupID, origChild)
+	stagePath, err := shadowBackend.PrepareCreate(epochID, origChild)
 	if err != nil {
 		log.Printf("[overlay] Create PrepareWrite failed: %v", err)
-		return nil, nil, 0, syscall.EIO
+		return nil, nil, 0, fs.ToErrno(err)
 	}
 
-	fd, err := syscall.Open(overlayPath, int(flags)|syscall.O_CREAT, mode)
+	fd, err := syscall.Open(stagePath, int(flags)|syscall.O_CREAT, mode)
 	if err != nil {
 		return nil, nil, 0, fs.ToErrno(err)
 	}
@@ -505,31 +470,34 @@ func (n *OverlayNode) Create(ctx context.Context, name string, flags uint32, mod
 	stable := fs.StableAttr{Mode: st.Mode & syscall.S_IFMT, Ino: st.Ino}
 	child := n.NewInode(ctx, &OverlayNode{root: n.root}, stable)
 	tfd := backend.NewTrackedFD(fd)
-	shadowBackend.RegisterFD(cgroupID, tfd)
+	shadowBackend.RegisterFD(epochID, tfd)
 	return child, &trackedHandle{
 		LoopbackFile: fs.NewLoopbackFile(fd).(*fs.LoopbackFile),
 		tfd:          tfd,
-		cgroupID:     cgroupID,
-		onOverlay:    true,
+		epochID:      epochID,
+		onStage:      true,
 	}, 0, 0
 }
 
-// xattrReadPath returns the path to read xattrs from: the overlay copy when
-// one exists (so an agent sees its own copy-up + modifications), else orig.
-func (n *OverlayNode) xattrReadPath() string {
-	rel := n.relPath()
-	op := filepath.Join(n.root.overlayDir, rel)
-	if _, err := os.Lstat(op); err == nil {
-		return op
+// xattrReadPath resolves the path xattrs are read from: the epoch's view of
+// the file (its own or the visible version, else backing).
+func (n *OverlayNode) xattrReadPath(epochID backend.EpochID) (string, syscall.Errno) {
+	res := shadowBackend.Resolve(epochID, n.origPath())
+	if !res.Exists {
+		return "", syscall.ENOENT
 	}
-	return filepath.Join(n.root.origDir, rel)
+	return res.PhysicalPath, 0
 }
 
 // Link creates a hard link `name` in this directory pointing at `target`,
-// tracked speculatively (see backend.RecordLink). On commit the link is
-// promoted as a real hard link on the orig FS; on rollback it is discarded.
+// tracked as an OpLink version (see backend.RecordLink). On promotion the
+// link is recreated as a real hard link on the backing FS; on rollback it is
+// discarded.
 func (n *OverlayNode) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	cgroupID := getCgroupID(ctx)
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return nil, errno
+	}
 	tgt, ok := target.(*OverlayNode)
 	if !ok {
 		return nil, syscall.EXDEV
@@ -537,18 +505,16 @@ func (n *OverlayNode) Link(ctx context.Context, target fs.InodeEmbedder, name st
 	targetOrig := tgt.origPath()
 	linkOrig := n.origChildPath(name)
 
-	childRel := filepath.Join(n.relPath(), name)
-	if hasAncestorWhiteout(n.root.overlayDir, childRel) {
+	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" && !parentRes.Exists {
 		return nil, syscall.ENOENT
 	}
-	if err := shadowBackend.RecordLink(cgroupID, targetOrig, linkOrig); err != nil {
+	stagePath, err := shadowBackend.RecordLink(epochID, targetOrig, linkOrig)
+	if err != nil {
 		log.Printf("[overlay] RecordLink failed: %v", err)
 		return nil, fs.ToErrno(err)
 	}
-	// Stat the overlay link to fill the entry (Nlink reflects the shared inode).
-	overlayLink := filepath.Join(n.root.overlayDir, childRel)
 	var st syscall.Stat_t
-	if err := syscall.Lstat(overlayLink, &st); err != nil {
+	if err := syscall.Lstat(stagePath, &st); err != nil {
 		return nil, fs.ToErrno(err)
 	}
 	attrFromStat(&st, &out.Attr)
@@ -558,21 +524,26 @@ func (n *OverlayNode) Link(ctx context.Context, target fs.InodeEmbedder, name st
 }
 
 // Mknod creates a special file (FIFO / socket / char / block device) `name`
-// in this directory, tracked speculatively (see backend.RecordMknod).
+// in this directory, tracked as an OpMknod version.
 func (n *OverlayNode) Mknod(ctx context.Context, name string, mode uint32, rdev uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	cgroupID := getCgroupID(ctx)
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return nil, errno
+	}
 	origChild := n.origChildPath(name)
-	childRel := filepath.Join(n.relPath(), name)
-	if hasAncestorWhiteout(n.root.overlayDir, childRel) {
+	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" && !parentRes.Exists {
 		return nil, syscall.ENOENT
 	}
-	if err := shadowBackend.RecordMknod(cgroupID, origChild, mode, uint64(rdev)); err != nil {
+	if err := shadowBackend.RecordMknod(epochID, origChild, mode, uint64(rdev)); err != nil {
 		log.Printf("[overlay] RecordMknod failed: %v", err)
 		return nil, fs.ToErrno(err)
 	}
-	overlayChild := filepath.Join(n.root.overlayDir, childRel)
+	res := shadowBackend.Resolve(epochID, origChild)
+	if !res.Exists {
+		return nil, syscall.EIO
+	}
 	var st syscall.Stat_t
-	if err := syscall.Lstat(overlayChild, &st); err != nil {
+	if err := syscall.Lstat(res.PhysicalPath, &st); err != nil {
 		return nil, fs.ToErrno(err)
 	}
 	attrFromStat(&st, &out.Attr)
@@ -582,18 +553,34 @@ func (n *OverlayNode) Mknod(ctx context.Context, name string, mode uint32, rdev 
 }
 
 // Getxattr reads one extended attribute (incl. ACLs, which are xattrs) from
-// the agent's current view (overlay copy if present, else orig).
+// the epoch's current view.
 func (n *OverlayNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
-	sz, err := syscall.Getxattr(n.xattrReadPath(), attr, dest)
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return 0, errno
+	}
+	p, errno := n.xattrReadPath(epochID)
+	if errno != 0 {
+		return 0, errno
+	}
+	sz, err := syscall.Getxattr(p, attr, dest)
 	if err != nil {
 		return 0, fs.ToErrno(err)
 	}
 	return uint32(sz), 0
 }
 
-// Listxattr lists extended attribute names from the agent's current view.
+// Listxattr lists extended attribute names from the epoch's current view.
 func (n *OverlayNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
-	sz, err := syscall.Listxattr(n.xattrReadPath(), dest)
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return 0, errno
+	}
+	p, errno := n.xattrReadPath(epochID)
+	if errno != 0 {
+		return 0, errno
+	}
+	sz, err := syscall.Listxattr(p, dest)
 	if err != nil {
 		return 0, fs.ToErrno(err)
 	}
@@ -601,17 +588,20 @@ func (n *OverlayNode) Listxattr(ctx context.Context, dest []byte) (uint32, sysca
 }
 
 // Setxattr sets an extended attribute (incl. ACLs). It first copies the file
-// up (RecordXattrWrite tracks it as a speculative write) so the change lands
-// on the overlay copy; commit's promote rename carries the modified xattrs,
-// and rollback discards the overlay copy leaving orig xattrs intact.
+// up into the epoch's stage tree (RecordXattrWrite versions it) so the
+// change lands on the epoch's own copy; promotion carries the modified
+// xattrs, rollback discards them leaving the backing xattrs intact.
 func (n *OverlayNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
-	cgroupID := getCgroupID(ctx)
-	overlayPath, err := shadowBackend.RecordXattrWrite(cgroupID, n.origPath())
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return errno
+	}
+	stagePath, err := shadowBackend.RecordXattrWrite(epochID, n.origPath())
 	if err != nil {
 		log.Printf("[overlay] Setxattr copy-up failed: %v", err)
 		return fs.ToErrno(err)
 	}
-	if err := syscall.Setxattr(overlayPath, attr, data, int(flags)); err != nil {
+	if err := syscall.Setxattr(stagePath, attr, data, int(flags)); err != nil {
 		return fs.ToErrno(err)
 	}
 	return 0
@@ -619,33 +609,40 @@ func (n *OverlayNode) Setxattr(ctx context.Context, attr string, data []byte, fl
 
 // Removexattr removes an extended attribute, tracked like Setxattr.
 func (n *OverlayNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
-	cgroupID := getCgroupID(ctx)
-	overlayPath, err := shadowBackend.RecordXattrWrite(cgroupID, n.origPath())
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return errno
+	}
+	stagePath, err := shadowBackend.RecordXattrWrite(epochID, n.origPath())
 	if err != nil {
 		log.Printf("[overlay] Removexattr copy-up failed: %v", err)
 		return fs.ToErrno(err)
 	}
-	if err := syscall.Removexattr(overlayPath, attr); err != nil {
+	if err := syscall.Removexattr(stagePath, attr); err != nil {
 		return fs.ToErrno(err)
 	}
 	return 0
 }
 
 func (n *OverlayNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	cgroupID := getCgroupID(ctx)
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return nil, errno
+	}
 	origChild := n.origChildPath(name)
-	// Check ancestor whiteouts: reject mkdir inside a deleted directory.
-	childRel := filepath.Join(n.relPath(), name)
-	if hasAncestorWhiteout(n.root.overlayDir, childRel) {
+	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" && !parentRes.Exists {
 		return nil, syscall.ENOENT
 	}
-	if err := shadowBackend.RecordMkdir(cgroupID, origChild, mode); err != nil {
+	if err := shadowBackend.RecordMkdir(epochID, origChild, mode); err != nil {
 		log.Printf("[overlay] RecordMkdir failed: %v", err)
 		return nil, syscall.EIO
 	}
-	overlayChild := filepath.Join(n.root.overlayDir, n.relPath(), name)
+	res := shadowBackend.Resolve(epochID, origChild)
+	if !res.Exists {
+		return nil, syscall.EIO
+	}
 	var st syscall.Stat_t
-	if err := syscall.Lstat(overlayChild, &st); err != nil {
+	if err := syscall.Lstat(res.PhysicalPath, &st); err != nil {
 		return nil, fs.ToErrno(err)
 	}
 	attrFromStat(&st, &out.Attr)
@@ -655,41 +652,24 @@ func (n *OverlayNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 }
 
 func (n *OverlayNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	cgroupID := getCgroupID(ctx)
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return errno
+	}
 	origChild := n.origChildPath(name)
-	// Check whiteout: reject rmdir of an already-deleted path.
-	childRel := filepath.Join(n.relPath(), name)
-	if wp := whiteoutPath(n.root.overlayDir, childRel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
-			return syscall.ENOENT
-		}
-	}
-	if hasAncestorWhiteout(n.root.overlayDir, childRel) {
+	// Resolve rejects an already-deleted path (own or ancestor whiteout)
+	// even when the kernel held a stale cached inode.
+	res := shadowBackend.Resolve(epochID, origChild)
+	if !res.Exists {
 		return syscall.ENOENT
 	}
-	// POSIX rmdir must fail with ENOTEMPTY on non-empty directories.
-	// We must check the merged view (orig + overlay minus whiteouts), not
-	// just the overlay copy: the agent may not have copy-up'd yet, but the
-	// orig dir still has children visible through the merged view.
-	// Re-check whiteout on the child itself AND ancestors before reading:
-	// another agent may have deleted this dir or a parent while the kernel
-	// held a stale cached inode, and MergeReaddir does not consider
-	// ancestor whiteouts — it would return orig children and incorrectly
-	// trigger ENOTEMPTY instead of the correct ENOENT.
-	if wp := whiteoutPath(n.root.overlayDir, childRel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
-			return syscall.ENOENT
-		}
-	}
-	if hasAncestorWhiteout(n.root.overlayDir, childRel) {
-		return syscall.ENOENT
-	}
-	origChildAbs := filepath.Join(n.root.origDir, childRel)
-	overlayChildAbs := filepath.Join(n.root.overlayDir, childRel)
-	if merged, err := backend.MergeReaddir(origChildAbs, overlayChildAbs); err == nil && len(merged) > 0 {
+	// POSIX rmdir must fail with ENOTEMPTY on non-empty directories. Check
+	// the MERGED view (backing + visible versions minus whiteouts), not any
+	// single physical directory.
+	if merged, err := shadowBackend.MergeReaddirVersions(epochID, origChild); err == nil && len(merged) > 0 {
 		return syscall.ENOTEMPTY
 	}
-	if err := shadowBackend.RecordRmdir(cgroupID, origChild); err != nil {
+	if err := shadowBackend.RecordRmdir(epochID, origChild); err != nil {
 		log.Printf("[overlay] RecordRmdir failed: %v", err)
 		return syscall.EIO
 	}
@@ -697,19 +677,16 @@ func (n *OverlayNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *OverlayNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	cgroupID := getCgroupID(ctx)
-	origChild := n.origChildPath(name)
-	// Check whiteout: reject unlink of an already-deleted path.
-	childRel := filepath.Join(n.relPath(), name)
-	if wp := whiteoutPath(n.root.overlayDir, childRel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
-			return syscall.ENOENT
-		}
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return errno
 	}
-	if hasAncestorWhiteout(n.root.overlayDir, childRel) {
+	origChild := n.origChildPath(name)
+	res := shadowBackend.Resolve(epochID, origChild)
+	if !res.Exists {
 		return syscall.ENOENT
 	}
-	if err := shadowBackend.RecordUnlink(cgroupID, origChild); err != nil {
+	if err := shadowBackend.RecordUnlink(epochID, origChild); err != nil {
 		log.Printf("[overlay] RecordUnlink failed: %v", err)
 		return syscall.EIO
 	}
@@ -717,7 +694,10 @@ func (n *OverlayNode) Unlink(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *OverlayNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	cgroupID := getCgroupID(ctx)
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return errno
+	}
 	oldOrig := n.origChildPath(name)
 	newParentNode, ok := newParent.(*OverlayNode)
 	if !ok {
@@ -725,103 +705,77 @@ func (n *OverlayNode) Rename(ctx context.Context, name string, newParent fs.Inod
 	}
 	newOrig := newParentNode.origChildPath(newName)
 
-	// Whiteout checks on source path: reject rename of a deleted file
-	// even if the kernel served a stale cached inode.
-	oldRel := filepath.Join(n.relPath(), name)
-	if wp := whiteoutPath(n.root.overlayDir, oldRel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
-			return syscall.ENOENT
-		}
+	// Source must exist in the epoch's view (Resolve also rejects deleted
+	// ancestors and records the read-from edge on the moved version).
+	srcRes := shadowBackend.Resolve(epochID, oldOrig)
+	if !srcRes.Exists {
+		return syscall.ENOENT
 	}
-	if hasAncestorWhiteout(n.root.overlayDir, oldRel) {
+	var srcSt syscall.Stat_t
+	if err := syscall.Lstat(srcRes.PhysicalPath, &srcSt); err != nil {
+		return syscall.ENOENT
+	}
+	// Destination: renaming ONTO a deleted name is legal (it overwrites the
+	// whiteout); only a deleted destination PARENT is an error.
+	if pRes := shadowBackend.Resolve(epochID, filepath.Dir(newOrig)); filepath.Clean(filepath.Dir(newOrig)) != filepath.Clean(n.root.origDir) && !pRes.Exists {
 		return syscall.ENOENT
 	}
 
-	// Whiteout checks on destination: renaming INTO a directly-whiteout'd
-	// path is LEGAL — it overwrites a name another agent deleted. We must NOT
-	// reject on a direct destination whiteout; RecordRename clears it and
-	// records dstHadWh so a rollback restores it. Only reject when an ANCESTOR
-	// directory is deleted (the destination location itself is gone).
-	newRel := filepath.Join(newParentNode.relPath(), newName)
-	if hasAncestorWhiteout(n.root.overlayDir, newRel) {
-		return syscall.ENOENT
-	}
-
-	// POSIX rename type/emptiness validation. Without this the overlay
-	// rename would happen, but a later promote would call os.Rename on
-	// orig and fail with EISDIR / ENOTDIR / ENOTEMPTY — leaving the agent
-	// permanently un-finalisable. Validate against the merged view that
-	// the user actually sees.
-	// Re-check whiteouts before reading merged state: another agent may
-	// have deleted the source or destination while the kernel held stale
-	// cached inodes, and MergeReaddir does not consider ancestor whiteouts.
-	if wp := whiteoutPath(n.root.overlayDir, oldRel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
-			return syscall.ENOENT
-		}
-	}
-	if hasAncestorWhiteout(n.root.overlayDir, oldRel) {
-		return syscall.ENOENT
-	}
-	// (No direct destination-whiteout reject here either: renaming over a
-	// whiteout'd name is a legal overwrite — see above.)
-	if hasAncestorWhiteout(n.root.overlayDir, newRel) {
-		return syscall.ENOENT
-	}
-	_, srcSt, srcExists := n.root.resolveStat(oldRel)
-	if !srcExists {
-		return syscall.ENOENT
-	}
-	if _, dstSt, dstExists := n.root.resolveStat(newRel); dstExists {
-		srcIsDir := (srcSt.Mode & syscall.S_IFMT) == syscall.S_IFDIR
-		dstIsDir := (dstSt.Mode & syscall.S_IFMT) == syscall.S_IFDIR
-		switch {
-		case srcIsDir && !dstIsDir:
-			return syscall.ENOTDIR
-		case !srcIsDir && dstIsDir:
-			return syscall.EISDIR
-		case srcIsDir && dstIsDir:
-			// POSIX: dst dir must be empty.
-			dstOrigAbs := filepath.Join(n.root.origDir, newRel)
-			dstOverlayAbs := filepath.Join(n.root.overlayDir, newRel)
-			if merged, err := backend.MergeReaddir(dstOrigAbs, dstOverlayAbs); err == nil && len(merged) > 0 {
-				return syscall.ENOTEMPTY
+	// POSIX rename type/emptiness validation against the merged view the
+	// user actually sees. Without this the version pair would be recorded,
+	// but a later promotion would fail with EISDIR / ENOTDIR / ENOTEMPTY —
+	// leaving the epoch permanently un-finalisable.
+	dstRes := shadowBackend.Resolve(epochID, newOrig)
+	if dstRes.Exists {
+		var dstSt syscall.Stat_t
+		if err := syscall.Lstat(dstRes.PhysicalPath, &dstSt); err == nil {
+			srcIsDir := (srcSt.Mode & syscall.S_IFMT) == syscall.S_IFDIR
+			dstIsDir := (dstSt.Mode & syscall.S_IFMT) == syscall.S_IFDIR
+			switch {
+			case srcIsDir && !dstIsDir:
+				return syscall.ENOTDIR
+			case !srcIsDir && dstIsDir:
+				return syscall.EISDIR
+			case srcIsDir && dstIsDir:
+				// POSIX: dst dir must be empty (merged view).
+				if merged, err := shadowBackend.MergeReaddirVersions(epochID, newOrig); err == nil && len(merged) > 0 {
+					return syscall.ENOTEMPTY
+				}
 			}
 		}
 	}
 
-	if err := shadowBackend.RecordRename(cgroupID, oldOrig, newOrig); err != nil {
+	if err := shadowBackend.RecordRename(epochID, oldOrig, newOrig); err != nil {
 		log.Printf("[overlay] RecordRename failed: %v", err)
 		return fs.ToErrno(err)
 	}
 	return 0
 }
 
-// Setattr handles chmod/chown/truncate/utimes by routing to the overlay
-// copy. Truncation triggers a copy-up so the orig file is never resized.
+// Setattr handles chmod/chown/truncate/utimes by routing to the epoch's own
+// version. Truncation triggers a copy-up so the backing file is never
+// resized.
 func (n *OverlayNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	rel := n.relPath()
 	if rel == "" {
 		// Root: nothing meaningful to update on the orig side.
 		return n.Getattr(ctx, fh, out)
 	}
-
-	// Check whiteout FIRST, before any attribute modification. This
-	// ensures consistent behaviour whether the call arrives via an open
-	// file handle or a path-based lookup, and prevents stale cached
-	// inodes from modifying already-deleted files.
-	if wp := whiteoutPath(n.root.overlayDir, rel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
-			return syscall.ENOENT
-		}
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return errno
 	}
-	if hasAncestorWhiteout(n.root.overlayDir, rel) {
+
+	// Reject before any attribute modification when the path is hidden by a
+	// whiteout (own or ancestor) — stale cached inodes must not modify
+	// already-deleted files.
+	if res := shadowBackend.Resolve(epochID, n.origPath()); !res.Exists {
 		return syscall.ENOENT
 	}
 
-	if th, ok := fh.(*trackedHandle); ok && th.onOverlay {
-		// Fast path: the fd is known to point at an overlay copy, so
-		// applying chmod / chown / truncate / utimens via the fd is
+	if th, ok := fh.(*trackedHandle); ok && th.onStage && th.epochID == epochID {
+		// Fast path: the fd is known to point at this epoch's stage copy,
+		// so applying chmod / chown / truncate / utimens via the fd is
 		// safe and avoids re-running PrepareWrite.
 		if sa, ok := fh.(fs.FileSetattrer); ok {
 			if errno := sa.Setattr(ctx, in, out); errno != 0 {
@@ -830,53 +784,47 @@ func (n *OverlayNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.Se
 			return n.Getattr(ctx, fh, out)
 		}
 	}
-	// Either fh is nil, fh is a non-trackedHandle, or fh's fd points
-	// directly at the orig file (R-only open with no overlay copy at
-	// open time). In those cases delegating to fh.Setattr would mutate
-	// the orig file (e.g. fchmod / fchown / futimens do not require a
-	// writable fd) — violating the "orig is immutable" invariant and
-	// leaving no UndoLog entry. Force the path-based route so that
-	// PrepareWrite materialises an overlay copy and records the
-	// attribute change for rollback.
-
-	cgroupID := getCgroupID(ctx)
-	overlayPath, err := shadowBackend.PrepareWrite(cgroupID, n.origPath())
+	// Either fh is nil, fh points at another epoch's version, or fh's fd
+	// points directly at the backing file (R-only open). Delegating to
+	// fh.Setattr there would mutate state outside this epoch's version —
+	// violating the "backing is immutable" invariant. Force the path-based
+	// route so PrepareWrite materialises the epoch's own version first.
+	stagePath, err := shadowBackend.PrepareWrite(epochID, n.origPath())
 	if err != nil {
-		return syscall.EIO
+		return fs.ToErrno(err)
 	}
 
 	if size, ok := in.GetSize(); ok {
-		if err := os.Truncate(overlayPath, int64(size)); err != nil {
+		if err := os.Truncate(stagePath, int64(size)); err != nil {
 			return fs.ToErrno(err)
 		}
 	}
 	if mode, ok := in.GetMode(); ok {
-		if err := os.Chmod(overlayPath, os.FileMode(mode)); err != nil {
+		if err := os.Chmod(stagePath, os.FileMode(mode)); err != nil {
 			return fs.ToErrno(err)
 		}
 	}
 	if uid, uok := in.GetUID(); uok {
 		gid, _ := in.GetGID()
-		if err := os.Chown(overlayPath, int(uid), int(gid)); err != nil {
+		if err := os.Chown(stagePath, int(uid), int(gid)); err != nil {
 			return fs.ToErrno(err)
 		}
 	} else if gid, gok := in.GetGID(); gok {
-		if err := os.Chown(overlayPath, -1, int(gid)); err != nil {
+		if err := os.Chown(stagePath, -1, int(gid)); err != nil {
 			return fs.ToErrno(err)
 		}
 	}
-	// Time updates: each of atime/mtime can be (a) a specific value
-	// (FATTR_ATIME / FATTR_MTIME), (b) "now" (FATTR_ATIME_NOW /
-	// FATTR_MTIME_NOW), or (c) untouched. Untouched fields must keep their
-	// existing on-disk value, so when only one of the two is set we must
-	// read the other from the overlay file rather than passing zero.
+	// Time updates: each of atime/mtime can be (a) a specific value, (b)
+	// "now", or (c) untouched. Untouched fields must keep their existing
+	// on-disk value, so when only one of the two is set the other is read
+	// from the stage file rather than passed as zero.
 	atimeSet := in.Valid&(fuse.FATTR_ATIME|fuse.FATTR_ATIME_NOW) != 0
 	mtimeSet := in.Valid&(fuse.FATTR_MTIME|fuse.FATTR_MTIME_NOW) != 0
 	if atimeSet || mtimeSet {
 		now := time.Now()
 		var curATime, curMTime time.Time
 		if !(atimeSet && mtimeSet) {
-			if st, err := os.Stat(overlayPath); err == nil {
+			if st, err := os.Stat(stagePath); err == nil {
 				curMTime = st.ModTime()
 				if sysStat, ok := st.Sys().(*syscall.Stat_t); ok {
 					curATime = time.Unix(sysStat.Atim.Sec, sysStat.Atim.Nsec)
@@ -902,7 +850,7 @@ func (n *OverlayNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.Se
 		default:
 			mtime = curMTime
 		}
-		if err := os.Chtimes(overlayPath, atime, mtime); err != nil {
+		if err := os.Chtimes(stagePath, atime, mtime); err != nil {
 			return fs.ToErrno(err)
 		}
 	}
@@ -910,36 +858,26 @@ func (n *OverlayNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.Se
 	return n.Getattr(ctx, fh, out)
 }
 
-// Readlink resolves a symlink either from overlay or orig.
+// Readlink resolves a symlink in the epoch's view.
 func (n *OverlayNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
-	rel := n.relPath()
-	// Check whiteout: stale cached inode should not resolve a deleted symlink.
-	if wp := whiteoutPath(n.root.overlayDir, rel); wp != "" {
-		if _, err := os.Lstat(wp); err == nil {
-			return nil, syscall.ENOENT
-		}
+	epochID, errno := epochForCtx(ctx)
+	if errno != 0 {
+		return nil, errno
 	}
-	// Check ancestor whiteouts: a deleted parent hides this symlink.
-	if hasAncestorWhiteout(n.root.overlayDir, rel) {
+	res := shadowBackend.Resolve(epochID, n.origPath())
+	if !res.Exists {
 		return nil, syscall.ENOENT
 	}
-	// Overlay takes precedence: if overlay exists at this path it represents
-	// the agent-visible state. If it is NOT a symlink (e.g. the path was
-	// replaced by a regular file), we must NOT silently fall back to orig's
-	// stale symlink — return EINVAL like the kernel does for readlink on a
-	// non-symlink.
-	overlayPath := filepath.Join(n.root.overlayDir, rel)
-	if st, err := os.Lstat(overlayPath); err == nil {
-		if st.Mode()&os.ModeSymlink == 0 {
-			return nil, syscall.EINVAL
-		}
-		target, err := os.Readlink(overlayPath)
-		if err != nil {
-			return nil, fs.ToErrno(err)
-		}
-		return []byte(target), 0
+	// If the resolved object is NOT a symlink (e.g. the path was replaced
+	// by a regular file), return EINVAL like the kernel does.
+	st, err := os.Lstat(res.PhysicalPath)
+	if err != nil {
+		return nil, fs.ToErrno(err)
 	}
-	target, err := os.Readlink(filepath.Join(n.root.origDir, rel))
+	if st.Mode()&os.ModeSymlink == 0 {
+		return nil, syscall.EINVAL
+	}
+	target, err := os.Readlink(res.PhysicalPath)
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
@@ -951,7 +889,7 @@ func (n *OverlayNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 func main() {
 	log.SetFlags(log.Lmicroseconds)
 	debug := flag.Bool("debug", false, "print debugging messages.")
-	staging := flag.String("staging", "", "staging directory for overlay (required)")
+	staging := flag.String("staging", "", "staging directory for the version store (required)")
 	sockPath := flag.String("sock", "", "Unix socket path for control API (optional)")
 	allowOther := flag.Bool("allow-other", false, "allow other users to access the mount")
 	flag.Parse()
@@ -965,11 +903,10 @@ func main() {
 	origDir := flag.Arg(1)
 	stagingDir := *staging
 
-	// Harden the control plane (issue #2): forbid gaining privileges via a
-	// setuid/setgid bit. Enabled only when already root: FUSE (un)mount shells
-	// out to the setuid-root `fusermount3`, which a NON-root daemon relies on to
-	// elevate -- no_new_privs would break that. A root daemon never needs to
-	// elevate, so enabling it there is safe and is inherited by any child.
+	// Harden the control plane: forbid gaining privileges via a
+	// setuid/setgid bit. Enabled only when already root: FUSE (un)mount
+	// shells out to the setuid-root `fusermount3`, which a NON-root daemon
+	// relies on to elevate -- no_new_privs would break that.
 	if os.Geteuid() == 0 {
 		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 			log.Printf("[main] Warning: PR_SET_NO_NEW_PRIVS failed: %v -- continuing", err)
@@ -983,10 +920,7 @@ func main() {
 	}
 
 	root := &OverlayNode{
-		root: &OverlayRoot{
-			origDir:    origDir,
-			overlayDir: shadowBackend.OverlayDir(),
-		},
+		root: &OverlayRoot{origDir: origDir},
 	}
 
 	sec := time.Second
@@ -998,8 +932,7 @@ func main() {
 			AllowOther:        *allowOther,
 			ExtraCapabilities: fuse.CAP_ATOMIC_O_TRUNC,
 			// Enable POSIX (fcntl) and BSD (flock) advisory file locking so
-			// the trackedHandle lock passthrough (Getlk/Setlk/Setlkw/Flock)
-			// is exercised by the kernel.
+			// the trackedHandle lock passthrough is exercised by the kernel.
 			EnableLocks: true,
 		},
 	}
@@ -1007,17 +940,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("Mount fail: %v\n", err)
 	}
-	fmt.Printf("Mounted! orig=%q overlay=%q\n", origDir, shadowBackend.OverlayDir())
+	fmt.Printf("Mounted! orig=%q staging=%q\n", origDir, shadowBackend.StagingDir())
 
 	// Tell the backend the mountpoint so commit-time writable-MAP_SHARED
-	// quiescence can match an agent's /proc/<pid>/maps entries to overlay copies.
+	// quiescence can match /proc/<pid>/maps entries to stage copies.
 	shadowBackend.SetMountDir(mntDir)
 
-	// Rollback removes overlay files out-of-band (via the control socket, not
-	// through the FUSE data path), so the kernel's dentry cache (EntryTimeout)
-	// keeps serving stale positive entries for paths whose overlay copy was
-	// just deleted — most visibly the destination of a rolled-back rename.
-	// Invalidate those entries so the next lookup re-resolves the merged view.
+	// Rollback removes versions out-of-band (via the control socket, not
+	// through the FUSE data path), so the kernel's dentry cache
+	// (EntryTimeout) keeps serving stale positive entries for paths whose
+	// version was just deleted. Invalidate those entries so the next lookup
+	// re-resolves the merged view.
 	rootInode := root.EmbeddedInode()
 	shadowBackend.SetInvalidateCallback(func(paths []string) {
 		for _, p := range paths {

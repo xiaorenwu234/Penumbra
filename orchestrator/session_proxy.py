@@ -37,15 +37,338 @@ demo/test_programs) is used to place bash into the cgroup atomically.
 """
 
 import argparse
+import ctypes
+import fcntl
 import itertools
 import json
 import os
 import re
 import signal
 import socket
+import stat
 import sys
 import time
 import uuid
+from dataclasses import dataclass
+
+
+# ──────────────────────────── Mount namespace helpers ───────────────────────
+
+# mount(2) flag constants (see <sys/mount.h>).
+_MS_RDONLY     = 0x00000001
+_MS_NOSUID     = 0x00000002
+_MS_NODEV      = 0x00000004
+_MS_NOEXEC     = 0x00000008
+_MS_BIND       = 0x00001000
+_MS_REC        = 0x00004000
+_MS_REMOUNT    = 0x00000020
+_MS_PRIVATE    = 0x00040000
+_MS_MOVE       = 0x00008000
+
+# MNT_DETACH for umount2.
+_MNT_DETACH    = 0x00000002
+
+_libc = ctypes.CDLL("libc.so.6", use_errno=True)
+_libc.mount.argtypes = [
+    ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+    ctypes.c_ulong, ctypes.c_void_p,
+]
+_libc.mount.restype = ctypes.c_int
+_libc.umount2.argtypes = [ctypes.c_char_p, ctypes.c_int]
+_libc.umount2.restype = ctypes.c_int
+
+
+def _mount(source, target, fstype, flags, data=None):
+    """Thin wrapper for the mount(2) syscall.
+
+    Raises OSError(errno, strerror, target) on failure.
+    """
+    src = source.encode() if source else None
+    tgt = target.encode()
+    fs = fstype.encode() if fstype else None
+    dat = data.encode() if data else None
+    ret = _libc.mount(src, tgt, fs, ctypes.c_ulong(flags), dat)
+    if ret != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), target)
+
+
+def _umount2(target, flags=0):
+    """Wrapper for umount2(2)."""
+    tgt = target.encode()
+    ret = _libc.umount2(tgt, flags)
+    if ret != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), target)
+
+
+# ──────────────────────────── pidfd helpers ──────────────────────────────────
+
+# pidfd_open(2) / pidfd_getfd(2) syscall numbers (generic numbering, same on
+# x86_64 and aarch64).  pidfd_getfd obtains an fd that refers to the SAME open
+# file description as the target's fd, so lseek(2) / fcntl(F_SETFL) on it take
+# effect on the description shared with the baseline — this is what makes fd
+# offset/flag rollback actually possible from userspace.  Linux >= 5.6.
+_SYS_PIDFD_OPEN  = 434
+_SYS_PIDFD_GETFD = 438
+
+_libc.syscall.restype = ctypes.c_long
+
+
+def _pidfd_open(pid: int) -> int:
+    fd = _libc.syscall(ctypes.c_long(_SYS_PIDFD_OPEN),
+                       ctypes.c_int(pid), ctypes.c_uint(0))
+    if fd < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    return fd
+
+
+def _pidfd_getfd(pidfd: int, target_fd: int) -> int:
+    fd = _libc.syscall(ctypes.c_long(_SYS_PIDFD_GETFD),
+                       ctypes.c_int(pidfd), ctypes.c_int(target_fd),
+                       ctypes.c_uint(0))
+    if fd < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    return fd
+
+
+_pidfd_supported_cache = None
+
+
+def _pidfd_supported() -> bool:
+    """Probe once whether pidfd_open/pidfd_getfd are usable (kernel >= 5.6).
+
+    The result is cached for the lifetime of the process.  The probe uses a
+    freshly opened /dev/null fd so it does not depend on stdio state.
+    """
+    global _pidfd_supported_cache
+    if _pidfd_supported_cache is None:
+        try:
+            probe = os.open("/dev/null", os.O_RDONLY)
+            try:
+                pidfd = _pidfd_open(os.getpid())
+                try:
+                    dupfd = _pidfd_getfd(pidfd, probe)
+                    os.close(dupfd)
+                finally:
+                    os.close(pidfd)
+            finally:
+                os.close(probe)
+            _pidfd_supported_cache = True
+        except OSError:
+            _pidfd_supported_cache = False
+    return _pidfd_supported_cache
+
+
+# ──────────────────────────── Speculation Domain Launcher ───────────────────
+
+class SpeculationDomainLauncher:
+    """Creates a closed speculation domain via mount-namespace isolation.
+
+    Called in the child process after fork(), before exec().  Sets up:
+
+    1.  Mount namespace (CLONE_NEWNS) — isolates all mount changes from the
+        parent (the orchestrator / ShadowFS daemon).
+    2.  Read-only root filesystem — blocks direct writes to host paths.
+        The only writable mounts are:
+          • ShadowFS (FUSE, separate mount — versioned, rollback-safe)
+          • /sys/fs/cgroup (separate mount — needed by cgroup_exec)
+          • Per-candidate tmpfs at /tmp, /dev/shm, /var/tmp, /run (ephemeral)
+    3.  Per-candidate tmpfs at /dev/shm — the host's shared tmpfs is a
+        persistent write channel that bypasses ShadowFS entirely (POSIX shm
+        files, host-visible content), so it is replaced before anything
+        else.  The ShadowFS preserve staging point lives inside it.
+    4.  Per-candidate tmpfs at /tmp — discarded on rollback.  If the ShadowFS
+        mount lives under /tmp it is preserved by bind-mounting it aside,
+        mounting the tmpfs, then bind-mounting it back.
+    5.  Backing directory masked — the candidate cannot read or write the
+        ShadowFS staging/lower directories directly, preventing bypass.
+    6.  Dangerous escape vectors masked — /proc/kcore, /proc/bus,
+        /sys/firmware, etc. are covered (directories with read-only tmpfs,
+        files with a read-only /dev/null bind-mount).
+
+    Fail-closed: every step that guards a concrete escape channel must
+    succeed when its target exists (unshare, private mount, /dev/shm, /tmp,
+    root remount, /proc//sys remount, backing-dir and masked-path covers).
+    Any failure raises OSError and the caller aborts the launch (exit 126)
+    rather than running the workload in a partially-isolated domain.
+    """
+
+    # Paths to mask with read-only tmpfs (block information leakage / escape).
+    _MASKED_PATHS = (
+        "/proc/kcore",
+        "/proc/bus",
+        "/proc/kallsyms",
+        "/sys/firmware",
+        "/sys/kernel",
+    )
+
+    # Ephemeral tmpfs mount points (per-candidate, discarded on rollback).
+    # /tmp is handled specially (ShadowFS may live there).
+    _TMPFS_PATHS = ("/var/tmp", "/run")
+
+    def __init__(self, backing_dir=None, shadowfs_mount=None,
+                 require_isolation=True):
+        """
+        Args:
+            backing_dir:     ShadowFS staging/lower directory to mask (block
+                             direct access).  May be a list or single path.
+            shadowfs_mount:  Path where ShadowFS FUSE is mounted.  Used to
+                             preserve the mount when it lives under /tmp.
+            require_isolation: If True (default), fail-closed when namespace
+                             setup fails.  If False, log and continue.
+        """
+        if isinstance(backing_dir, str):
+            backing_dir = [backing_dir]
+        self.backing_dirs = backing_dir or []
+        self.shadowfs_mount = shadowfs_mount
+        self.require_isolation = require_isolation
+
+    def setup_in_child(self):
+        """Set up the mount namespace isolation.
+
+        Must be called in the child process after fork(), before exec().
+        Raises OSError on failure (caller should os._exit(126)).
+        Every step whose target exists is mandatory — there is no silent
+        "except: pass" fallback for a failed cover.
+        """
+        # 1. Create mount namespace.
+        os.unshare(os.CLONE_NEWNS)
+
+        # 2. Make ALL existing mounts private so changes don't propagate
+        #    to the parent namespace (critical: without this, remounting /
+        #    read-only would affect the host).
+        _mount("", "/", None, _MS_REC | _MS_PRIVATE)
+
+        # 3. Replace /dev/shm with a per-candidate tmpfs.  The host's shared
+        #    tmpfs is a persistent write channel that bypasses ShadowFS
+        #    (POSIX shm segments, files the host can read after rollback),
+        #    so it must not leak into the speculation domain.  Mounted now
+        #    because step 4 stages the ShadowFS preserve bind inside it.
+        #    Mandatory when /dev/shm exists.
+        if os.path.isdir("/dev/shm"):
+            _mount("tmpfs", "/dev/shm", "tmpfs",
+                   _MS_NOSUID | _MS_NODEV, "size=64m")
+
+        # 4. Preserve ShadowFS mount if it lives under /tmp.
+        #    Bind-mount it to a temporary location outside /tmp, mount the
+        #    tmpfs, then bind-mount it back.  The staging point sits in the
+        #    private /dev/shm tmpfs from step 3.
+        preserve_path = None
+        if self.shadowfs_mount and self.shadowfs_mount.startswith("/tmp/"):
+            preserve_path = "/dev/shm/.shadowfs-preserve"
+            os.makedirs(preserve_path, exist_ok=True)
+            _mount(self.shadowfs_mount, preserve_path, None, _MS_BIND)
+
+        # 5. Mount per-candidate tmpfs at /tmp.
+        _mount("tmpfs", "/tmp", "tmpfs",
+               _MS_NOSUID | _MS_NODEV, "size=256m")
+
+        # 6. Restore ShadowFS mount if preserved.
+        if preserve_path:
+            os.makedirs(self.shadowfs_mount, exist_ok=True)
+            _mount(preserve_path, self.shadowfs_mount, None, _MS_BIND)
+            _umount2(preserve_path, _MNT_DETACH)
+            try:
+                os.rmdir(preserve_path)
+            except OSError:
+                pass
+
+        # 7. Mount tmpfs at other ephemeral paths.  If the directory exists,
+        #    covering it is mandatory: otherwise the host directory stays
+        #    visible (content leak) instead of being replaced by an
+        #    ephemeral per-candidate store.
+        for p in self._TMPFS_PATHS:
+            if os.path.isdir(p):
+                _mount("tmpfs", p, "tmpfs",
+                       _MS_NOSUID | _MS_NODEV, "size=64m")
+
+        # 8. Remount root as read-only — blocks writes to ALL host paths.
+        #    ShadowFS (FUSE) and cgroup2 are separate mounts, unaffected.
+        _mount("", "/", None, _MS_REMOUNT | _MS_RDONLY)
+
+        # 9. Remount /proc and /sys as read-only to block procfs/sysfs
+        #    escape vectors (e.g. /proc/sysrq-trigger, /proc/sys/*,
+        #    /sys/class/*, /sys/devices/*).  /sys/fs/cgroup is a separate
+        #    submount and remains writable so cgroup_exec can write to
+        #    cgroup.procs.  When the path is a mount point the remount is
+        #    mandatory — a silently skipped remount would leave those
+        #    vectors writable.
+        for p in ("/proc", "/sys"):
+            if os.path.ismount(p):
+                _mount("", p, None, _MS_REMOUNT | _MS_RDONLY)
+
+        # 10. Block access to ShadowFS backing directories (staging, lower).
+        #     Mount a read-only tmpfs over each to prevent direct access.
+        #     Mandatory when the directory exists: a silently skipped cover
+        #     would let the candidate read/write the store behind ShadowFS's
+        #     back and break versioning.  (Dirs under /tmp no longer exist
+        #     after the step-5 tmpfs, so the isdir check skips them.)
+        for bd in self.backing_dirs:
+            if bd and os.path.isdir(bd):
+                _mount("tmpfs", bd, "tmpfs", _MS_RDONLY, "size=1")
+
+        # 11. Mask dangerous escape vectors.  Mandatory when present.
+        for p in self._MASKED_PATHS:
+            if os.path.exists(p):
+                self._mask_path(p)
+
+    @staticmethod
+    def _mask_path(path):
+        """Mask a dangerous path so it cannot be used as an escape vector.
+
+        Directories are covered with a read-only tmpfs.  Non-directories
+        (e.g. /proc/kcore, /proc/kallsyms) are covered by bind-mounting
+        /dev/null over them and remounting the bind read-only — a plain
+        tmpfs mount over a file fails with ENOTDIR, which previously made
+        the cover silently ineffective.
+        """
+        if os.path.isdir(path):
+            _mount("tmpfs", path, "tmpfs", _MS_RDONLY, "size=1")
+        else:
+            _mount("/dev/null", path, None, _MS_BIND)
+            _mount("", path, None,
+                   _MS_REMOUNT | _MS_BIND | _MS_RDONLY)
+
+
+# ──────────────────────────── Admission control ────────────────────────────
+
+class NotAdmissibleError(RuntimeError):
+    """The baseline process is not in a snapshot-safe state for versioning.
+    Raised by _admit_for_versioning; begin_epoch translates this into a
+    'not_admissible' response so the session degrades to non-speculative mode.
+    """
+
+
+class FdRestoreError(RuntimeError):
+    """Baseline fd state could not be losslessly restored on reject.
+
+    Raised by _restore_fds when an fd drifted (or vanished) and the snapshot
+    values could not be written back onto the shared open file description.
+    The epoch IS rejected (baseline resumed), but the caller must treat the
+    rollback as lossy — the session should be torn down rather than trusted.
+    """
+
+
+class PendingSignalError(RuntimeError):
+    """Baseline pending-signal state could not be proven clean on reject.
+
+    Raised after rejecting an epoch if the resumed baseline has any pending
+    signal or if /proc cannot be inspected. Pending signals are unrollbackable
+    user-visible effects, so the recovered session must be treated as lossy.
+    """
+
+
+@dataclass
+class FdSnapshot:
+    """Snapshot of a seekable regular-file fd for rollback restoration."""
+    fd: int
+    dev: int
+    ino: int
+    offset: int    # lseek position at snapshot time
+    flags: int     # fcntl F_GETFL flags at snapshot time
 
 
 # ──────────────────────────── ShadowProc client ────────────────────────────
@@ -102,13 +425,22 @@ class _Session:
 # ──────────────────────────── The proxy ────────────────────────────────────
 class SessionProxy:
     def __init__(self, sock_path, cgroup_root="/sys/fs/cgroup",
-                 cgroup_exec=None, verbose=True):
+                 cgroup_exec=None, verbose=True,
+                 backing_dir=None, shadowfs_mount=None,
+                 require_isolation=True):
         self.client = ShadowProcClient(sock_path)
         self.cgroup_root = cgroup_root
         self.cgroup_exec = cgroup_exec or self._default_cgroup_exec()
         self.verbose = verbose
         self.sessions = {}
         self._sentinel_ids = itertools.count(1)
+        # SpeculationDomainLauncher: creates a mount namespace per candidate
+        # so writes to /tmp, host paths, and backing directories are blocked.
+        self._domain_launcher = SpeculationDomainLauncher(
+            backing_dir=backing_dir,
+            shadowfs_mount=shadowfs_mount,
+            require_isolation=require_isolation,
+        )
 
     # ---- infra helpers -----------------------------------------------------
     @staticmethod
@@ -171,6 +503,320 @@ class SessionProxy:
     def _feed(self, sess, line):
         os.write(sess.fifo_wfd, (line + "\n").encode())
 
+    # ---- Phase 4: admission / snapshot / restore ---------------------------
+    def _admit_for_versioning(self, pid: int) -> None:
+        """Pre-fork admission control: verify the baseline process is in a
+        snapshot-safe state.  Raises NotAdmissibleError if any check fails so
+        the caller can degrade to non-speculative mode instead of producing an
+        unrecoverable rollback.
+        """
+        # 1. Single-threaded (COW fork of a multi-threaded process is unsafe).
+        try:
+            tasks = os.listdir(f"/proc/{pid}/task")
+        except OSError as e:
+            raise NotAdmissibleError(f"cannot read /proc/{pid}/task: {e}")
+        if len(tasks) != 1:
+            raise NotAdmissibleError(
+                f"process has {len(tasks)} threads (must be single-threaded)")
+
+        # 2. No pre-existing descendants (children share fd tables and are
+        #    impossible to roll back atomically).
+        try:
+            with open(f"/proc/{pid}/task/{pid}/children") as fh:
+                children = fh.read().strip()
+        except OSError:
+            children = ""
+        if children:
+            raise NotAdmissibleError(
+                f"process has child processes: {children}")
+
+        # 3. No writable MAP_SHARED mappings (changes are immediately visible
+        #    to other processes and cannot be undone by COW fork).
+        try:
+            with open(f"/proc/{pid}/maps") as fh:
+                for ln in fh:
+                    parts = ln.split()
+                    if len(parts) >= 2:
+                        perms = parts[1]
+                        if "w" in perms and "s" in perms:
+                            path = parts[-1] if len(parts) > 5 else "(anon)"
+                            raise NotAdmissibleError(
+                                f"writable MAP_SHARED mapping: {path}")
+        except OSError as e:
+            raise NotAdmissibleError(f"cannot read /proc/{pid}/maps: {e}")
+
+        # 4. No pending signals (would be delivered on resume and are
+        #    impossible to clear from userspace without ptrace).
+        try:
+            with open(f"/proc/{pid}/status") as fh:
+                for ln in fh:
+                    if ln.startswith("SigPnd:") or ln.startswith("ShdPnd:"):
+                        parts = ln.split()
+                        if len(parts) >= 2:
+                            val = int(parts[1], 16)
+                            if val != 0:
+                                raise NotAdmissibleError(
+                                    f"pending signals ({ln.split(':')[0].strip()}):"
+                                    f" 0x{val:x}")
+        except OSError as e:
+            raise NotAdmissibleError(f"cannot read /proc/{pid}/status: {e}")
+
+        # 5. No controlling terminal: tty state (termios settings, job
+        #    control, ^C/^Z delivery) is shared with whoever owns the
+        #    terminal and can never be rolled back.  tty_nr is field 7 of
+        #    /proc/pid/stat; fields are counted after comm, which may itself
+        #    contain spaces or parens.
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                stat_line = fh.read()
+            after_comm = stat_line[stat_line.rfind(")") + 2:].split()
+            tty_nr = int(after_comm[4])  # field 7 overall (state..tty_nr)
+        except (OSError, ValueError, IndexError) as e:
+            raise NotAdmissibleError(f"cannot parse /proc/{pid}/stat: {e}")
+        if tty_nr != 0:
+            raise NotAdmissibleError(
+                f"process has a controlling terminal (tty_nr={tty_nr})")
+
+        # 6. No active POSIX timers (timer_create): an armed timer fires a
+        #    signal at the baseline after resume — an unrollbackable effect
+        #    with no fd that admission could snapshot.  /proc/pid/timers
+        #    exists only with CONFIG_CHECKPOINT_RESTORE; when the kernel
+        #    does not expose it there is nothing to check.
+        try:
+            with open(f"/proc/{pid}/timers") as fh:
+                timers = fh.read().strip()
+        except FileNotFoundError:
+            timers = ""  # kernel without CONFIG_CHECKPOINT_RESTORE
+        except OSError as e:
+            raise NotAdmissibleError(f"cannot read /proc/{pid}/timers: {e}")
+        if timers:
+            raise NotAdmissibleError(
+                f"process has active POSIX timers:\n{timers}")
+
+        # 7. fd scan: fds 0-2 must be FIFO/regular/char (our stdin/out/err)
+        #    but never a terminal; fds > 2 must be regular files (the only
+        #    type we can snapshot and restore via pidfd_getfd).
+        reg_fds = []
+        try:
+            fd_entries = os.listdir(f"/proc/{pid}/fd")
+        except OSError as e:
+            raise NotAdmissibleError(f"cannot read /proc/{pid}/fd: {e}")
+        for fd_name in fd_entries:
+            if not fd_name.isdigit():
+                continue
+            fd = int(fd_name)
+            try:
+                link = os.readlink(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            try:
+                fd_stat = os.stat(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            mode = fd_stat.st_mode
+            if fd <= 2:
+                if (link.startswith("/dev/pts/")
+                        or link in ("/dev/tty", "/dev/console")
+                        or re.fullmatch(r"/dev/tty\d+", link)):
+                    raise NotAdmissibleError(f"fd {fd} is a terminal: {link}")
+                if (stat.S_ISFIFO(mode) or stat.S_ISREG(mode)
+                        or stat.S_ISCHR(mode)):
+                    continue
+                raise NotAdmissibleError(
+                    f"fd {fd} is not FIFO/regular/char: {link}")
+            # fds > 2: only regular files are snapshot-safe.
+            if stat.S_ISREG(mode):
+                reg_fds.append(fd)
+                continue
+            if stat.S_ISSOCK(mode):
+                raise NotAdmissibleError(f"socket fd {fd}: {link}")
+            if stat.S_ISFIFO(mode):
+                raise NotAdmissibleError(f"pipe/FIFO fd {fd}: {link}")
+            if link.startswith("anon_inode:"):
+                raise NotAdmissibleError(f"special fd {fd}: {link}")
+            if stat.S_ISCHR(mode):
+                raise NotAdmissibleError(f"device fd {fd}: {link}")
+            raise NotAdmissibleError(f"unknown fd type {fd}: {link}")
+
+        # 8. fd restoration capability: with regular fds > 2 the ONLY way to
+        #    roll back candidate offset/flag drift is pidfd_getfd (Linux
+        #    >= 5.6).  If it is unavailable, refuse versioning outright
+        #    instead of silently resuming a drifted baseline on reject.
+        if reg_fds and not _pidfd_supported():
+            raise NotAdmissibleError(
+                f"pidfd_open/pidfd_getfd unavailable and {len(reg_fds)} "
+                f"regular fd(s) > 2 could not be restored on reject")
+
+    def _snapshot_fds(self, pid: int) -> list:
+        """Snapshot all seekable regular-file fds (> 2) of the process.
+        Returns a list of FdSnapshot.  Called after admission passes."""
+        snapshots = []
+        try:
+            fd_entries = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            return snapshots
+        for fd_name in fd_entries:
+            if not fd_name.isdigit():
+                continue
+            fd = int(fd_name)
+            if fd <= 2:
+                continue
+            try:
+                fd_stat = os.stat(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if not stat.S_ISREG(fd_stat.st_mode):
+                continue
+            # Read offset and flags from /proc/pid/fdinfo/N.
+            try:
+                with open(f"/proc/{pid}/fdinfo/{fd}") as fh:
+                    offset = 0
+                    flags = 0
+                    for ln in fh:
+                        if ln.startswith("pos:"):
+                            offset = int(ln.split()[1])
+                        elif ln.startswith("flags:"):
+                            flags = int(ln.split()[1], 8)
+            except OSError:
+                continue
+            snapshots.append(FdSnapshot(
+                fd=fd, dev=fd_stat.st_dev, ino=fd_stat.st_ino,
+                offset=offset, flags=flags))
+        return snapshots
+
+    def _restore_fds(self, pid: int, snapshots: list) -> None:
+        """Restore fd offsets/flags after the baseline is resumed.
+
+        A candidate shares each open file description with the baseline (COW
+        fork copies the fd TABLE, not the descriptions), so any lseek or
+        fcntl it performed drifted the baseline's fd as well.  For each
+        drifted fd we obtain a duplicate via pidfd_getfd — which refers to
+        the SAME open file description — and lseek/F_SETFL the snapshot
+        values back onto it.
+
+        Fail-closed: an fd whose drift cannot be verified or restored raises
+        FdRestoreError, so the epoch's caller learns the rollback was NOT
+        lossless instead of silently resuming a corrupted baseline.
+        Admission guarantees pidfd support whenever regular fds are present,
+        so a failure here is genuinely exceptional.
+        """
+        if not snapshots:
+            return
+        try:
+            pidfd = _pidfd_open(pid)
+        except OSError as e:
+            raise FdRestoreError(f"pidfd_open({pid}) failed: {e}")
+        errors = []
+        try:
+            for snap in snapshots:
+                try:
+                    fd_stat = os.stat(f"/proc/{pid}/fd/{snap.fd}")
+                except OSError:
+                    errors.append(
+                        f"fd {snap.fd} closed by candidate "
+                        f"(was dev={snap.dev} ino={snap.ino})")
+                    continue
+                if fd_stat.st_dev != snap.dev or fd_stat.st_ino != snap.ino:
+                    errors.append(
+                        f"fd {snap.fd} now points to a different file "
+                        f"(dev={fd_stat.st_dev} ino={fd_stat.st_ino} vs "
+                        f"snapshot dev={snap.dev} ino={snap.ino})")
+                    continue
+                cur_offset = cur_flags = None
+                try:
+                    with open(f"/proc/{pid}/fdinfo/{snap.fd}") as fh:
+                        for ln in fh:
+                            if ln.startswith("pos:"):
+                                cur_offset = int(ln.split()[1])
+                            elif ln.startswith("flags:"):
+                                cur_flags = int(ln.split()[1], 8)
+                except OSError as e:
+                    errors.append(f"fd {snap.fd}: cannot read fdinfo: {e}")
+                    continue
+                if cur_offset is None or cur_flags is None:
+                    errors.append(f"fd {snap.fd}: incomplete fdinfo")
+                    continue
+                if cur_offset == snap.offset and cur_flags == snap.flags:
+                    continue
+                # Drifted — restore via the shared open file description.
+                try:
+                    dupfd = _pidfd_getfd(pidfd, snap.fd)
+                except OSError as e:
+                    errors.append(f"fd {snap.fd}: pidfd_getfd failed: {e}")
+                    continue
+                try:
+                    if cur_offset != snap.offset:
+                        os.lseek(dupfd, snap.offset, os.SEEK_SET)
+                    if cur_flags != snap.flags:
+                        # F_SETFL can only change the file-status flags.
+                        setfl_mask = (os.O_APPEND | os.O_NONBLOCK
+                                      | getattr(os, "O_DIRECT", 0)
+                                      | getattr(os, "O_NOATIME", 0)
+                                      | getattr(os, "O_ASYNC", 0))
+                        fcntl.fcntl(dupfd, fcntl.F_SETFL,
+                                    (cur_flags & ~setfl_mask)
+                                    | (snap.flags & setfl_mask))
+                except OSError as e:
+                    errors.append(f"fd {snap.fd}: restore failed: {e}")
+                else:
+                    self._log(f"  fd {snap.fd} restored: offset "
+                              f"{cur_offset}->{snap.offset}, flags "
+                              f"0{cur_flags:o}->0{snap.flags:o}")
+                finally:
+                    os.close(dupfd)
+        finally:
+            os.close(pidfd)
+        if errors:
+            raise FdRestoreError(
+                "baseline fd state could not be fully restored: "
+                + "; ".join(errors))
+
+    def _kill_descendants(self, pid: int) -> None:
+        """Recursively SIGKILL all descendant processes of *pid* (best-effort).
+        Used during reject to clean up background jobs the candidate started.
+        """
+        try:
+            with open(f"/proc/{pid}/task/{pid}/children") as fh:
+                children = fh.read().split()
+        except OSError:
+            return
+        for child_str in children:
+            if not child_str.isdigit():
+                continue
+            child = int(child_str)
+            self._kill_descendants(child)   # depth-first
+            try:
+                os.kill(child, signal.SIGKILL)
+            except OSError:
+                pass
+            self._reap(child)
+
+    def _clear_pending_signals(self, pid: int) -> None:
+        """Verify that reject did not leave pending signals on the baseline.
+
+        Pending signals cannot be cleared from userspace without ptrace.  Since
+        they would be delivered after resume and are therefore unrollbackable,
+        the only safe recovery behavior is fail-closed: raise
+        PendingSignalError so the caller tears down the session instead of
+        trusting a lossy rollback.
+        """
+        try:
+            with open(f"/proc/{pid}/status") as fh:
+                for ln in fh:
+                    if ln.startswith("SigPnd:") or ln.startswith("ShdPnd:"):
+                        parts = ln.split()
+                        if len(parts) >= 2:
+                            val = int(parts[1], 16)
+                            if val != 0:
+                                raise PendingSignalError(
+                                    f"baseline pid {pid} has pending signals "
+                                    f"({ln.split(':')[0].strip()}): 0x{val:x}")
+        except PendingSignalError:
+            raise
+        except (OSError, ValueError) as e:
+            raise PendingSignalError(
+                f"cannot verify pending-signal state for baseline pid {pid}: {e}")
+
     # ---- session lifecycle -------------------------------------------------
     def open_session(self, cgroup_name=None):
         """Launch a bash session inside a fresh monitored cgroup. Returns sid."""
@@ -210,12 +856,39 @@ class SessionProxy:
         pid = os.fork()
         if pid == 0:  # child
             try:
+                # Become a session leader with no controlling terminal BEFORE
+                # anything else: the speculation domain must not inherit the
+                # orchestrator's ctty.  Terminal state is not rollback-safe,
+                # and admission (correctly) rejects baselines that hold one.
+                os.setsid()
+                # Phase: SpeculationDomainLauncher — create a closed mount
+                # namespace before exec.  This must happen BEFORE dup2 so
+                # the namespace is established while we still have full
+                # capability.  The fds (stdin_fd, log_fd) are inherited
+                # across unshare and will be dup2'd onto 0/1/2 afterwards.
+                #
+                # If isolation is required and fails, the child exits 126
+                # (distinct from 127 = exec failure) so the parent can
+                # diagnose the cause.
+                if self._domain_launcher.require_isolation:
+                    self._domain_launcher.setup_in_child()
+                else:
+                    try:
+                        self._domain_launcher.setup_in_child()
+                    except OSError as e:
+                        sys.stderr.write(
+                            f"[proxy] WARNING: domain isolation failed: {e}"
+                            " — continuing without isolation\n")
                 os.dup2(stdin_fd, 0)
                 os.dup2(log_fd, 1)
                 os.dup2(log_fd, 2)
                 os.execv(self.cgroup_exec,
                          [self.cgroup_exec, os.path.join(sess.cgroup_path, "cgroup.procs"),
                           "bash", "--norc"])
+            except OSError as e:
+                # Domain setup failure (unshare, mount, etc.).
+                sys.stderr.write(f"[proxy] domain isolation failed: {e}\n")
+                os._exit(126)
             except Exception:  # noqa: BLE001 — child must not return
                 os._exit(127)
         os.close(stdin_fd)
@@ -224,6 +897,17 @@ class SessionProxy:
         sess.live_pid = pid
         time.sleep(0.5)
         if self._proc_state(pid) is None:
+            # Distinguish domain-isolation failure (126) from exec failure
+            # (127) so the caller gets an actionable error message.
+            try:
+                _, status = os.waitpid(pid, os.WNOHANG)
+                if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 126:
+                    raise RuntimeError(
+                        "bash failed to start: speculation domain isolation "
+                        "failed (requires CAP_SYS_ADMIN for mount namespace). "
+                        "Run as root or set require_isolation=False.")
+            except ChildProcessError:
+                pass
             raise RuntimeError("bash failed to start in cgroup")
 
         self.sessions[sid] = sess
@@ -333,10 +1017,22 @@ class SessionProxy:
     def begin_epoch(self, sid, retries=3):
         """Freeze the live shell as baseline and fork+resume a speculative
         candidate. After this returns, run()/commit()/reject() act on the epoch.
+
+        Phase 4: performs admission control and fd snapshot before freezing
+        so the baseline can be losslessly restored on reject.  If the process
+        is not admissible (multi-threaded, has children, writable MAP_SHARED,
+        pending signals, or non-regular fds), raises NotAdmissibleError so the
+        caller can degrade to non-speculative mode.
         """
         sess = self.sessions[sid]
         if sess.epoch is not None:
             raise RuntimeError("an epoch is already active for this session")
+
+        # Phase 4: admission check — verify the baseline is snapshot-safe BEFORE
+        # any freeze/fork.  This is a precondition, not a transient failure, so
+        # it runs once outside the retry loop.
+        self._admit_for_versioning(sess.live_pid)
+        fd_snapshots = self._snapshot_fds(sess.live_pid)
 
         last_err = None
         for attempt in range(1, retries + 1):
@@ -361,7 +1057,8 @@ class SessionProxy:
                 # only after finalization (commit -> full release).
                 self.client.call("resume_candidate", pid=candidate)
                 time.sleep(0.3)
-                sess.epoch = {"baseline": baseline, "candidate": candidate}
+                sess.epoch = {"baseline": baseline, "candidate": candidate,
+                              "fd_snapshots": fd_snapshots}
                 sess.live_pid = candidate
                 self._log(f"session {sid}: epoch begun — baseline(frozen)={baseline} "
                           f"candidate(live)={candidate}")
@@ -408,6 +1105,13 @@ class SessionProxy:
             raise RuntimeError("no active epoch to commit")
         candidate = sess.epoch["candidate"]
         baseline = sess.epoch["baseline"]
+        # Phase 4: detect candidate exit before commit.  If the candidate died,
+        # we cannot keep it as canonical — raise so the caller can handle the
+        # inconsistency (the FS layer is already finalized at this point).
+        if self._proc_state(candidate) is None:
+            self._reap(candidate)
+            raise RuntimeError(
+                f"candidate {candidate} exited before finalize_commit")
         self.client.call("commit_pid", pid=candidate)
         self._reap(baseline)
         # The candidate is still frozen at its boundary — resume it as canonical.
@@ -422,23 +1126,40 @@ class SessionProxy:
                   f"(baseline {baseline} discarded)")
 
     def reject(self, sid):
-        """Discard the candidate; resume the pristine baseline (lossless)."""
+        """Discard the candidate; resume the pristine baseline (lossless).
+
+        Phase 4: after the baseline is resumed, restores fd offsets/flags
+        from the snapshot via pidfd_getfd (fail-closed: raises FdRestoreError
+        if any fd cannot be restored, in which case the rollback is lossy and
+        the session must not be trusted), kills any descendant processes the
+        candidate started, and fail-closed verifies that the resumed baseline
+        has no pending signals.
+        """
         sess = self.sessions[sid]
         if sess.epoch is None:
             raise RuntimeError("no active epoch to reject")
         candidate = sess.epoch["candidate"]
         baseline = sess.epoch["baseline"]
+        fd_snapshots = sess.epoch.get("fd_snapshots", [])
         # Quiesce the candidate to a stopped read()-boundary first: this mirrors
         # the proven rollback flow (the candidate is frozen before it is
         # discarded), and avoids killing it while it is actively blocked in the
         # pipe read() it shares (COW) with the baseline.
         self._quiesce_epoch(sess)
+        # Kill any descendant processes the candidate started (background jobs,
+        # subshells) BEFORE discarding the candidate so they don't outlive the
+        # epoch.
+        self._kill_descendants(candidate)
         resp = self.client.call("reject_pid", pid=baseline)
         self._reap(candidate)
         # pids[0] is the canonical pid from now on (the resumed baseline).
         pids = resp.get("pids") or [baseline]
         sess.live_pid = pids[0]
         sess.epoch = None
+        # Phase 4: restore fd state and check for pending signals on the
+        # resumed baseline.
+        self._restore_fds(sess.live_pid, fd_snapshots)
+        self._clear_pending_signals(sess.live_pid)
         # Discard the speculative transcript: from the baseline's point of view
         # the epoch never happened, so its output is never released.
         sess.epoch_buffer = []
@@ -533,10 +1254,20 @@ def main(argv=None):
     ap.add_argument("--cgroup-exec", default=None,
                     help="path to cgroup_exec helper (default: demo/test_programs/cgroup_exec)")
     ap.add_argument("--demo", action="store_true", help="run the built-in commit/reject demo")
+    ap.add_argument("--shadowfs-mount", default=None,
+                    help="Path where ShadowFS FUSE is mounted (for domain isolation)")
+    ap.add_argument("--backing-dir", default=None,
+                    help="ShadowFS backing directory to block (colon-separated list)")
+    ap.add_argument("--no-isolation", action="store_true",
+                    help="Disable mount namespace isolation (NOT recommended for production)")
     args = ap.parse_args(argv)
 
+    backing_dir = args.backing_dir.split(":") if args.backing_dir else None
     proxy = SessionProxy(args.sock, cgroup_root=args.cgroup_root,
-                         cgroup_exec=args.cgroup_exec)
+                         cgroup_exec=args.cgroup_exec,
+                         shadowfs_mount=args.shadowfs_mount,
+                         backing_dir=backing_dir,
+                         require_isolation=not args.no_isolation)
     if args.demo:
         return _demo(proxy)
     ap.error("nothing to do: pass --demo (this module is primarily a library)")
