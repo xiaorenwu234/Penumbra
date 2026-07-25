@@ -2810,6 +2810,43 @@ func (b *Backend) GetFinalizeStatus(groupID int) (GetFinalizeStatusResult, error
 	return GetFinalizeStatusResult{State: g.state, FinalizeErr: g.finalizeErr}, nil
 }
 
+// CancelGroup drops an in-flight prepare_resolution group that the orchestrator
+// intentionally abandons before begin_finalize/release, for example because an
+// SCC sibling has not yet reached AuthorizedPending. A finalized group cannot
+// be cancelled; it must be completed via AckReleaseGroup so terminal epoch
+// records are not lost.
+func (b *Backend) CancelGroup(groupID int) error {
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+
+	b.mu.Lock()
+	g, ok := b.activeGroups[groupID]
+	if !ok {
+		b.mu.Unlock()
+		return nil
+	}
+	if g.state == "finalized" {
+		b.mu.Unlock()
+		return fmt.Errorf("cancel_group: group %d is finalized; use ack_release_group", groupID)
+	}
+	seqNum := b.nextSeq()
+	rec := WALRecord{SeqNum: seqNum, ControlOp: "group_delete", GroupID: groupID}
+	b.mu.Unlock()
+
+	if err := <-b.submitWAL(rec); err != nil {
+		b.applyTurnAbort(seqNum)
+		return fmt.Errorf("cancel_group WAL: %w", err)
+	}
+
+	b.mu.Lock()
+	b.applyTurnWait(seqNum)
+	delete(b.activeGroups, groupID)
+	b.applyTurnDone(seqNum)
+	b.mu.Unlock()
+	log.Printf("[backend] CancelGroup: group=%d", groupID)
+	return nil
+}
+
 // AckReleaseGroup releases all members of a finalized group. Writes WAL
 // release_ack records for all members as a single batch, then drops their
 // terminal records. Refuses if the group has not reached "finalized".

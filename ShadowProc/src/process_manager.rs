@@ -1000,8 +1000,15 @@ impl ProcessManager {
                     continue;
                 }
 
-                // Send SIGSTOP
+                // Send SIGSTOP and prove the whole thread group actually
+                // reached a stopped state before reporting success. Without
+                // this, stop_observe sealing and ShadowFS mmap flush could race
+                // the target's last few instructions after SIGSTOP was queued.
                 if signal::kill(Pid::from_raw(pid as i32), Signal::SIGSTOP).is_ok() {
+                    if !wait_thread_group_stopped(pid, 1000) {
+                        return Err(anyhow::anyhow!(
+                            "pid {} did not reach stopped state after SIGSTOP", pid));
+                    }
                     let cgroup_id = read_process_cgroup(pid)
                         .unwrap_or_else(|| cgroup_path.to_string());
                     let comm = fs::read_to_string(format!("/proc/{}/comm", pid))
@@ -1186,6 +1193,56 @@ fn process_starttime(pid: u32) -> Option<u64> {
     // parens, so we anchor on the LAST ')').
     let after = &stat[stat.rfind(')')? + 1..];
     after.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Poll every /proc/<pid>/task/<tid>/stat until the entire thread group is in
+/// a stopped/traced state ('T' or 't') and the TID set reaches a fixpoint.
+/// Returns false on timeout, disappearance, or unreadable task state.
+fn wait_thread_group_stopped(pid: u32, timeout_ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut last_tids: HashSet<u32> = HashSet::new();
+    loop {
+        let task_dir = match fs::read_dir(format!("/proc/{}/task", pid)) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        let mut tids = HashSet::new();
+        let mut all_stopped = true;
+        for ent in task_dir {
+            let ent = match ent {
+                Ok(e) => e,
+                Err(_) => return false,
+            };
+            let tid: u32 = match ent.file_name().to_string_lossy().parse() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            tids.insert(tid);
+            if !task_state_is_stopped(tid) {
+                all_stopped = false;
+            }
+        }
+        if !tids.is_empty() && all_stopped && tids == last_tids {
+            return true;
+        }
+        last_tids = tids;
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn task_state_is_stopped(tid: u32) -> bool {
+    let stat = match fs::read_to_string(format!("/proc/{}/stat", tid)) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if let Some(idx) = stat.rfind(')') {
+        let state = stat[idx + 1..].trim_start().chars().next();
+        return matches!(state, Some('T') | Some('t'));
+    }
+    false
 }
 
 /// Poll /proc/<pid>/stat until the task reaches a stopped state ('T' or 't'),

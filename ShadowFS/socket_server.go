@@ -404,6 +404,17 @@ func (s *SocketServer) handleRequest(req Request) Response {
 		return Response{Status: "ok", GroupID: req.GroupID,
 			State: res.State, FinalizeErr: res.FinalizeErr}
 
+	case "cancel_group":
+		// Drop a prepared group that was abandoned before begin_finalize/release.
+		if req.GroupID == 0 {
+			return Response{Status: "error", Message: "group_id required"}
+		}
+		log.Printf("[socket] cancel_group group_id=%d", req.GroupID)
+		if err := shadowBackend.CancelGroup(req.GroupID); err != nil {
+			return Response{Status: "error", Message: err.Error()}
+		}
+		return Response{Status: "ok", GroupID: req.GroupID}
+
 	case "ack_release_group":
 		// Release all members of a finalized group.
 		if req.GroupID == 0 {

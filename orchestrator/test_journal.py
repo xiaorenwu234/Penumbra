@@ -175,9 +175,11 @@ class TestRecovery(unittest.TestCase):
             self.assertTrue(any(r.get("action") == "retry_finalize"
                                 and r.get("cgroup_id") == "/cg1"
                                 for r in fs.requests))
-            # A commit_done was journaled so a second recovery is a no-op.
+            # No commit_done is journaled yet: fs_committed means the result is
+            # canonical, but process/output release and ShadowFS group ack may
+            # still be incomplete and must be driven by release_intent recovery.
             state2 = _OrchestratorJournal.replay(orch._journal.load())
-            self.assertEqual(state2["committed"], {})
+            self.assertEqual(state2["committed"], {"s1": ("/cg1", "COMMITTED-OUT")})
 
     def test_get_output_falls_back_to_recovered(self):
         with tempfile.TemporaryDirectory() as d:

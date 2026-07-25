@@ -127,6 +127,9 @@ struct event {
     __u32 syscall_nr;
     __u32 event_type;
     __u64 timestamp;
+    __u64 cgroup_id;
+    __u8 decision;
+    __u8 _pad0[7];
     char comm[16];
 };
 
@@ -135,6 +138,16 @@ struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024);
 } events SEC(".maps");
+
+// Counts policy/intercept events that could not be emitted. Userspace treats a
+// non-zero delta as an audit-completeness failure rather than silently losing a
+// DENY or FENCE decision.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} dropped_events SEC(".maps");
 
 // Cgroup array map for filtering (supports multiple cgroups)
 struct {
@@ -523,6 +536,50 @@ static __always_inline int check_policy(__u32 syscall_nr, __u32 event_type)
     return check_policy_detail(syscall_nr, event_type, NULL);
 }
 
+static __always_inline void count_dropped_event(void)
+{
+    __u32 key = 0;
+    __u64 init = 1;
+    __u64 *cnt = bpf_map_lookup_elem(&dropped_events, &key);
+    if (cnt)
+        __sync_fetch_and_add(cnt, 1);
+    else
+        bpf_map_update_elem(&dropped_events, &key, &init, BPF_ANY);
+}
+
+static __always_inline void emit_policy_event(__u32 syscall_nr, __u32 event_type,
+                                              __u8 decision)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        count_dropped_event();
+        return;
+    }
+    e->pid = pid_tgid & 0xFFFFFFFF;
+    e->tgid = pid_tgid >> 32;
+    e->syscall_nr = syscall_nr;
+    e->event_type = event_type;
+    e->timestamp = bpf_ktime_get_ns();
+    e->cgroup_id = bpf_get_current_cgroup_id();
+    e->decision = decision;
+    e->_pad0[0] = 0;
+    e->_pad0[1] = 0;
+    e->_pad0[2] = 0;
+    e->_pad0[3] = 0;
+    e->_pad0[4] = 0;
+    e->_pad0[5] = 0;
+    e->_pad0[6] = 0;
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    bpf_ringbuf_submit(e, 0);
+}
+
+static __always_inline void emit_policy_violation(__u32 syscall_nr,
+                                                  __u32 event_type)
+{
+    emit_policy_event(syscall_nr, event_type, DECISION_DENY);
+}
+
 // Emit event + SIGSTOP + mark as stopped. Returns bpf_send_signal()'s result
 // (0 on success). Callers still return -ERESTARTSYS regardless, so a failed
 // stop is fail-closed: the syscall is auto-restarted and the stop is retried.
@@ -551,17 +608,7 @@ static __always_inline int do_intercept(__u32 syscall_nr, __u32 event_type)
     // so any concurrent sibling hook takes the dedup path above.
     bpf_map_update_elem(&stopped_pids, &tgid, &one, BPF_ANY);
 
-    // Emit event to userspace
-    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (e) {
-        e->pid = pid_tgid & 0xFFFFFFFF;
-        e->tgid = tgid;
-        e->syscall_nr = syscall_nr;
-        e->event_type = event_type;
-        e->timestamp = bpf_ktime_get_ns();
-        bpf_get_current_comm(&e->comm, sizeof(e->comm));
-        bpf_ringbuf_submit(e, 0);
-    }
+    emit_policy_event(syscall_nr, event_type, DECISION_FENCE);
 
     // SIGSTOP the process. If the signal could not be queued we must NOT leave
     // the tgid marked stopped: otherwise check_policy() would treat a
@@ -641,6 +688,7 @@ int BPF_PROG(shadow_socket_connect, struct socket *sock,
                 do_intercept(231, EVENT_EXIT_HOLD);
                 return -ERESTARTSYS;
             }
+            emit_policy_violation(231, EVENT_EXIT_HOLD);
             return -EPERM;  // DECISION_DENY: hard deny sentinel
         }
     }
@@ -674,6 +722,7 @@ int BPF_PROG(shadow_socket_connect, struct socket *sock,
         do_intercept(42, EVENT_NETWORK_CONNECT);
         return -ERESTARTSYS;
     }
+    emit_policy_violation(42, EVENT_NETWORK_CONNECT);
     return -EPERM;  // DECISION_DENY
 }
 
@@ -707,6 +756,7 @@ int BPF_PROG(shadow_socket_sendmsg, struct socket *sock,
         do_intercept(46, EVENT_NETWORK_SEND);
         return -ERESTARTSYS;
     }
+    emit_policy_violation(46, EVENT_NETWORK_SEND);
     return -EPERM;  // DECISION_DENY
 }
 
@@ -738,6 +788,7 @@ int BPF_PROG(shadow_socket_bind, struct socket *sock,
         do_intercept(49, EVENT_NETWORK_BIND);
         return -ERESTARTSYS;
     }
+    emit_policy_violation(49, EVENT_NETWORK_BIND);
     return -EPERM;  // DECISION_DENY
 }
 
@@ -758,6 +809,7 @@ int BPF_PROG(shadow_shm_alloc, struct kern_ipc_perm *perm)
         do_intercept(29, EVENT_IPC_SHM); // 29 = shmget
         return -ERESTARTSYS;
     }
+    emit_policy_violation(29, EVENT_IPC_SHM);
     return -EPERM;
 }
 
@@ -774,6 +826,7 @@ int BPF_PROG(shadow_shm_associate, struct kern_ipc_perm *perm, int shmflg)
         do_intercept(29, EVENT_IPC_SHM); // 29 = shmget
         return -ERESTARTSYS;
     }
+    emit_policy_violation(29, EVENT_IPC_SHM);
     return -EPERM;
 }
 
@@ -792,6 +845,7 @@ int BPF_PROG(shadow_shm_shmat, struct kern_ipc_perm *shp,
         do_intercept(30, EVENT_IPC_SHM); // 30 = shmat
         return -ERESTARTSYS;
     }
+    emit_policy_violation(30, EVENT_IPC_SHM);
     return -EPERM;
 }
 
@@ -809,6 +863,7 @@ int BPF_PROG(shadow_shm_shmctl, struct kern_ipc_perm *perm, int cmd)
         do_intercept(31, EVENT_IPC_SHM); // 31 = shmctl
         return -ERESTARTSYS;
     }
+    emit_policy_violation(31, EVENT_IPC_SHM);
     return -EPERM;
 }
 
@@ -858,6 +913,7 @@ int BPF_PROG(shadow_mmap_file, struct file *file,
             do_intercept(9, EVENT_IPC_MMAP);
             return -ERESTARTSYS;
         }
+        emit_policy_violation(9, EVENT_IPC_MMAP);
         return -EPERM;
     }
     __u64 ino_key = (__u64)(unsigned long)ino_p;
@@ -875,6 +931,7 @@ int BPF_PROG(shadow_mmap_file, struct file *file,
         do_intercept(9, EVENT_IPC_MMAP); // 9 = mmap syscall number
         return -ERESTARTSYS;
     }
+    emit_policy_violation(9, EVENT_IPC_MMAP);
     return -EPERM;
 }
 
@@ -893,6 +950,7 @@ int BPF_PROG(shadow_msg_alloc, struct kern_ipc_perm *perm)
         do_intercept(68, EVENT_IPC_MSG); // 68 = msgget
         return -ERESTARTSYS;
     }
+    emit_policy_violation(68, EVENT_IPC_MSG);
     return -EPERM;
 }
 
@@ -909,6 +967,7 @@ int BPF_PROG(shadow_msg_associate, struct kern_ipc_perm *perm, int msqflg)
         do_intercept(68, EVENT_IPC_MSG); // 68 = msgget
         return -ERESTARTSYS;
     }
+    emit_policy_violation(68, EVENT_IPC_MSG);
     return -EPERM;
 }
 
@@ -927,6 +986,7 @@ int BPF_PROG(shadow_msg_msgsnd, struct kern_ipc_perm *msq,
         do_intercept(69, EVENT_IPC_MSG); // 69 = msgsnd
         return -ERESTARTSYS;
     }
+    emit_policy_violation(69, EVENT_IPC_MSG);
     return -EPERM;
 }
 
@@ -946,6 +1006,7 @@ int BPF_PROG(shadow_msg_msgrcv, struct kern_ipc_perm *msq,
         do_intercept(70, EVENT_IPC_MSG); // 70 = msgrcv
         return -ERESTARTSYS;
     }
+    emit_policy_violation(70, EVENT_IPC_MSG);
     return -EPERM;
 }
 
@@ -963,6 +1024,7 @@ int BPF_PROG(shadow_msg_msgctl, struct kern_ipc_perm *perm, int cmd)
         do_intercept(71, EVENT_IPC_MSG); // 71 = msgctl
         return -ERESTARTSYS;
     }
+    emit_policy_violation(71, EVENT_IPC_MSG);
     return -EPERM;
 }
 
@@ -981,6 +1043,7 @@ int BPF_PROG(shadow_sem_alloc, struct kern_ipc_perm *perm)
         do_intercept(64, EVENT_IPC_SEM); // 64 = semget
         return -ERESTARTSYS;
     }
+    emit_policy_violation(64, EVENT_IPC_SEM);
     return -EPERM;
 }
 
@@ -997,6 +1060,7 @@ int BPF_PROG(shadow_sem_associate, struct kern_ipc_perm *perm, int semflg)
         do_intercept(64, EVENT_IPC_SEM); // 64 = semget
         return -ERESTARTSYS;
     }
+    emit_policy_violation(64, EVENT_IPC_SEM);
     return -EPERM;
 }
 
@@ -1015,6 +1079,7 @@ int BPF_PROG(shadow_sem_semop, struct kern_ipc_perm *perm,
         do_intercept(65, EVENT_IPC_SEM); // 65 = semop
         return -ERESTARTSYS;
     }
+    emit_policy_violation(65, EVENT_IPC_SEM);
     return -EPERM;
 }
 
@@ -1032,6 +1097,7 @@ int BPF_PROG(shadow_sem_semctl, struct kern_ipc_perm *perm, int cmd)
         do_intercept(66, EVENT_IPC_SEM); // 66 = semctl
         return -ERESTARTSYS;
     }
+    emit_policy_violation(66, EVENT_IPC_SEM);
     return -EPERM;
 }
 
@@ -1075,6 +1141,7 @@ int BPF_PROG(shadow_task_kill, struct task_struct *p,
         do_intercept(62, EVENT_SIGNAL_KILL);
         return -ERESTARTSYS;
     }
+    emit_policy_violation(62, EVENT_SIGNAL_KILL);
     return -EPERM;  // DECISION_DENY
 }
 
@@ -1089,6 +1156,7 @@ int BPF_PROG(shadow_ptrace, struct task_struct *child, unsigned int mode)
         do_intercept(101, EVENT_SIGNAL_PTRACE);
         return -ERESTARTSYS;
     }
+    emit_policy_violation(101, EVENT_SIGNAL_PTRACE);
     return -EPERM;
 }
 
@@ -1135,6 +1203,7 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
             do_intercept(1, EVENT_OUTPUT_WRITE);
             return -ERESTARTSYS;
         }
+        emit_policy_violation(1, EVENT_OUTPUT_WRITE);
         return -EPERM;
     }
 
@@ -1149,6 +1218,7 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
             do_intercept(1, EVENT_OUTPUT_WRITE);
             return -ERESTARTSYS;
         }
+        emit_policy_violation(1, EVENT_OUTPUT_WRITE);
         return -EPERM;
     }
 
@@ -1167,6 +1237,7 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
             do_intercept(1, EVENT_OUTPUT_WRITE);
             return -ERESTARTSYS;
         }
+        emit_policy_violation(1, EVENT_OUTPUT_WRITE);
         return -EPERM;
     }
 
@@ -1205,6 +1276,7 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
             do_intercept(20, EVENT_OUTPUT_WRITE);
             return -ERESTARTSYS;
         }
+        emit_policy_violation(20, EVENT_OUTPUT_WRITE);
         return -EPERM;
     }
 
@@ -1219,6 +1291,7 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
             do_intercept(20, EVENT_OUTPUT_WRITE);
             return -ERESTARTSYS;
         }
+        emit_policy_violation(20, EVENT_OUTPUT_WRITE);
         return -EPERM;
     }
 
@@ -1237,6 +1310,7 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
             do_intercept(20, EVENT_OUTPUT_WRITE);
             return -ERESTARTSYS;
         }
+        emit_policy_violation(20, EVENT_OUTPUT_WRITE);
         return -EPERM;
     }
 
@@ -1267,6 +1341,7 @@ int BPF_PROG(shadow_sys_sendfile, struct pt_regs *regs)
         do_intercept(40, EVENT_OUTPUT_SENDFILE); // 40 = sendfile
         return -ERESTARTSYS;
     }
+    emit_policy_violation(40, EVENT_OUTPUT_SENDFILE);
     return -EPERM;
 }
 
@@ -1280,6 +1355,7 @@ int BPF_PROG(shadow_sys_splice, struct pt_regs *regs)
         do_intercept(275, EVENT_OUTPUT_SPLICE); // 275 = splice
         return -ERESTARTSYS;
     }
+    emit_policy_violation(275, EVENT_OUTPUT_SPLICE);
     return -EPERM;
 }
 
@@ -1293,6 +1369,7 @@ int BPF_PROG(shadow_sys_vmsplice, struct pt_regs *regs)
         do_intercept(278, EVENT_OUTPUT_SPLICE); // 278 = vmsplice
         return -ERESTARTSYS;
     }
+    emit_policy_violation(278, EVENT_OUTPUT_SPLICE);
     return -EPERM;
 }
 
@@ -1306,6 +1383,7 @@ int BPF_PROG(shadow_sys_tee, struct pt_regs *regs)
         do_intercept(276, EVENT_OUTPUT_SPLICE); // 276 = tee
         return -ERESTARTSYS;
     }
+    emit_policy_violation(276, EVENT_OUTPUT_SPLICE);
     return -EPERM;
 }
 
@@ -1323,6 +1401,7 @@ int BPF_PROG(shadow_sys_io_uring_setup, struct pt_regs *regs)
         do_intercept(425, EVENT_OUTPUT_IO_URING); // 425 = io_uring_setup
         return -ERESTARTSYS;
     }
+    emit_policy_violation(425, EVENT_OUTPUT_IO_URING);
     return -EPERM;
 }
 
@@ -1336,6 +1415,7 @@ int BPF_PROG(shadow_sys_io_uring_enter, struct pt_regs *regs)
         do_intercept(426, EVENT_OUTPUT_IO_URING); // 426 = io_uring_enter
         return -ERESTARTSYS;
     }
+    emit_policy_violation(426, EVENT_OUTPUT_IO_URING);
     return -EPERM;
 }
 
@@ -1349,6 +1429,7 @@ int BPF_PROG(shadow_sys_io_uring_register, struct pt_regs *regs)
         do_intercept(427, EVENT_OUTPUT_IO_URING); // 427 = io_uring_register
         return -ERESTARTSYS;
     }
+    emit_policy_violation(427, EVENT_OUTPUT_IO_URING);
     return -EPERM;
 }
 
@@ -1370,6 +1451,7 @@ static __always_inline int system_guard(__u32 syscall_nr, __u32 event_type)
         do_intercept(syscall_nr, event_type);
         return -ERESTARTSYS;
     }
+    emit_policy_violation(syscall_nr, event_type);
     return -EPERM;
 }
 
@@ -1476,6 +1558,7 @@ block:
         do_intercept(16, EVENT_SYSTEM_TTY_IOCTL);
         return -ERESTARTSYS;
     }
+    emit_policy_violation(16, EVENT_SYSTEM_TTY_IOCTL);
     return -EPERM;
 }
 
@@ -1499,6 +1582,7 @@ int BPF_PROG(shadow_sys_shmdt, struct pt_regs *regs)
         do_intercept(67, EVENT_IPC_SHM); // 67 = shmdt
         return -ERESTARTSYS;
     }
+    emit_policy_violation(67, EVENT_IPC_SHM);
     return -EPERM;
 }
 
@@ -1514,6 +1598,7 @@ int BPF_PROG(shadow_sys_mq_open, struct pt_regs *regs)
         do_intercept(240, EVENT_IPC_MQ); // 240 = mq_open
         return -ERESTARTSYS;
     }
+    emit_policy_violation(240, EVENT_IPC_MQ);
     return -EPERM;
 }
 
@@ -1529,6 +1614,7 @@ int BPF_PROG(shadow_sys_mq_timedsend, struct pt_regs *regs)
         do_intercept(242, EVENT_IPC_MQ); // 242 = mq_timedsend (mq_send)
         return -ERESTARTSYS;
     }
+    emit_policy_violation(242, EVENT_IPC_MQ);
     return -EPERM;
 }
 
@@ -1544,6 +1630,7 @@ int BPF_PROG(shadow_sys_mq_timedreceive, struct pt_regs *regs)
         do_intercept(243, EVENT_IPC_MQ); // 243 = mq_timedreceive (mq_receive)
         return -ERESTARTSYS;
     }
+    emit_policy_violation(243, EVENT_IPC_MQ);
     return -EPERM;
 }
 
@@ -1559,6 +1646,7 @@ int BPF_PROG(shadow_sys_mq_notify, struct pt_regs *regs)
         do_intercept(244, EVENT_IPC_MQ); // 244 = mq_notify
         return -ERESTARTSYS;
     }
+    emit_policy_violation(244, EVENT_IPC_MQ);
     return -EPERM;
 }
 
@@ -1596,6 +1684,7 @@ int BPF_PROG(shadow_bprm_check, struct linux_binprm *bprm)
         do_intercept(59, EVENT_PRIV_EXEC);  // 59 = execve syscall nr
         return -ERESTARTSYS;
     }
+    emit_policy_violation(59, EVENT_PRIV_EXEC);
     return -EPERM;
 }
 
@@ -1611,6 +1700,7 @@ int BPF_PROG(shadow_task_fix_setuid, struct cred *new_cred,
         do_intercept(105, EVENT_PRIV_SETUID);  // 105 = setuid
         return -ERESTARTSYS;
     }
+    emit_policy_violation(105, EVENT_PRIV_SETUID);
     return -EPERM;
 }
 
@@ -1626,6 +1716,7 @@ int BPF_PROG(shadow_task_fix_setgid, struct cred *new_cred,
         do_intercept(106, EVENT_PRIV_SETGID);  // 106 = setgid
         return -ERESTARTSYS;
     }
+    emit_policy_violation(106, EVENT_PRIV_SETGID);
     return -EPERM;
 }
 
@@ -1641,6 +1732,7 @@ int BPF_PROG(shadow_task_fix_setgroups, struct cred *new_cred,
         do_intercept(116, EVENT_PRIV_SETGROUPS);  // 116 = setgroups
         return -ERESTARTSYS;
     }
+    emit_policy_violation(116, EVENT_PRIV_SETGROUPS);
     return -EPERM;
 }
 
@@ -1657,6 +1749,7 @@ int BPF_PROG(shadow_capset, struct cred *new_cred, const struct cred *old,
         do_intercept(126, EVENT_PRIV_CAPSET);  // 126 = capset
         return -ERESTARTSYS;
     }
+    emit_policy_violation(126, EVENT_PRIV_CAPSET);
     return -EPERM;
 }
 
@@ -1701,6 +1794,15 @@ int BPF_PROG(shadow_sched_fork, struct task_struct *parent, struct task_struct *
         e->syscall_nr = parent_tgid;  // Repurpose: store parent tgid
         e->event_type = EVENT_FORK;
         e->timestamp = bpf_ktime_get_ns();
+        e->cgroup_id = bpf_get_current_cgroup_id();
+        e->decision = DECISION_ALLOW;
+        e->_pad0[0] = 0;
+        e->_pad0[1] = 0;
+        e->_pad0[2] = 0;
+        e->_pad0[3] = 0;
+        e->_pad0[4] = 0;
+        e->_pad0[5] = 0;
+        e->_pad0[6] = 0;
         bpf_get_current_comm(&e->comm, sizeof(e->comm));
         bpf_ringbuf_submit(e, 0);
     }

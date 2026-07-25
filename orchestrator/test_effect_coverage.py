@@ -379,7 +379,7 @@ class TestReleaseGroupMembers(unittest.TestCase):
                          "allow-all release must not carry a policy")
 
     def test_partial_failure_defers_failing_member(self):
-        """One member's resume fails -> parked in _pending_release."""
+        """One member's resume fails -> parked as group-level retry state."""
         mapping = {"e1": "/cg-ok", "e2": "/cg-fail", "e3": "/cg-ok2"}
 
         def proc(req):
@@ -398,7 +398,11 @@ class TestReleaseGroupMembers(unittest.TestCase):
         out, primary_ok = orch._release_group_members(
             group_id=1, members=["e1", "e2", "e3"],
             graph_generation=1, primary_cgroup="/cg-ok")
-        self.assertIn("/cg-fail", orch._pending_release)
+        self.assertIn(1, orch._pending_groups)
+        pending = orch._pending_groups[1]
+        self.assertEqual(pending["member_cgroups"], ["/cg-ok", "/cg-fail", "/cg-ok2"])
+        self.assertNotIn("/cg-fail", pending["released_cgroups"])
+        self.assertIn("/cg-ok", pending["released_cgroups"])
         self.assertTrue(primary_ok,
                         "primary released even though a sibling failed")
         self.assertNotIn("ack_release_group", orch.fs_client.actions(),

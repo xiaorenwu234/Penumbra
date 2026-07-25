@@ -11,6 +11,12 @@ pub struct InterceptEvent {
     pub syscall_nr: u32,
     pub event_type: u32,
     pub timestamp: u64,
+    pub cgroup_id: u64,
+    /// Kernel decision that produced this event: 0=ALLOW/info, 1=FENCE,
+    /// 2=DENY. ENFORCED denials are reported without SIGSTOP so the
+    /// orchestrator can audit EPERM decisions instead of silently losing them.
+    pub decision: u8,
+    pub _pad0: [u8; 7],
     pub comm: [u8; 16],
 }
 
@@ -93,6 +99,9 @@ impl InterceptEvent {
             syscall_nr: 0,
             event_type: 0, // Unknown - active freeze
             timestamp: 0,
+            cgroup_id: 0,
+            decision: 1,
+            _pad0: [0u8; 7],
             comm: [0u8; 16],
         }
     }

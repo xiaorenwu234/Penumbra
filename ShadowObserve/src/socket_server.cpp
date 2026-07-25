@@ -92,6 +92,27 @@ static int json_get_int(const std::string &json, const std::string &key, int def
     try { return std::stoi(json.substr(pos)); } catch (...) { return def; }
 }
 
+static std::string json_get_object(const std::string &json, const std::string &key) {
+    std::string needle = "\"" + key + "\"";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return "";
+    pos += needle.size();
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == ':')) pos++;
+    while (pos < json.size() && json[pos] == ' ') pos++;
+    if (pos >= json.size() || json[pos] != '{') return "";
+
+    int depth = 0;
+    size_t start = pos;
+    for (size_t i = pos; i < json.size(); i++) {
+        if (json[i] == '{') depth++;
+        else if (json[i] == '}') {
+            depth--;
+            if (depth == 0) return json.substr(start, i - start + 1);
+        }
+    }
+    return "";
+}
+
 /* Extract a JSON array substring (including brackets, handles spaces) */
 static std::string json_get_array(const std::string &json, const std::string &key) {
     std::string needle = "\"" + key + "\"";
@@ -405,6 +426,12 @@ std::string ObserveDaemon::handle_audit(const std::string &log_path, const std::
         int event_type = json_get_int(obj, "event_type", -1);
         std::string action_str = json_get_string(obj, "action");
         std::string path_pattern = json_get_string(obj, "path_pattern");
+        std::string endpoint_obj = json_get_object(obj, "endpoint");
+        if (!endpoint_obj.empty()) {
+            return json_error("endpoint audit rules are not supported by the "
+                              "current sealed log schema; endpoint policy is "
+                              "enforced by ShadowProc at release time");
+        }
 
         if (action_str == "allow" || action_str == "ALLOW") {
             engine.add_allow_rule(event_type, path_pattern);

@@ -847,15 +847,25 @@ class SessionProxy:
         # O_CLOEXEC so the held write end does not leak into bash across exec().
         sess.fifo_wfd = os.open(sess.fifo_path, os.O_RDWR | os.O_CLOEXEC)
 
-        # Launch bash via cgroup_exec, which writes its own pid into cgroup.procs
-        # and then exec()s bash — so the returned pid IS the bash. These fds are
-        # dup2'd onto 0/1/2 in the child (which clears CLOEXEC on 0/1/2), so only
-        # the stray originals close on exec.
+        # Launch bash after the trusted parent has placed the child pid into
+        # the monitored cgroup. The child waits on a pipe before creating its
+        # read-only mount namespace; this avoids the old cgroup_exec ordering
+        # where /sys/fs/cgroup was remounted read-only before cgroup.procs was
+        # written, causing EROFS/EPERM and a failed shell launch.
         stdin_fd = os.open(sess.fifo_path, os.O_RDONLY | os.O_CLOEXEC)   # won't block: writer open
         log_fd = os.open(sess.log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o644)
+        ready_r, ready_w = os.pipe2(os.O_CLOEXEC)
         pid = os.fork()
         if pid == 0:  # child
+            os.close(ready_w)
             try:
+                # Wait until the trusted parent has written this child PID into
+                # cgroup.procs. Only then may the child remount cgroupfs
+                # read-only inside its private namespace.
+                token = os.read(ready_r, 1)
+                os.close(ready_r)
+                if token != b"1":
+                    os._exit(126)
                 # Become a session leader with no controlling terminal BEFORE
                 # anything else: the speculation domain must not inherit the
                 # orchestrator's ctty.  Terminal state is not rollback-safe,
@@ -882,17 +892,28 @@ class SessionProxy:
                 os.dup2(stdin_fd, 0)
                 os.dup2(log_fd, 1)
                 os.dup2(log_fd, 2)
-                os.execv(self.cgroup_exec,
-                         [self.cgroup_exec, os.path.join(sess.cgroup_path, "cgroup.procs"),
-                          "bash", "--norc"])
+                os.execvp("bash", ["bash", "--norc"])
             except OSError as e:
                 # Domain setup failure (unshare, mount, etc.).
                 sys.stderr.write(f"[proxy] domain isolation failed: {e}\n")
                 os._exit(126)
             except Exception:  # noqa: BLE001 — child must not return
                 os._exit(127)
-        os.close(stdin_fd)
-        os.close(log_fd)
+        os.close(ready_r)
+        try:
+            with open(os.path.join(sess.cgroup_path, "cgroup.procs"), "w") as f:
+                f.write(str(pid))
+            os.write(ready_w, b"1")
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(ready_w)
+            os.close(stdin_fd)
+            os.close(log_fd)
 
         sess.live_pid = pid
         time.sleep(0.5)
