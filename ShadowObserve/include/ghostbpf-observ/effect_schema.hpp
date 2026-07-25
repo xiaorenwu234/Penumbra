@@ -97,6 +97,7 @@ inline constexpr uint8_t event_op_of(uint16_t type) {
 
 /* ---- legacy aliases ---- */
 inline constexpr uint16_t FS_EVENT_OPEN = encode_event_type(CLASS_FILESYSTEM, OP_READ);
+inline constexpr uint16_t FS_EVENT_WRITE = encode_event_type(CLASS_FILESYSTEM, OP_WRITE);
 inline constexpr uint16_t FS_EVENT_CREATE = encode_event_type(CLASS_FILESYSTEM, OP_CREATE);
 inline constexpr uint16_t FS_EVENT_DELETE = encode_event_type(CLASS_FILESYSTEM, OP_DELETE);
 inline constexpr uint16_t FS_EVENT_RENAME = encode_event_type(CLASS_FILESYSTEM, OP_RENAME);

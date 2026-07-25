@@ -92,6 +92,7 @@
 
   "legacy_event_map": {
     "OPEN":      {"class": "FILESYSTEM", "op": "READ"},
+    "WRITE":     {"class": "FILESYSTEM", "op": "WRITE"},
     "CREATE":    {"class": "FILESYSTEM", "op": "CREATE"},
     "DELETE":    {"class": "FILESYSTEM", "op": "DELETE"},
     "RENAME":    {"class": "FILESYSTEM", "op": "RENAME"},

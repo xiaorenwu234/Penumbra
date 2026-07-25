@@ -135,6 +135,9 @@ type ResolveResult struct {
 	Version      VersionID // 0 = backing base
 	Producer     EpochID   // "" = backing
 	Exists       bool
+	// Err is set when resolving would require a dependency edge that could not
+	// be durably recorded. Callers must fail closed instead of reading the path.
+	Err error
 	// Op is the observed version's operation (meaningful when Version != 0).
 	Op VersionOp
 }

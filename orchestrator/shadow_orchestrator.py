@@ -687,18 +687,23 @@ class ShadowOrchestrator:
         return True
 
     def _resolve_member_cgroups(self, members: List[str],
-                                primary_cgroup: str) -> List[str]:
-        """Map epoch IDs to cgroup IDs for group members. Uses ShadowFS
-        list_agents for non-primary members. Falls back to [primary_cgroup]
-        if the query fails or returns no mappings."""
+                                primary_cgroup: str) -> Optional[List[str]]:
+        """Map every epoch ID in a finalized group to its cgroup ID.
+
+        Fail closed: every member must resolve. Falling back to only the primary
+        would let ShadowFS ack a group while sibling process/output effects stay
+        frozen or unreleased.
+        """
         if len(members) <= 1:
             return [primary_cgroup]
         try:
             agents = self.fs_client.request({"action": "list_agents"})
-        except Exception:
-            return [primary_cgroup]
+        except Exception as e:  # noqa: BLE001
+            log.warning("  list_agents failed while resolving release group: %s", e)
+            return None
         if not isinstance(agents, dict) or agents.get("status") != "ok":
-            return [primary_cgroup]
+            log.warning("  list_agents returned %r -- refusing group release", agents)
+            return None
         cgroup_map = {}
         for info in agents.get("agents_info", []):
             eid = info.get("epoch_id", "")
@@ -706,12 +711,16 @@ class ShadowOrchestrator:
             if eid and cg:
                 cgroup_map[eid] = cg
         result = []
+        missing = []
         for epoch in members:
             cg = cgroup_map.get(epoch)
             if cg:
                 result.append(cg)
-        if not result:
-            result = [primary_cgroup]
+            else:
+                missing.append(epoch)
+        if missing:
+            log.warning("  cannot resolve all release-group members; missing=%s", missing)
+            return None
         return result
 
     def _release_group_members(self, group_id: int, members: List[str],
@@ -739,19 +748,13 @@ class ShadowOrchestrator:
         member_cgroups = self._resolve_member_cgroups(members, primary_cgroup)
         all_output: Dict[str, str] = {}
         primary_ok = False
-        for mcg in member_cgroups:
-            ok, stdout = self._release_proc(mcg, skip_ack=True,
-                                            proc_policy=proc_policy)
-            if ok:
-                all_output[mcg] = stdout
-                if mcg == primary_cgroup:
-                    primary_ok = True
-            else:
-                with self._pending_lock:
-                    self._pending_release.add(mcg)
-                log.warning("  Release of member cgroup=%s failed -- deferred", mcg)
+        if member_cgroups is None:
+            with self._pending_lock:
+                self._pending_release.add(primary_cgroup)
+            return all_output, False
 
-        # Durable release_intent (only when the caller asks for it).
+        # Durable release_intent must be written BEFORE externally visible
+        # release operations. Recovery can then resume unfinished members.
         if journal_release_intent:
             entry = {"cgroup": primary_cgroup, "group_id": group_id,
                      "members": members, "graph_generation": graph_generation,
@@ -760,7 +763,31 @@ class ShadowOrchestrator:
                 entry["sid"] = journal_sid
             self._journal.append("release_intent", **entry)
 
-        # Single group ack_release for all members.
+        failed_members = []
+        for mcg in member_cgroups:
+            ok, stdout = self._release_proc(mcg, skip_ack=True,
+                                            proc_policy=proc_policy)
+            if ok:
+                all_output[mcg] = stdout
+                if journal_release_intent:
+                    self._journal.append("release_member_done", cgroup=mcg,
+                                         group_id=group_id, epoch=epoch_id)
+                if mcg == primary_cgroup:
+                    primary_ok = True
+            else:
+                failed_members.append(mcg)
+                with self._pending_lock:
+                    self._pending_release.add(mcg)
+                log.warning("  Release of member cgroup=%s failed -- deferred", mcg)
+
+        if failed_members:
+            log.warning("  group %d not acked; failed members remain pending: %s",
+                        group_id, failed_members)
+            self._try_release_pending()
+            return all_output, primary_ok
+
+        # Single group ack_release for all members, only after every member
+        # release succeeded and release_member_done was durable.
         if not self._fs_group_ack(group_id, primary_cgroup, epoch_id):
             with self._pending_ack_lock:
                 self._pending_ack.add((primary_cgroup, epoch_id))

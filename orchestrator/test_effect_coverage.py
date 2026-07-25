@@ -92,12 +92,13 @@ class TestProcPolicyCompilation(unittest.TestCase):
     def _pp(self, ops):
         return PolicyIR.from_allowed_ops(ops).to_proc_policy()
 
-    def test_class_wide_allow_no_endpoint(self):
-        """allow CONNECT without endpoint -> class NETWORK mode 1 (allow-all)."""
+    def test_operation_wide_allow_no_endpoint(self):
+        """allow CONNECT without endpoint -> only NETWORK/CONNECT mode 1."""
         pp = self._pp([{"event_type": "CONNECT", "action": "allow",
                         "path_pattern": "/tmp/"}])
-        modes = {c["effect_class"]: c["mode"] for c in pp["classes"]}
-        self.assertEqual(modes.get(CLASS_IDS["NETWORK"]), 1)
+        modes = {(c["effect_class"], c["operation"]): c["mode"] for c in pp["classes"]}
+        self.assertEqual(modes.get((CLASS_IDS["NETWORK"], OP_IDS[("NETWORK", "CONNECT")])), 1)
+        self.assertNotIn((CLASS_IDS["NETWORK"], OP_IDS[("NETWORK", "BIND")]), modes)
         self.assertEqual(pp["network"], [], "no endpoint -> no fine entries")
 
     def test_network_fine_grained(self):
@@ -106,10 +107,11 @@ class TestProcPolicyCompilation(unittest.TestCase):
             "event_type": "CONNECT", "action": "allow", "path_pattern": "/",
             "endpoint": {"family": 2, "addr": 16777343, "port": 443},
         }])
-        modes = {c["effect_class"]: c["mode"] for c in pp["classes"]}
-        self.assertEqual(modes.get(CLASS_IDS["NETWORK"]), 2)
+        modes = {(c["effect_class"], c["operation"]): c["mode"] for c in pp["classes"]}
+        self.assertEqual(modes.get((CLASS_IDS["NETWORK"], OP_IDS[("NETWORK", "CONNECT")])), 2)
         self.assertEqual(len(pp["network"]), 1)
         e = pp["network"][0]
+        self.assertEqual(e["operation"], OP_IDS[("NETWORK", "CONNECT")])
         self.assertEqual((e["family"], e["addr"], e["port"]), (2, 16777343, 443))
         self.assertEqual(e["allow"], 1)
 
@@ -119,9 +121,10 @@ class TestProcPolicyCompilation(unittest.TestCase):
             "event_type": "SHM", "action": "allow", "path_pattern": "/",
             "endpoint": {"ipc_type": "SHM", "target": 12345},
         }])
-        modes = {c["effect_class"]: c["mode"] for c in pp["classes"]}
-        self.assertEqual(modes.get(CLASS_IDS["IPC"]), 2)
+        modes = {(c["effect_class"], c["operation"]): c["mode"] for c in pp["classes"]}
+        self.assertEqual(modes.get((CLASS_IDS["IPC"], OP_IDS[("IPC", "SYSV_SHM")])), 2)
         self.assertEqual(len(pp["ipc"]), 1)
+        self.assertEqual(pp["ipc"][0]["operation"], OP_IDS[("IPC", "SYSV_SHM")])
         self.assertEqual(pp["ipc"][0]["ipc_type"], IPC_TYPE_IDS["SHM"])
         self.assertEqual(pp["ipc"][0]["target"], 12345)
         self.assertEqual(pp["ipc"][0]["allow"], 1)
@@ -132,9 +135,10 @@ class TestProcPolicyCompilation(unittest.TestCase):
             "event_type": "KILL", "action": "allow", "path_pattern": "/",
             "endpoint": {"target_cgroup": 999},
         }])
-        modes = {c["effect_class"]: c["mode"] for c in pp["classes"]}
-        self.assertEqual(modes.get(CLASS_IDS["SIGNAL"]), 2)
+        modes = {(c["effect_class"], c["operation"]): c["mode"] for c in pp["classes"]}
+        self.assertEqual(modes.get((CLASS_IDS["SIGNAL"], OP_IDS[("SIGNAL", "KILL")])), 2)
         self.assertEqual(len(pp["signal"]), 1)
+        self.assertEqual(pp["signal"][0]["operation"], OP_IDS[("SIGNAL", "KILL")])
         self.assertEqual(pp["signal"][0]["target_cgroup"], 999)
         self.assertEqual(pp["signal"][0]["allow"], 1)
 
@@ -144,8 +148,8 @@ class TestProcPolicyCompilation(unittest.TestCase):
             "event_type": "CONNECT", "action": "deny", "path_pattern": "/",
             "endpoint": {"family": 2, "addr": 0, "port": 80},
         }])
-        modes = {c["effect_class"]: c["mode"] for c in pp["classes"]}
-        self.assertEqual(modes.get(CLASS_IDS["NETWORK"]), 2)
+        modes = {(c["effect_class"], c["operation"]): c["mode"] for c in pp["classes"]}
+        self.assertEqual(modes.get((CLASS_IDS["NETWORK"], OP_IDS[("NETWORK", "CONNECT")])), 2)
         self.assertEqual(pp["network"][0]["allow"], 0)
 
     def test_deny_dominates_conflicting_endpoint(self):
@@ -175,10 +179,11 @@ class TestProcPolicyCompilation(unittest.TestCase):
         """Wildcard '*' allow -> every class mode 1 (allow-all)."""
         pp = self._pp([{"event_type": "*", "action": "allow",
                         "path_pattern": "/"}])
-        modes = {c["effect_class"]: c["mode"] for c in pp["classes"]}
-        for cls_id in CLASS_IDS.values():
-            self.assertEqual(modes.get(cls_id), 1,
-                             f"class {cls_id} should be allow-all")
+        modes = {(c["effect_class"], c["operation"]): c["mode"] for c in pp["classes"]}
+        for cls_name, cls_id in CLASS_IDS.items():
+            for op_name, op_id in SCHEMA["effect_classes"][cls_name]["operations"].items():
+                self.assertEqual(modes.get((cls_id, op_id)), 1,
+                                 f"{cls_name}/{op_name} should be allow-all")
 
     def test_wildcard_with_endpoint_raises(self):
         """Wildcard event_type cannot carry an endpoint (fail-closed)."""
@@ -196,10 +201,25 @@ class TestProcPolicyCompilation(unittest.TestCase):
             {"event_type": "KILL", "action": "allow", "path_pattern": "/",
              "endpoint": {"target_cgroup": 0}},
         ])
-        modes = {c["effect_class"]: c["mode"] for c in pp["classes"]}
-        self.assertEqual(modes[CLASS_IDS["NETWORK"]], 1)
-        self.assertEqual(modes[CLASS_IDS["IPC"]], 2)
-        self.assertEqual(modes[CLASS_IDS["SIGNAL"]], 2)
+        modes = {(c["effect_class"], c["operation"]): c["mode"] for c in pp["classes"]}
+        self.assertEqual(modes[(CLASS_IDS["NETWORK"], OP_IDS[("NETWORK", "CONNECT")])], 1)
+        self.assertEqual(modes[(CLASS_IDS["IPC"], OP_IDS[("IPC", "SYSV_SHM")])], 2)
+        self.assertEqual(modes[(CLASS_IDS["SIGNAL"], OP_IDS[("SIGNAL", "KILL")])], 2)
+    def test_operation_allow_does_not_broaden_to_same_class_siblings(self):
+        cases = [
+            ("CONNECT", "NETWORK", "CONNECT", "BIND"),
+            ("MOUNT", "SYSTEM", "MOUNT", "BPF"),
+            ("KILL", "SIGNAL", "KILL", "PTRACE"),
+        ]
+        for event_name, cls_name, allowed_op, forbidden_op in cases:
+            with self.subTest(event=event_name):
+                pp = PolicyIR.from_allowed_ops([{
+                    "event_type": event_name, "action": "allow", "path_pattern": "/",
+                }]).to_proc_policy()
+                modes = {(c["effect_class"], c["operation"]): c["mode"]
+                         for c in pp["classes"]}
+                self.assertEqual(modes[(CLASS_IDS[cls_name], OP_IDS[(cls_name, allowed_op)])], 1)
+                self.assertNotIn((CLASS_IDS[cls_name], OP_IDS[(cls_name, forbidden_op)]), modes)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -332,7 +352,9 @@ class TestReleaseGroupMembers(unittest.TestCase):
         """proc_policy appears in every member's continue_by_cgroup request."""
         mapping = {"e1": "/cg-a", "e2": "/cg-b"}
         orch = self._orch(self._proc_ok(), self._fs_with_agents(mapping))
-        pp = {"classes": [{"effect_class": CLASS_IDS["NETWORK"], "mode": 1}],
+        pp = {"classes": [{"effect_class": CLASS_IDS["NETWORK"],
+                            "operation": OP_IDS[("NETWORK", "CONNECT")],
+                            "mode": 1}],
               "network": [], "ipc": [], "signal": []}
         orch._release_group_members(
             group_id=1, members=["e1", "e2"], graph_generation=1,
@@ -379,6 +401,21 @@ class TestReleaseGroupMembers(unittest.TestCase):
         self.assertIn("/cg-fail", orch._pending_release)
         self.assertTrue(primary_ok,
                         "primary released even though a sibling failed")
+        self.assertNotIn("ack_release_group", orch.fs_client.actions(),
+                         "group ack must wait for every member release")
+
+    def test_missing_member_cgroup_blocks_release_and_ack(self):
+        """Missing member mapping -> fail closed; no partial release or group ack."""
+        mapping = {"e1": "/cg-a"}
+        orch = self._orch(self._proc_ok(), self._fs_with_agents(mapping))
+        out, primary_ok = orch._release_group_members(
+            group_id=9, members=["e1", "e2"], graph_generation=1,
+            primary_cgroup="/cg-a")
+        self.assertEqual(out, {})
+        self.assertFalse(primary_ok)
+        self.assertIn("/cg-a", orch._pending_release)
+        self.assertNotIn("continue_by_cgroup", orch.proc_client.actions())
+        self.assertNotIn("ack_release_group", orch.fs_client.actions())
 
     def test_single_group_ack_for_all_members(self):
         """Multiple members -> exactly one ack_release_group call."""
@@ -482,21 +519,21 @@ class TestThreePhaseEffectDecisions(unittest.TestCase):
             "event_type": "CONNECT", "action": "allow", "path_pattern": "/",
             "endpoint": {"family": 2, "addr": 0, "port": 443},
         }]).to_proc_policy()
-        modes = {c["effect_class"]: c["mode"] for c in pp["classes"]}
-        self.assertEqual(modes[CLASS_IDS["NETWORK"]], 2,
+        modes = {(c["effect_class"], c["operation"]): c["mode"] for c in pp["classes"]}
+        self.assertEqual(modes[(CLASS_IDS["NETWORK"], OP_IDS[("NETWORK", "CONNECT")])], 2,
                          "ENFORCED fine-grained policy must be mode 2")
         self.assertEqual(len(pp["network"]), 1)
         self.assertEqual(pp["network"][0]["allow"], 1)
         self.assertEqual(pp["network"][0]["port"], 443)
 
-    def test_enforced_class_wide_allow_is_mode_one(self):
-        """ENFORCED class-wide allow (no endpoint) -> mode 1 (allow-all at the
-        class level), matching BPF CLASS_POLICY_ALLOW."""
+    def test_enforced_operation_wide_allow_is_mode_one(self):
+        """ENFORCED operation allow (no endpoint) -> only that operation mode 1."""
         pp = PolicyIR.from_allowed_ops([{
             "event_type": "CONNECT", "action": "allow", "path_pattern": "/",
         }]).to_proc_policy()
-        modes = {c["effect_class"]: c["mode"] for c in pp["classes"]}
-        self.assertEqual(modes[CLASS_IDS["NETWORK"]], 1)
+        modes = {(c["effect_class"], c["operation"]): c["mode"] for c in pp["classes"]}
+        self.assertEqual(modes[(CLASS_IDS["NETWORK"], OP_IDS[("NETWORK", "CONNECT")])], 1)
+        self.assertNotIn((CLASS_IDS["NETWORK"], OP_IDS[("NETWORK", "BIND")]), modes)
         self.assertEqual(pp["network"], [])
 
 
@@ -507,6 +544,7 @@ class TestThreePhaseEffectDecisions(unittest.TestCase):
 EFFECT_MATRIX = [
     # filesystem effects observed/enforced by ShadowObserve.
     ("file open/read", "OPEN", "FILESYSTEM", "READ", None, None),
+    ("file write", "WRITE", "FILESYSTEM", "WRITE", None, None),
     ("file create", "CREATE", "FILESYSTEM", "CREATE", None, None),
     ("file delete", "DELETE", "FILESYSTEM", "DELETE", None, None),
     ("file rename", "RENAME", "FILESYSTEM", "RENAME", None, None),
@@ -553,10 +591,9 @@ EFFECT_MATRIX = [
     ("sendfile output", "SENDFILE", "OUTPUT", "SENDFILE", None, None),
     ("splice output", "SPLICE", "OUTPUT", "SPLICE", None, None),
     ("io_uring output", "IO_URING", "OUTPUT", "IO_URING", None, None),
-    # system/kernel-control effects: dangerous interfaces that must not be
-    # schema gaps.  They are class-wide only; fine-grained allow is deliberately
-    # unsupported, so ENFORCED defaults to deny unless SYSTEM is explicitly
-    # allowed as a whole class.
+    # system/kernel-control effects: dangerous interfaces must be individually
+    # addressable by operation. ENFORCED defaults to deny unless the matching
+    # SYSTEM operation, not merely the SYSTEM class, is explicitly allowed.
     ("mount", "MOUNT", "SYSTEM", "MOUNT", None, None),
     ("umount", "UMOUNT", "SYSTEM", "MOUNT", None, None),
     ("namespace unshare", "UNSHARE", "SYSTEM", "NAMESPACE", None, None),
@@ -588,7 +625,8 @@ class TestEffectCoverageMatrix(unittest.TestCase):
         return PolicyIR.from_allowed_ops([op]).to_proc_policy()
 
     def _modes(self, proc_policy):
-        return {c["effect_class"]: c["mode"] for c in proc_policy["classes"]}
+        return {(c["effect_class"], c["operation"]): c["mode"]
+                for c in proc_policy["classes"]}
 
     def test_schema_has_legacy_name_for_every_matrix_effect(self):
         legacy = SCHEMA["legacy_event_map"]
@@ -605,22 +643,22 @@ class TestEffectCoverageMatrix(unittest.TestCase):
                 self.assertEqual(cls, CLASS_IDS[cls_name])
                 self.assertEqual(op, OP_IDS[(cls_name, op_name)])
 
-    def test_every_matrix_effect_compiles_class_wide_allow(self):
-        for label, event_name, cls_name, _op_name, _endpoint, _bucket in EFFECT_MATRIX:
+    def test_every_matrix_effect_compiles_operation_wide_allow(self):
+        for label, event_name, cls_name, op_name, _endpoint, _bucket in EFFECT_MATRIX:
             with self.subTest(effect=label):
                 pp = self._pp(event_name)
-                self.assertEqual(self._modes(pp)[CLASS_IDS[cls_name]], 1)
+                self.assertEqual(self._modes(pp)[(CLASS_IDS[cls_name], OP_IDS[(cls_name, op_name)])], 1)
                 self.assertEqual(pp["network"], [])
                 self.assertEqual(pp["ipc"], [])
                 self.assertEqual(pp["signal"], [])
 
     def test_endpoint_capable_effects_compile_to_fine_grained_mode(self):
-        for label, event_name, cls_name, _op_name, endpoint, bucket in EFFECT_MATRIX:
+        for label, event_name, cls_name, op_name, endpoint, bucket in EFFECT_MATRIX:
             if endpoint is None:
                 continue
             with self.subTest(effect=label):
                 pp = self._pp(event_name, endpoint=endpoint)
-                self.assertEqual(self._modes(pp)[CLASS_IDS[cls_name]], 2)
+                self.assertEqual(self._modes(pp)[(CLASS_IDS[cls_name], OP_IDS[(cls_name, op_name)])], 2)
                 self.assertEqual(len(pp[bucket]), 1)
                 self.assertEqual(pp[bucket][0]["allow"], 1)
 

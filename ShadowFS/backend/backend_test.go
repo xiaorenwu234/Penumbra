@@ -208,8 +208,8 @@ func TestSameEpochRewriteAndNewHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sp3 != sp1 {
-		t.Fatalf("expected same stage path for A (per-epoch layout), got %q vs %q", sp3, sp1)
+	if sp3 == sp1 {
+		t.Fatalf("expected distinct VersionID stage path for A rewrite, got %q", sp3)
 	}
 	if n := b.EpochVersionCount("A"); n != 2 {
 		t.Fatalf("A owns %d versions, want 2", n)
@@ -472,32 +472,28 @@ func TestRollbackClosesEpochFDs(t *testing.T) {
 	}
 }
 
-// --- acceptance case 9: implicit epoch compat (cgroup-only flow) ---
-func TestImplicitEpochCompat(t *testing.T) {
+// --- acceptance case 9: production cgroup attribution fails closed without an explicit epoch ---
+func TestImplicitEpochFailClosed(t *testing.T) {
 	b, orig, _ := newTestBackend(t)
 	f := writeOrig(t, orig, "f.txt", "base")
 
-	ep, err := b.EpochForCgroup("/sys/fs/cgroup/demo")
-	if err != nil {
+	if ep, err := b.EpochForCgroup("/sys/fs/cgroup/demo"); err == nil {
+		t.Fatalf("EpochForCgroup unexpectedly created implicit epoch %q", ep)
+	}
+	if err := b.BeginEpoch("explicit-demo", "/sys/fs/cgroup/demo", "sess-demo"); err != nil {
 		t.Fatal(err)
 	}
-	// Stable while live.
-	ep2, err := b.EpochForCgroup("/sys/fs/cgroup/demo")
-	if err != nil || ep2 != ep {
-		t.Fatalf("EpochForCgroup not stable: %q vs %q (%v)", ep, ep2, err)
+	ep, err := b.EpochForCgroup("/sys/fs/cgroup/demo")
+	if err != nil || ep != "explicit-demo" {
+		t.Fatalf("explicit EpochForCgroup = %q, %v", ep, err)
 	}
-	stageWrite(t, b, ep, f, "implicit")
+	stageWrite(t, b, ep, f, "explicit")
 	mustCommitFinalized(t, b, ep)
-	if got := readFile(t, f); got != "implicit" {
+	if got := readFile(t, f); got != "explicit" {
 		t.Fatalf("backing = %q", got)
 	}
-	// After finalization a NEW implicit epoch is handed out.
-	ep3, err := b.EpochForCgroup("/sys/fs/cgroup/demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ep3 == ep {
-		t.Fatal("finalized implicit epoch must not be reused")
+	if ep2, err := b.EpochForCgroup("/sys/fs/cgroup/demo"); err == nil {
+		t.Fatalf("finalized explicit epoch must fail closed, got %q", ep2)
 	}
 }
 

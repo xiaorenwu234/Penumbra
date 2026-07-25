@@ -328,112 +328,127 @@ class PolicyIR:
         return wl
 
     def to_bpf_class_policy(self) -> List[Dict]:
-        """Emit class-level allow/deny policy entries (for Phase 2 BPF maps).
+        """Emit operation-level allow/deny policy entries for ShadowProc.
 
-        Each entry says whether a whole effect_class is allowed for this
-        cgroup. A class is allowed iff at least one allow rule references
-        an operation in that class (or a wildcard).
+        Each entry is keyed by ``(effect_class, operation)``. A concrete allow
+        rule authorizes only that operation; wildcard allow expands to every
+        operation in the schema. This deliberately avoids class-wide broadening
+        such as CONNECT permitting BIND or MOUNT permitting BPF.
         """
-        allowed_classes: set = set()
+        allowed_ops: set = set()
         for r in self.rules:
             if r["action"] != "allow":
                 continue
             if r["event_type"] == -1:
-                # Wildcard allow → all classes allowed.
                 for cls_name, cls_id in CLASS_IDS.items():
-                    allowed_classes.add(cls_id)
+                    for op_name, op_id in SCHEMA["effect_classes"][cls_name]["operations"].items():
+                        allowed_ops.add((cls_id, op_id))
                 break
-            cls, _ = decode_event_type(r["event_type"])
-            allowed_classes.add(cls)
-        return [
-            {"effect_class": cls_id, "allow": 1 if cls_id in allowed_classes else 0}
-            for cls_name, cls_id in sorted(CLASS_IDS.items(), key=lambda x: x[1])
-        ]
+            allowed_ops.add(decode_event_type(r["event_type"]))
+        out = []
+        for cls_name, cls_id in sorted(CLASS_IDS.items(), key=lambda x: x[1]):
+            for op_name, op_id in sorted(
+                    SCHEMA["effect_classes"][cls_name]["operations"].items(),
+                    key=lambda x: x[1]):
+                out.append({
+                    "effect_class": cls_id,
+                    "operation": op_id,
+                    "allow": 1 if (cls_id, op_id) in allowed_ops else 0,
+                })
+        return out
 
     def to_proc_policy(self) -> Dict:
-        """Emit a fine-grained process-layer policy for ShadowProc (P0-5).
+        """Emit an operation-aware process-layer policy for ShadowProc (P0-5).
 
         Rule semantics:
-          * allow rule WITHOUT endpoint → class-wide allow (mode 1);
-          * rule WITH endpoint          → fine-grained entry (class mode 2,
-            per-endpoint maps decide, default-deny);
+          * allow rule WITHOUT endpoint → operation-wide allow (mode 1);
+          * rule WITH endpoint          → fine-grained entry for that operation
+            (mode 2, per-endpoint maps decide, default-deny);
           * deny rule without endpoint  → contributes nothing (absence of an
             allow already denies, matching to_bpf_class_policy);
           * deny rule with endpoint     → explicit fine-grained deny entry
             (allow=0), which short-circuits wildcard allow entries in BPF.
 
-        A class with BOTH a class-wide allow and endpoint rules is a
-        contradiction → ValueError (fail-closed). When the same endpoint key
-        is named by conflicting rules, deny dominates.
+        A concrete operation with BOTH an operation-wide allow and endpoint
+        rules is a contradiction → ValueError (fail-closed). When the same
+        endpoint key is named by conflicting rules, deny dominates.
 
         Output schema (consumed by ShadowProc's parse_proc_policy):
-          {"classes": [{"effect_class": N, "mode": 1|2}],
-           "network": [{"family":..,"addr":..,"port":..,"allow":0|1}],
-           "ipc":     [{"ipc_type":..,"target":..,"allow":0|1}],
-           "signal":  [{"target_cgroup":..,"allow":0|1}]}
+          {"classes": [{"effect_class": N, "operation": M, "mode": 1|2}],
+           "network": [{"operation": M,"family":..,"addr":..,"port":..,"allow":0|1}],
+           "ipc":     [{"operation": M,"ipc_type":..,"target":..,"allow":0|1}],
+           "signal":  [{"operation": M,"target_cgroup":..,"allow":0|1}]}
         """
         cls_net = CLASS_IDS["NETWORK"]
         cls_ipc = CLASS_IDS["IPC"]
         cls_sig = CLASS_IDS["SIGNAL"]
 
-        class_allow: set = set()
-        fine_classes: set = set()
+        operation_allow: set = set()
+        fine_operations: set = set()
         # key → allow bit; deny (0) dominates conflicting duplicates.
-        net: Dict[Tuple[int, int, int], int] = {}
-        ipc: Dict[Tuple[int, int], int] = {}
-        sig: Dict[int, int] = {}
+        net: Dict[Tuple[int, int, int, int], int] = {}
+        ipc: Dict[Tuple[int, int, int], int] = {}
+        sig: Dict[Tuple[int, int], int] = {}
 
         def merge(d, key, bit):
             d[key] = min(d.get(key, 1), bit)
+
+        def all_schema_ops():
+            for cls_name, cls_id in CLASS_IDS.items():
+                for _op_name, op_id in SCHEMA["effect_classes"][cls_name]["operations"].items():
+                    yield cls_id, op_id
 
         for r in self.rules:
             ep = r.get("endpoint")
             bit = 1 if r["action"] == "allow" else 0
             if r["event_type"] == -1:
-                # Wildcard allow → class-wide allow for every class.
+                # Wildcard allow → operation-wide allow for every schema op.
                 # (Wildcard + endpoint was rejected at compile time.)
                 if bit:
-                    class_allow.update(CLASS_IDS.values())
+                    operation_allow.update(all_schema_ops())
                 continue
-            cls, _op = decode_event_type(r["event_type"])
+            cls, op = decode_event_type(r["event_type"])
+            op_key = (cls, op)
             if ep is None:
                 if bit:
-                    class_allow.add(cls)
+                    operation_allow.add(op_key)
                 continue
-            fine_classes.add(cls)
+            fine_operations.add(op_key)
             if cls == cls_net:
-                merge(net, (ep["family"], ep["addr"], ep["port"]), bit)
+                merge(net, (op, ep["family"], ep["addr"], ep["port"]), bit)
             elif cls == cls_ipc:
-                merge(ipc, (ep["ipc_type"], ep["target"]), bit)
+                merge(ipc, (op, ep["ipc_type"], ep["target"]), bit)
             elif cls == cls_sig:
-                merge(sig, ep["target_cgroup"], bit)
+                merge(sig, (op, ep["target_cgroup"]), bit)
             # other classes were rejected by _validate_endpoint.
 
-        contradictory = class_allow & fine_classes
+        contradictory = operation_allow & fine_operations
         if contradictory:
             raise ValueError(
-                f"contradictory policy: classes {sorted(contradictory)} have "
-                f"both class-wide allow rules and endpoint-scoped rules"
+                f"contradictory policy: operations {sorted(contradictory)} have "
+                f"both operation-wide allow rules and endpoint-scoped rules"
             )
 
         classes = [
-            {"effect_class": c, "mode": 1} for c in sorted(class_allow)
+            {"effect_class": c, "operation": op, "mode": 1}
+            for c, op in sorted(operation_allow)
         ] + [
-            {"effect_class": c, "mode": 2} for c in sorted(fine_classes)
+            {"effect_class": c, "operation": op, "mode": 2}
+            for c, op in sorted(fine_operations)
         ]
         return {
             "classes": classes,
             "network": [
-                {"family": f, "addr": a, "port": p, "allow": bit}
-                for (f, a, p), bit in sorted(net.items())
+                {"operation": op, "family": f, "addr": a, "port": p, "allow": bit}
+                for (op, f, a, p), bit in sorted(net.items())
             ],
             "ipc": [
-                {"ipc_type": t, "target": tg, "allow": bit}
-                for (t, tg), bit in sorted(ipc.items())
+                {"operation": op, "ipc_type": t, "target": tg, "allow": bit}
+                for (op, t, tg), bit in sorted(ipc.items())
             ],
             "signal": [
-                {"target_cgroup": tg, "allow": bit}
-                for tg, bit in sorted(sig.items())
+                {"operation": op, "target_cgroup": tg, "allow": bit}
+                for (op, tg), bit in sorted(sig.items())
             ],
         }
 

@@ -214,11 +214,12 @@ struct {
     __type(value, __u8);   // MODE_*
 } epoch_mode SEC(".maps");
 
-// Class-level policy: per (cgroup, effect_class) -> allow/deny.
+// Operation policy: per (cgroup, effect_class, operation) -> allow/fine/deny.
 // Only consulted in MODE_ENFORCED.
 struct class_policy_key {
     __u64 cgroup_id;
     __u8  effect_class;
+    __u8  operation;
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -231,7 +232,7 @@ struct {
 struct net_policy_key {
     __u64 cgroup_id;
     __u8  family;
-    __u8  _pad0;
+    __u8  operation;
     __u16 port;
     __u32 addr;
 };
@@ -246,7 +247,8 @@ struct {
 struct ipc_policy_key {
     __u64 cgroup_id;
     __u8  ipc_type;
-    __u8  _pad0[7];
+    __u8  operation;
+    __u8  _pad0[6];
     __u64 target;
 };
 struct {
@@ -259,6 +261,8 @@ struct {
 // Signal policy: per (cgroup, target_cgroup) -> allow/deny.
 struct sig_policy_key {
     __u64 cgroup_id;
+    __u8  operation;
+    __u8  _pad0[7];
     __u64 target_cgroup;
 };
 struct {
@@ -297,12 +301,13 @@ struct effect_detail {
     __u64 target;     // ipc: SysV key / inode no; signal: target cgroup id
 };
 
-// One-shot restart token: per tid -> (syscall_nr, effect_class).
+// One-shot restart token: per tid -> (syscall_nr, effect_class, operation).
 // Consumed (deleted) on first match. Grants a single syscall pass.
 struct restart_token_val {
     __u32 syscall_nr;
     __u8  effect_class;
-    __u8  _pad0[3];
+    __u8  operation;
+    __u8  _pad0[2];
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -365,13 +370,15 @@ static __always_inline int is_enabled(void)
 // decides (1=allow, 0=explicit deny, short-circuiting the fallback chain);
 // no entry anywhere = deny. An endpoint the hook could not parse
 // (family == 0) can never match -> deny (fail-closed).
-static __always_inline int net_detail_allows(__u64 cg, const struct effect_detail *d)
+static __always_inline int net_detail_allows(__u64 cg, __u8 operation,
+                                             const struct effect_detail *d)
 {
     if (!d || d->family == 0)
         return 0;
     struct net_policy_key key = {};
     key.cgroup_id = cg;
     key.family = d->family;
+    key.operation = operation;
     __u8 *v;
     key.addr = d->addr;
     key.port = d->port;
@@ -401,13 +408,15 @@ static __always_inline int net_detail_allows(__u64 cg, const struct effect_detai
 
 // Fine-grained IPC check: (ipc_type,target) -> (ipc_type,any-target).
 // An unparsed endpoint (ipc_type == 0) can never match -> deny.
-static __always_inline int ipc_detail_allows(__u64 cg, const struct effect_detail *d)
+static __always_inline int ipc_detail_allows(__u64 cg, __u8 operation,
+                                             const struct effect_detail *d)
 {
     if (!d || d->ipc_type == 0)
         return 0;
     struct ipc_policy_key key = {};
     key.cgroup_id = cg;
     key.ipc_type = d->ipc_type;
+    key.operation = operation;
     __u8 *v;
     key.target = d->target;
     v = bpf_map_lookup_elem(&ipc_policy, &key);
@@ -425,10 +434,12 @@ static __always_inline int ipc_detail_allows(__u64 cg, const struct effect_detai
 // Fine-grained signal check: (target_cgroup) -> (any-target).
 // d == NULL or target == 0 means the hook could not resolve the target
 // cgroup: only an explicit any-target entry can allow it.
-static __always_inline int sig_detail_allows(__u64 cg, const struct effect_detail *d)
+static __always_inline int sig_detail_allows(__u64 cg, __u8 operation,
+                                             const struct effect_detail *d)
 {
     struct sig_policy_key key = {};
     key.cgroup_id = cg;
+    key.operation = operation;
     key.target_cgroup = d ? d->target : 0;
     __u8 *v = bpf_map_lookup_elem(&signal_policy, &key);
     if (v)
@@ -442,10 +453,13 @@ static __always_inline int sig_detail_allows(__u64 cg, const struct effect_detai
     return 0;
 }
 
-// Three-state decision for a syscall + effect_class (+ endpoint detail).
-static __always_inline int check_policy_detail(__u32 syscall_nr, __u8 effect_class,
+// Three-state decision for a syscall + encoded event_type (+ endpoint detail).
+static __always_inline int check_policy_detail(__u32 syscall_nr, __u32 event_type,
                                                const struct effect_detail *d)
 {
+    __u8 effect_class = (__u8)(event_type & 0xFF);
+    __u8 operation = (__u8)((event_type >> 8) & 0xFF);
+
     if (!is_enabled() || !check_cgroup())
         return DECISION_ALLOW;  // not monitored -> no interception
 
@@ -457,7 +471,8 @@ static __always_inline int check_policy_detail(__u32 syscall_nr, __u8 effect_cla
     // If a token matches this tid + syscall_nr, consume it and allow.
     __u32 tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
     struct restart_token_val *tok = bpf_map_lookup_elem(&restart_token, &tid);
-    if (tok && tok->syscall_nr == syscall_nr) {
+    if (tok && tok->syscall_nr == syscall_nr &&
+        tok->effect_class == effect_class && tok->operation == operation) {
         bpf_map_delete_elem(&restart_token, &tid);  // consume
         return DECISION_ALLOW;
     }
@@ -465,7 +480,7 @@ static __always_inline int check_policy_detail(__u32 syscall_nr, __u8 effect_cla
     if (mode == MODE_SPECULATIVE || mode == MODE_AUTHORIZED_PENDING)
         return DECISION_FENCE;  // block + notify, reversible
 
-    // MODE_ENFORCED: consult the class policy first.
+    // MODE_ENFORCED: consult the operation policy first.
     // NOTE: we deliberately do NOT pass merely because stopped_pids is set.
     // A set mark means a group-directed SIGSTOP is already in flight for this
     // tgid, but sibling threads keep running until the stop lands. In ENFORCED
@@ -476,6 +491,7 @@ static __always_inline int check_policy_detail(__u32 syscall_nr, __u8 effect_cla
     struct class_policy_key ckey = {};
     ckey.cgroup_id = cg;
     ckey.effect_class = effect_class;
+    ckey.operation = operation;
     __u8 *cv = bpf_map_lookup_elem(&class_policy, &ckey);
     __u8 cval = cv ? *cv : 0;
     if (cval == CLASS_POLICY_ALLOW)
@@ -487,11 +503,11 @@ static __always_inline int check_policy_detail(__u32 syscall_nr, __u8 effect_cla
     // endpoint level; unparseable endpoints fail closed inside the helpers).
     switch (effect_class) {
     case EFFECT_CLASS_NETWORK:
-        return net_detail_allows(cg, d) ? DECISION_ALLOW : DECISION_DENY;
+        return net_detail_allows(cg, operation, d) ? DECISION_ALLOW : DECISION_DENY;
     case EFFECT_CLASS_IPC:
-        return ipc_detail_allows(cg, d) ? DECISION_ALLOW : DECISION_DENY;
+        return ipc_detail_allows(cg, operation, d) ? DECISION_ALLOW : DECISION_DENY;
     case EFFECT_CLASS_SIGNAL:
-        return sig_detail_allows(cg, d) ? DECISION_ALLOW : DECISION_DENY;
+        return sig_detail_allows(cg, operation, d) ? DECISION_ALLOW : DECISION_DENY;
     default:
         // PRIVILEGE / OUTPUT have no fine-grained map: fine mode is
         // unenforceable for them -> deny (fail-closed).
@@ -501,9 +517,9 @@ static __always_inline int check_policy_detail(__u32 syscall_nr, __u8 effect_cla
 
 // Three-state decision without endpoint detail. In MODE_ENFORCED fine mode
 // the missing endpoint can never match a fine entry -> deny (fail-closed).
-static __always_inline int check_policy(__u32 syscall_nr, __u8 effect_class)
+static __always_inline int check_policy(__u32 syscall_nr, __u32 event_type)
 {
-    return check_policy_detail(syscall_nr, effect_class, NULL);
+    return check_policy_detail(syscall_nr, event_type, NULL);
 }
 
 // Emit event + SIGSTOP + mark as stopped. Returns bpf_send_signal()'s result
@@ -559,76 +575,21 @@ static __always_inline int do_intercept(__u32 syscall_nr, __u32 event_type)
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Network address-family filtering + AF_UNIX system-socket whitelist
+// Network address-family filtering.
 //
-// SCOPE: only OUTBOUND association is intercepted (connect/bind/sendmsg).
-// Inbound listen()/accept() are intentionally NOT hooked: the threat model is
-// data leaving the sandbox, and an accepted inbound peer cannot itself carry
-// data out until the sandboxed process writes to it — which is already covered
-// by the write/sendmsg hooks. Add socket_listen/socket_accept hooks here if the
-// model expands to inbound exposure.
+// SCOPE: outbound association is intercepted as NETWORK operations. AF_NETLINK
+// and AF_UNIX are NOT hard-coded bypasses: they are policy-governed operations
+// because netlink can mutate kernel state and abstract/pathname Unix sockets are
+// host-visible IPC channels that mount namespaces do not isolate.
 //
-// Intercept (external / irreversible):
-//   - AF_INET / AF_INET6  (real remote IP AND loopback 127.0.0.1 / ::1)
-//   - AF_UNIX / AF_LOCAL that is NOT a runtime system socket
-//   - any other non-local family (AF_PACKET, ...)
 // Exempt (not external):
 //   - AF_UNSPEC (connect(AF_UNSPEC) just dissolves association)
-//   - AF_NETLINK (peer is the kernel)
-//   - AF_UNIX hitting the runtime system-socket prefix whitelist
 // ═══════════════════════════════════════════════════════════════
 
 #define AF_UNSPEC   0
 #define AF_UNIX     1
 #define AF_INET     2
 #define AF_INET6    10
-#define AF_NETLINK  16
-
-#define SUN_PATH_OFF 2  // offsetof(struct sockaddr_un, sun_path)
-
-// Compare buf against a compile-time literal prefix (longest whitelist prefix
-// is "/var/run/avahi-daemon/" = 22 chars, so 24 iterations suffice).
-#define HAS_PREFIX(buf, lit) __has_prefix((buf), (lit), sizeof(lit) - 1)
-static __always_inline int __has_prefix(const char *buf, const char *pfx, int n)
-{
-    #pragma unroll
-    for (int i = 0; i < 24; i++) {
-        if (i >= n)
-            return 1;  // all prefix chars matched
-        if (buf[i] != pfx[i])
-            return 0;
-    }
-    return 1;
-}
-
-// Returns 1 if the AF_UNIX sun_path is a runtime system socket (exempt).
-// `path` points to the sun_path bytes (128-byte buffer).
-static __always_inline int unix_path_whitelisted(const char *path)
-{
-    // Abstract namespace socket: sun_path[0] == '\0', name follows.
-    // D-Bus abstract sockets look like @/tmp/dbus-XXXX .
-    if (path[0] == '\0')
-        return HAS_PREFIX(path + 1, "/tmp/dbus-");
-
-    // Pathname sockets
-    if (HAS_PREFIX(path, "/var/run/nscd/"))          return 1;  // NSS cache
-    if (HAS_PREFIX(path, "/run/nscd/"))              return 1;
-    if (HAS_PREFIX(path, "/var/run/dbus/"))          return 1;  // D-Bus
-    if (HAS_PREFIX(path, "/run/dbus/"))              return 1;
-    if (HAS_PREFIX(path, "@/tmp/dbus-"))             return 1;
-    if (HAS_PREFIX(path, "/run/systemd/"))           return 1;  // systemd
-    if (HAS_PREFIX(path, "/var/run/systemd/"))       return 1;
-    if (HAS_PREFIX(path, "/var/lib/sss/"))           return 1;  // SSSD/winbind/samba
-    if (HAS_PREFIX(path, "/run/sssd/"))              return 1;
-    if (HAS_PREFIX(path, "/var/run/sssd/"))          return 1;
-    if (HAS_PREFIX(path, "/var/run/samba/"))         return 1;
-    if (HAS_PREFIX(path, "/run/samba/"))             return 1;
-    if (HAS_PREFIX(path, "/var/lib/samba/"))         return 1;
-    if (HAS_PREFIX(path, "/dev/log"))                return 1;  // syslog
-    if (HAS_PREFIX(path, "/var/run/avahi-daemon/"))  return 1;  // avahi/mDNS
-    if (HAS_PREFIX(path, "/run/avahi-daemon/"))      return 1;
-    return 0;
-}
 
 // Classify a connect()/bind() target. Returns 1 if it should be intercepted.
 // `address` is a kernel copy (sockaddr_storage, 128 bytes), safe to over-read.
@@ -638,19 +599,10 @@ static __always_inline int net_addr_should_block(struct sockaddr *address, int a
     if (addrlen >= 2)
         bpf_probe_read_kernel(&family, sizeof(family), address);
 
-    if (family == AF_UNSPEC || family == AF_NETLINK)
-        return 0;  // exempt
+    if (family == AF_UNSPEC)
+        return 0;  // exempt: disconnect-only association reset
 
-    if (family == AF_UNIX) {
-        char path[128] = {};
-        // sun_path lives at offset 2 within the 128-byte storage.
-        bpf_probe_read_kernel(path, 108, (char *)address + SUN_PATH_OFF);
-        if (unix_path_whitelisted(path))
-            return 0;  // system socket -> exempt
-        return 1;
-    }
-
-    // AF_INET / AF_INET6 (incl. loopback) / any other external family
+    // AF_NETLINK, AF_UNIX, AF_INET/6, AF_PACKET, ... are policy-governed.
     return 1;
 }
 
@@ -681,7 +633,7 @@ int BPF_PROG(shadow_socket_connect, struct socket *sock,
         bpf_probe_read_kernel(&ip, 4, (void *)address + 4);
         // AF_INET=2, port=65535 (0xFFFF in network order), ip=192.0.2.255 (0xFF0200C0 on LE)
         if (family == 2 && port == 0xFFFF && ip == 0xFF0200C0) {
-            int d = check_policy(42, EFFECT_CLASS_NETWORK);
+            int d = check_policy(42, EVENT_EXIT_HOLD);
             if (d == DECISION_ALLOW)
                 return 0;
             if (d == DECISION_FENCE) {
@@ -708,14 +660,14 @@ int BPF_PROG(shadow_socket_connect, struct socket *sock,
         det.port = __bpf_ntohs(port_be);
         det.addr = __bpf_ntohl(addr_n);
     }
-    int d = check_policy_detail(42, EFFECT_CLASS_NETWORK, &det);
+    int d = check_policy_detail(42, EVENT_NETWORK_CONNECT, &det);
     if (d == DECISION_ALLOW)
         return 0;
 
-    // For FENCE and DENY, still check address exemption (system sockets,
-    // AF_UNSPEC, AF_NETLINK) — these are always allowed regardless of mode.
+    // For FENCE and DENY, still allow only AF_UNSPEC disconnects. AF_NETLINK
+    // and AF_UNIX are policy-governed and must be explicitly allowed.
     if (!net_addr_should_block(address, addrlen))
-        return 0;  // exempt address -> always allow
+        return 0;
 
     if (d == DECISION_FENCE) {
         do_intercept(42, EVENT_NETWORK_CONNECT);
@@ -739,46 +691,17 @@ int BPF_PROG(shadow_socket_sendmsg, struct socket *sock,
         det.addr = __bpf_ntohl(BPF_CORE_READ(sk, __sk_common.skc_daddr));
         det.port = __bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
     }
-    int d = check_policy_detail(46, EFFECT_CLASS_NETWORK, &det);
+    int d = check_policy_detail(46, EVENT_NETWORK_SEND, &det);
     if (d == DECISION_ALLOW)
         return 0;
 
-    if (family == AF_UNSPEC || family == AF_NETLINK)
-        return 0;  // exempt
+    if (family == AF_UNSPEC)
+        return 0;  // exempt: disconnect-only association reset
 
-    if (family == AF_UNIX) {
-        char path[128] = {};
-        void *msg_name = BPF_CORE_READ(msg, msg_name);
-        int namelen = BPF_CORE_READ(msg, msg_namelen);
+    // AF_NETLINK and AF_UNIX are policy-governed. Abstract Unix sockets are not
+    // mount-namespace isolated, so no pathname-prefix whitelist is applied.
 
-        if (msg_name && namelen > SUN_PATH_OFF) {
-            // Unconnected datagram sendto(): explicit destination in msg_name.
-            bpf_probe_read_kernel(path, 108, (char *)msg_name + SUN_PATH_OFF);
-            if (unix_path_whitelisted(path))
-                return 0;  // system socket -> exempt
-        } else {
-            // Connected AF_UNIX stream: recover the peer's bound path so the
-            // whitelist still applies (e.g. writes to the D-Bus socket).
-            struct sock *peer = BPF_CORE_READ((struct unix_sock *)sk, peer);
-            struct unix_address *uaddr = NULL;
-            if (peer)
-                uaddr = BPF_CORE_READ((struct unix_sock *)peer, addr);
-            if (!uaddr)
-                uaddr = BPF_CORE_READ((struct unix_sock *)sk, addr);
-            if (uaddr) {
-                int alen = BPF_CORE_READ(uaddr, len);
-                __u32 n = (alen > SUN_PATH_OFF) ? (__u32)(alen - SUN_PATH_OFF) : 0;
-                n &= 127;  // bound for the verifier (path[128])
-                bpf_probe_read_kernel(path, n,
-                    (char *)uaddr + offsetof(struct unix_address, name) + SUN_PATH_OFF);
-            }
-            if (unix_path_whitelisted(path))
-                return 0;  // system socket -> exempt
-        }
-        // Non-whitelisted AF_UNIX: fall through to FENCE/DENY below.
-    }
-
-    // External destination (AF_INET / AF_INET6 / non-whitelisted AF_UNIX / other).
+    // External destination (AF_INET / AF_INET6 / AF_NETLINK / AF_UNIX / other).
     if (d == DECISION_FENCE) {
         do_intercept(46, EVENT_NETWORK_SEND);
         return -ERESTARTSYS;
@@ -804,12 +727,12 @@ int BPF_PROG(shadow_socket_bind, struct socket *sock,
         det.port = __bpf_ntohs(port_be);
         det.addr = __bpf_ntohl(addr_n);
     }
-    int d = check_policy_detail(49, EFFECT_CLASS_NETWORK, &det);
+    int d = check_policy_detail(49, EVENT_NETWORK_BIND, &det);
     if (d == DECISION_ALLOW)
         return 0;
-    // For FENCE and DENY, check address exemption.
+    // For FENCE and DENY, allow only AF_UNSPEC disconnect/reset binds.
     if (!net_addr_should_block(address, addrlen))
-        return 0;  // exempt address -> always allow
+        return 0;
     if (d == DECISION_FENCE) {
         do_intercept(49, EVENT_NETWORK_BIND);
         return -ERESTARTSYS;
@@ -827,7 +750,7 @@ int BPF_PROG(shadow_shm_alloc, struct kern_ipc_perm *perm)
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_SHM;
     det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
-    int d = check_policy_detail(29, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(29, EVENT_IPC_SHM, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -843,7 +766,7 @@ int BPF_PROG(shadow_shm_associate, struct kern_ipc_perm *perm, int shmflg)
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_SHM;
     det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
-    int d = check_policy_detail(29, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(29, EVENT_IPC_SHM, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -861,7 +784,7 @@ int BPF_PROG(shadow_shm_shmat, struct kern_ipc_perm *shp,
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_SHM;
     det.target = (__u64)(__u32)BPF_CORE_READ(shp, key);
-    int d = check_policy_detail(30, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(30, EVENT_IPC_SHM, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -878,7 +801,7 @@ int BPF_PROG(shadow_shm_shmctl, struct kern_ipc_perm *perm, int cmd)
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_SHM;
     det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
-    int d = check_policy_detail(31, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(31, EVENT_IPC_SHM, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -906,7 +829,7 @@ int BPF_PROG(shadow_mmap_file, struct file *file,
     det.ipc_type = IPC_TYPE_MMAP;
     if (ino_p)
         det.target = BPF_CORE_READ(ino_p, i_ino);
-    int d = check_policy_detail(9, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(9, EVENT_IPC_MMAP, &det);
     if (d == DECISION_ALLOW)
         return 0;
 
@@ -962,7 +885,7 @@ int BPF_PROG(shadow_msg_alloc, struct kern_ipc_perm *perm)
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MSG;
     det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
-    int d = check_policy_detail(68, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(68, EVENT_IPC_MSG, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -978,7 +901,7 @@ int BPF_PROG(shadow_msg_associate, struct kern_ipc_perm *perm, int msqflg)
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MSG;
     det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
-    int d = check_policy_detail(68, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(68, EVENT_IPC_MSG, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -996,7 +919,7 @@ int BPF_PROG(shadow_msg_msgsnd, struct kern_ipc_perm *msq,
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MSG;
     det.target = (__u64)(__u32)BPF_CORE_READ(msq, key);
-    int d = check_policy_detail(69, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(69, EVENT_IPC_MSG, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1015,7 +938,7 @@ int BPF_PROG(shadow_msg_msgrcv, struct kern_ipc_perm *msq,
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MSG;
     det.target = (__u64)(__u32)BPF_CORE_READ(msq, key);
-    int d = check_policy_detail(70, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(70, EVENT_IPC_MSG, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1032,7 +955,7 @@ int BPF_PROG(shadow_msg_msgctl, struct kern_ipc_perm *perm, int cmd)
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MSG;
     det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
-    int d = check_policy_detail(71, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(71, EVENT_IPC_MSG, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1050,7 +973,7 @@ int BPF_PROG(shadow_sem_alloc, struct kern_ipc_perm *perm)
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_SEM;
     det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
-    int d = check_policy_detail(64, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(64, EVENT_IPC_SEM, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1066,7 +989,7 @@ int BPF_PROG(shadow_sem_associate, struct kern_ipc_perm *perm, int semflg)
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_SEM;
     det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
-    int d = check_policy_detail(64, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(64, EVENT_IPC_SEM, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1084,7 +1007,7 @@ int BPF_PROG(shadow_sem_semop, struct kern_ipc_perm *perm,
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_SEM;
     det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
-    int d = check_policy_detail(65, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(65, EVENT_IPC_SEM, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1101,7 +1024,7 @@ int BPF_PROG(shadow_sem_semctl, struct kern_ipc_perm *perm, int cmd)
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_SEM;
     det.target = (__u64)(__u32)BPF_CORE_READ(perm, key);
-    int d = check_policy_detail(66, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(66, EVENT_IPC_SEM, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1137,7 +1060,7 @@ int BPF_PROG(shadow_task_kill, struct task_struct *p,
     __u64 tgt_cg = BPF_CORE_READ(p, cgroups, dfl_cgrp, kn, id);
     struct effect_detail det = {};
     det.target = tgt_cg;
-    int d = check_policy_detail(62, EFFECT_CLASS_SIGNAL, &det);
+    int d = check_policy_detail(62, EVENT_SIGNAL_KILL, &det);
     if (d == DECISION_ALLOW)
         return 0;
 
@@ -1158,7 +1081,7 @@ int BPF_PROG(shadow_task_kill, struct task_struct *p,
 SEC("lsm/ptrace_access_check")
 int BPF_PROG(shadow_ptrace, struct task_struct *child, unsigned int mode)
 {
-    int d = check_policy(101, EFFECT_CLASS_SIGNAL);
+    int d = check_policy(101, EVENT_SIGNAL_PTRACE);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1177,7 +1100,7 @@ int BPF_PROG(shadow_ptrace, struct task_struct *child, unsigned int mode)
 SEC("fmod_ret/__x64_sys_write")
 int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
 {
-    int d = check_policy(1, EFFECT_CLASS_OUTPUT);
+    int d = check_policy(1, EVENT_OUTPUT_WRITE);
     if (d == DECISION_ALLOW)
         return 0;
 
@@ -1253,7 +1176,7 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_writev")
 int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
 {
-    int d = check_policy(20, EFFECT_CLASS_OUTPUT);
+    int d = check_policy(20, EVENT_OUTPUT_WRITE);
     if (d == DECISION_ALLOW)
         return 0;
 
@@ -1336,7 +1259,7 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_sendfile64")
 int BPF_PROG(shadow_sys_sendfile, struct pt_regs *regs)
 {
-    int d = check_policy(40, EFFECT_CLASS_OUTPUT);
+    int d = check_policy(40, EVENT_OUTPUT_SENDFILE);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1349,7 +1272,7 @@ int BPF_PROG(shadow_sys_sendfile, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_splice")
 int BPF_PROG(shadow_sys_splice, struct pt_regs *regs)
 {
-    int d = check_policy(275, EFFECT_CLASS_OUTPUT);
+    int d = check_policy(275, EVENT_OUTPUT_SPLICE);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1362,7 +1285,7 @@ int BPF_PROG(shadow_sys_splice, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_vmsplice")
 int BPF_PROG(shadow_sys_vmsplice, struct pt_regs *regs)
 {
-    int d = check_policy(278, EFFECT_CLASS_OUTPUT);
+    int d = check_policy(278, EVENT_OUTPUT_SPLICE);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1375,7 +1298,7 @@ int BPF_PROG(shadow_sys_vmsplice, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_tee")
 int BPF_PROG(shadow_sys_tee, struct pt_regs *regs)
 {
-    int d = check_policy(276, EFFECT_CLASS_OUTPUT);
+    int d = check_policy(276, EVENT_OUTPUT_SPLICE);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1392,7 +1315,7 @@ int BPF_PROG(shadow_sys_tee, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_io_uring_setup")
 int BPF_PROG(shadow_sys_io_uring_setup, struct pt_regs *regs)
 {
-    int d = check_policy(425, EFFECT_CLASS_OUTPUT);
+    int d = check_policy(425, EVENT_OUTPUT_IO_URING);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1405,7 +1328,7 @@ int BPF_PROG(shadow_sys_io_uring_setup, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_io_uring_enter")
 int BPF_PROG(shadow_sys_io_uring_enter, struct pt_regs *regs)
 {
-    int d = check_policy(426, EFFECT_CLASS_OUTPUT);
+    int d = check_policy(426, EVENT_OUTPUT_IO_URING);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1418,7 +1341,7 @@ int BPF_PROG(shadow_sys_io_uring_enter, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_io_uring_register")
 int BPF_PROG(shadow_sys_io_uring_register, struct pt_regs *regs)
 {
-    int d = check_policy(427, EFFECT_CLASS_OUTPUT);
+    int d = check_policy(427, EVENT_OUTPUT_IO_URING);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1439,7 +1362,7 @@ int BPF_PROG(shadow_sys_io_uring_register, struct pt_regs *regs)
 
 static __always_inline int system_guard(__u32 syscall_nr, __u32 event_type)
 {
-    int d = check_policy(syscall_nr, EFFECT_CLASS_SYSTEM);
+    int d = check_policy(syscall_nr, event_type);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1518,7 +1441,7 @@ int BPF_PROG(shadow_sys_process_vm_writev, struct pt_regs *regs)
 SEC("fmod_ret/__x64_sys_ioctl")
 int BPF_PROG(shadow_sys_ioctl, struct pt_regs *regs)
 {
-    int d = check_policy(16, EFFECT_CLASS_SYSTEM);
+    int d = check_policy(16, EVENT_SYSTEM_TTY_IOCTL);
     if (d == DECISION_ALLOW)
         return 0;
 
@@ -1568,7 +1491,7 @@ int BPF_PROG(shadow_sys_shmdt, struct pt_regs *regs)
 {
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_SHM;  // detach: target unknown -> wildcard only
-    int d = check_policy_detail(67, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(67, EVENT_IPC_SHM, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1583,7 +1506,7 @@ int BPF_PROG(shadow_sys_mq_open, struct pt_regs *regs)
 {
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MQ;  // queue name not parsed -> wildcard only
-    int d = check_policy_detail(240, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(240, EVENT_IPC_MQ, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1598,7 +1521,7 @@ int BPF_PROG(shadow_sys_mq_timedsend, struct pt_regs *regs)
 {
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MQ;
-    int d = check_policy_detail(242, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(242, EVENT_IPC_MQ, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1613,7 +1536,7 @@ int BPF_PROG(shadow_sys_mq_timedreceive, struct pt_regs *regs)
 {
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MQ;
-    int d = check_policy_detail(243, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(243, EVENT_IPC_MQ, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1628,7 +1551,7 @@ int BPF_PROG(shadow_sys_mq_notify, struct pt_regs *regs)
 {
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MQ;
-    int d = check_policy_detail(244, EFFECT_CLASS_IPC, &det);
+    int d = check_policy_detail(244, EVENT_IPC_MQ, &det);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1655,7 +1578,7 @@ int BPF_PROG(shadow_sys_mq_notify, struct pt_regs *regs)
 SEC("lsm/bprm_check_security")
 int BPF_PROG(shadow_bprm_check, struct linux_binprm *bprm)
 {
-    int d = check_policy(59, EFFECT_CLASS_PRIVILEGE);
+    int d = check_policy(59, EVENT_PRIV_EXEC);
     if (d == DECISION_ALLOW)
         return 0;
 
@@ -1680,7 +1603,7 @@ SEC("lsm/task_fix_setuid")
 int BPF_PROG(shadow_task_fix_setuid, struct cred *new_cred,
              const struct cred *old, int flags)
 {
-    int d = check_policy(105, EFFECT_CLASS_PRIVILEGE);
+    int d = check_policy(105, EVENT_PRIV_SETUID);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1695,7 +1618,7 @@ SEC("lsm/task_fix_setgid")
 int BPF_PROG(shadow_task_fix_setgid, struct cred *new_cred,
              const struct cred *old, int flags)
 {
-    int d = check_policy(106, EFFECT_CLASS_PRIVILEGE);
+    int d = check_policy(106, EVENT_PRIV_SETGID);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1710,7 +1633,7 @@ SEC("lsm/task_fix_setgroups")
 int BPF_PROG(shadow_task_fix_setgroups, struct cred *new_cred,
              const struct cred *old)
 {
-    int d = check_policy(116, EFFECT_CLASS_PRIVILEGE);
+    int d = check_policy(116, EVENT_PRIV_SETGROUPS);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {
@@ -1726,7 +1649,7 @@ int BPF_PROG(shadow_capset, struct cred *new_cred, const struct cred *old,
              const kernel_cap_t *effective, const kernel_cap_t *inheritable,
              const kernel_cap_t *permitted)
 {
-    int d = check_policy(126, EFFECT_CLASS_PRIVILEGE);
+    int d = check_policy(126, EVENT_PRIV_CAPSET);
     if (d == DECISION_ALLOW)
         return 0;
     if (d == DECISION_FENCE) {

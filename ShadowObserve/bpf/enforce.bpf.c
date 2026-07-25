@@ -85,13 +85,31 @@ int BPF_PROG(enforce_file_open, struct file *file, int ret)
     if (!enforcing(&cgroup_id))
         return 0;
 
-    /* Same OPEN-vs-CREATE classification as the observer's file_open. */
+    /* Same READ-vs-WRITE classification as the observer's file_open. */
     unsigned int flags = BPF_CORE_READ(file, f_flags);
-    __u16 event_type = (flags & O_CREAT) ? FS_EVENT_CREATE : FS_EVENT_OPEN;
+    __u16 event_type = cri_open_event(flags);
 
     struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
     if (enforce_dentry(cgroup_id, event_type, dentry) < 0)
         return -1;              /* EPERM */
+    return 0;
+}
+
+SEC("lsm/file_permission")
+int BPF_PROG(enforce_file_permission, struct file *file, int mask, int ret)
+{
+    if (ret != 0)
+        return ret;
+
+    __u64 cgroup_id;
+    if (!enforcing(&cgroup_id))
+        return 0;
+    if (!(mask & MAY_WRITE))
+        return 0;
+
+    struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
+    if (enforce_dentry(cgroup_id, FS_EVENT_WRITE, dentry) < 0)
+        return -1;
     return 0;
 }
 

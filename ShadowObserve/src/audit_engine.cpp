@@ -21,6 +21,7 @@ namespace ghostbpf_observ {
 const char *ObservEvent::event_name() const {
     switch (event_type) {
     case FS_EVENT_OPEN:     return "OPEN";
+    case FS_EVENT_WRITE:    return "WRITE";
     case FS_EVENT_CREATE:   return "CREATE";
     case FS_EVENT_DELETE:   return "DELETE";
     case FS_EVENT_RENAME:   return "RENAME";
@@ -123,6 +124,7 @@ static bool parse_json_line(const std::string &line, ObservEvent &evt) {
         else if (key == "arg3")     evt.arg3         = static_cast<uint32_t>(std::stoul(val));
         else if (key == "event") {
             if (val == "OPEN")       evt.event_type = FS_EVENT_OPEN;
+            else if (val == "WRITE") evt.event_type = FS_EVENT_WRITE;
             else if (val == "CREATE") evt.event_type = FS_EVENT_CREATE;
             else if (val == "DELETE") evt.event_type = FS_EVENT_DELETE;
             else if (val == "RENAME") evt.event_type = FS_EVENT_RENAME;

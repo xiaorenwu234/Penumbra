@@ -48,6 +48,7 @@ static const char *event_type_name(uint16_t event_type) {
     switch (event_type) {
     /* FS events */
     case FS_EVENT_OPEN:     return "OPEN";
+    case FS_EVENT_WRITE:    return "WRITE";
     case FS_EVENT_CREATE:   return "CREATE";
     case FS_EVENT_DELETE:   return "DELETE";
     case FS_EVENT_RENAME:   return "RENAME";

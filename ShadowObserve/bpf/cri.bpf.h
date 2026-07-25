@@ -46,9 +46,23 @@
  * truncated - identically on both sides, so still consistent. */
 #define CRI_NAME_MAX   48
 
-/* open(2) O_CREAT: file_open classifies as CREATE vs OPEN using this, on BOTH
- * the observe and enforce sides, so the two agree. */
-#define O_CREAT 0x40
+/* open(2) flags used by file_open classification. Writable opens are WRITE;
+ * inode_create separately records CREATE for newly-created files. */
+#define O_CREAT   0x40
+#define O_ACCMODE 0x3
+#define O_WRONLY  0x1
+#define O_RDWR    0x2
+#define O_TRUNC   0x200
+#define O_APPEND  0x400
+#define MAY_WRITE 0x2
+
+static __always_inline __u16 cri_open_event(unsigned int flags)
+{
+    unsigned int acc = flags & O_ACCMODE;
+    if (acc == O_WRONLY || acc == O_RDWR || (flags & (O_TRUNC | O_APPEND)))
+        return FS_EVENT_WRITE;
+    return FS_EVENT_OPEN;
+}
 
 /* iattr->ia_valid bits (not exported into vmlinux BTF, so defined here). Used
  * by inode_setattr to derive CHMOD / CHOWN / TRUNCATE identically on each side. */
@@ -153,13 +167,13 @@ static __always_inline int cri_build_path(struct dentry *dentry, char *buf)
 /*
  * cri_setattr_event - map an iattr->ia_valid bitmask to a single FS_EVENT_*.
  * Used by inode_setattr on BOTH sides so a chmod+chown in one setattr is
- * classified identically (priority: TRUNCATE > CHMOD > CHOWN). Returns 0 if the
+ * classified identically (priority: WRITE/TRUNCATE > CHMOD > CHOWN). Returns 0 if the
  * setattr touches none of the tracked attributes.
  */
 static __always_inline __u16 cri_setattr_event(unsigned int ia_valid)
 {
     if (ia_valid & ATTR_SIZE)
-        return FS_EVENT_TRUNCATE;
+        return FS_EVENT_WRITE;
     if (ia_valid & ATTR_MODE)
         return FS_EVENT_CHMOD;
     if (ia_valid & (ATTR_UID | ATTR_GID))

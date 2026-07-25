@@ -279,18 +279,23 @@ func epochForCtx(ctx context.Context) (backend.EpochID, syscall.Errno) {
 // --- Stat helpers ---
 
 // resolveStat resolves rel in the caller's epoch view and stats the
-// resolved physical path. Returns (physical path, stat, found). Recording of
-// the read-from dependency happens inside backend.Resolve.
-func (n *OverlayNode) resolveStat(epochID backend.EpochID, rel string) (string, *syscall.Stat_t, bool) {
+// resolved physical path. Returns (physical path, stat, errno). Recording of
+// the read-from dependency happens inside backend.Resolve; if that dependency
+// cannot be durably recorded, fail closed with EIO.
+func (n *OverlayNode) resolveStat(epochID backend.EpochID, rel string) (string, *syscall.Stat_t, syscall.Errno) {
 	res := shadowBackend.Resolve(epochID, filepath.Join(n.root.origDir, rel))
+	if res.Err != nil {
+		log.Printf("[overlay] Resolve read-dep failed: %v", res.Err)
+		return "", nil, syscall.EIO
+	}
 	if !res.Exists {
-		return "", nil, false
+		return "", nil, syscall.ENOENT
 	}
 	var st syscall.Stat_t
 	if err := syscall.Lstat(res.PhysicalPath, &st); err != nil {
-		return "", nil, false
+		return "", nil, fs.ToErrno(err)
 	}
-	return res.PhysicalPath, &st, true
+	return res.PhysicalPath, &st, 0
 }
 
 func attrFromStat(st *syscall.Stat_t, out *fuse.Attr) {
@@ -317,9 +322,9 @@ func (n *OverlayNode) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.At
 	if errno != 0 {
 		return errno
 	}
-	_, st, ok := n.resolveStat(epochID, n.relPath())
-	if !ok {
-		return syscall.ENOENT
+	_, st, errno := n.resolveStat(epochID, n.relPath())
+	if errno != 0 {
+		return errno
 	}
 	attrFromStat(st, &out.Attr)
 	return 0
@@ -331,9 +336,9 @@ func (n *OverlayNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		return nil, errno
 	}
 	rel := filepath.Join(n.relPath(), name)
-	_, st, ok := n.resolveStat(epochID, rel)
-	if !ok {
-		return nil, syscall.ENOENT
+	_, st, errno := n.resolveStat(epochID, rel)
+	if errno != 0 {
+		return nil, errno
 	}
 	attrFromStat(st, &out.Attr)
 	stable := fs.StableAttr{Mode: st.Mode & syscall.S_IFMT, Ino: st.Ino}
@@ -365,6 +370,10 @@ func (n *OverlayNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 	// even when the kernel served a stale cached inode.
 	if rel != "" {
 		res := shadowBackend.Resolve(epochID, n.origPath())
+		if res.Err != nil {
+			log.Printf("[overlay] Readdir Resolve failed: %v", res.Err)
+			return nil, syscall.EIO
+		}
 		if !res.Exists {
 			return nil, syscall.ENOENT
 		}
@@ -403,6 +412,10 @@ func (n *OverlayNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 		// still-live MAP_SHARED mapping that a frozen process has not yet
 		// written back are captured by quiesceMappings at commit time.
 		res := shadowBackend.Resolve(epochID, n.origPath())
+		if res.Err != nil {
+			log.Printf("[overlay] Open Resolve failed: %v", res.Err)
+			return nil, 0, syscall.EIO
+		}
 		if !res.Exists {
 			return nil, 0, syscall.ENOENT
 		}
@@ -417,6 +430,10 @@ func (n *OverlayNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 		// Read: resolve the epoch's view; Resolve records the read-from
 		// edge on the actually-observed version.
 		res := shadowBackend.Resolve(epochID, n.origPath())
+		if res.Err != nil {
+			log.Printf("[overlay] Open Resolve failed: %v", res.Err)
+			return nil, 0, syscall.EIO
+		}
 		if !res.Exists {
 			return nil, 0, syscall.ENOENT
 		}
@@ -447,8 +464,14 @@ func (n *OverlayNode) Create(ctx context.Context, name string, flags uint32, mod
 	// Reject create inside a deleted directory even if the kernel served a
 	// stale cached inode for the parent (ancestor whiteout check happens
 	// inside Resolve on the PARENT path).
-	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" && !parentRes.Exists {
-		return nil, nil, 0, syscall.ENOENT
+	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" {
+		if parentRes.Err != nil {
+			log.Printf("[overlay] Create parent Resolve failed: %v", parentRes.Err)
+			return nil, nil, 0, syscall.EIO
+		}
+		if !parentRes.Exists {
+			return nil, nil, 0, syscall.ENOENT
+		}
 	}
 	stagePath, err := shadowBackend.PrepareCreate(epochID, origChild)
 	if err != nil {
@@ -483,6 +506,10 @@ func (n *OverlayNode) Create(ctx context.Context, name string, flags uint32, mod
 // the file (its own or the visible version, else backing).
 func (n *OverlayNode) xattrReadPath(epochID backend.EpochID) (string, syscall.Errno) {
 	res := shadowBackend.Resolve(epochID, n.origPath())
+	if res.Err != nil {
+		log.Printf("[overlay] xattr Resolve failed: %v", res.Err)
+		return "", syscall.EIO
+	}
 	if !res.Exists {
 		return "", syscall.ENOENT
 	}
@@ -505,8 +532,14 @@ func (n *OverlayNode) Link(ctx context.Context, target fs.InodeEmbedder, name st
 	targetOrig := tgt.origPath()
 	linkOrig := n.origChildPath(name)
 
-	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" && !parentRes.Exists {
-		return nil, syscall.ENOENT
+	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" {
+		if parentRes.Err != nil {
+			log.Printf("[overlay] Link parent Resolve failed: %v", parentRes.Err)
+			return nil, syscall.EIO
+		}
+		if !parentRes.Exists {
+			return nil, syscall.ENOENT
+		}
 	}
 	stagePath, err := shadowBackend.RecordLink(epochID, targetOrig, linkOrig)
 	if err != nil {
@@ -531,14 +564,24 @@ func (n *OverlayNode) Mknod(ctx context.Context, name string, mode uint32, rdev 
 		return nil, errno
 	}
 	origChild := n.origChildPath(name)
-	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" && !parentRes.Exists {
-		return nil, syscall.ENOENT
+	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" {
+		if parentRes.Err != nil {
+			log.Printf("[overlay] Mknod parent Resolve failed: %v", parentRes.Err)
+			return nil, syscall.EIO
+		}
+		if !parentRes.Exists {
+			return nil, syscall.ENOENT
+		}
 	}
 	if err := shadowBackend.RecordMknod(epochID, origChild, mode, uint64(rdev)); err != nil {
 		log.Printf("[overlay] RecordMknod failed: %v", err)
 		return nil, fs.ToErrno(err)
 	}
 	res := shadowBackend.Resolve(epochID, origChild)
+	if res.Err != nil {
+		log.Printf("[overlay] Mknod child Resolve failed: %v", res.Err)
+		return nil, syscall.EIO
+	}
 	if !res.Exists {
 		return nil, syscall.EIO
 	}
@@ -630,14 +673,24 @@ func (n *OverlayNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 		return nil, errno
 	}
 	origChild := n.origChildPath(name)
-	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" && !parentRes.Exists {
-		return nil, syscall.ENOENT
+	if parentRes := shadowBackend.Resolve(epochID, n.origPath()); n.relPath() != "" {
+		if parentRes.Err != nil {
+			log.Printf("[overlay] Mkdir parent Resolve failed: %v", parentRes.Err)
+			return nil, syscall.EIO
+		}
+		if !parentRes.Exists {
+			return nil, syscall.ENOENT
+		}
 	}
 	if err := shadowBackend.RecordMkdir(epochID, origChild, mode); err != nil {
 		log.Printf("[overlay] RecordMkdir failed: %v", err)
 		return nil, syscall.EIO
 	}
 	res := shadowBackend.Resolve(epochID, origChild)
+	if res.Err != nil {
+		log.Printf("[overlay] Mkdir child Resolve failed: %v", res.Err)
+		return nil, syscall.EIO
+	}
 	if !res.Exists {
 		return nil, syscall.EIO
 	}
@@ -660,13 +713,20 @@ func (n *OverlayNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	// Resolve rejects an already-deleted path (own or ancestor whiteout)
 	// even when the kernel held a stale cached inode.
 	res := shadowBackend.Resolve(epochID, origChild)
+	if res.Err != nil {
+		log.Printf("[overlay] Rmdir Resolve failed: %v", res.Err)
+		return syscall.EIO
+	}
 	if !res.Exists {
 		return syscall.ENOENT
 	}
 	// POSIX rmdir must fail with ENOTEMPTY on non-empty directories. Check
 	// the MERGED view (backing + visible versions minus whiteouts), not any
 	// single physical directory.
-	if merged, err := shadowBackend.MergeReaddirVersions(epochID, origChild); err == nil && len(merged) > 0 {
+	if merged, err := shadowBackend.MergeReaddirVersions(epochID, origChild); err != nil {
+		log.Printf("[overlay] Rmdir MergeReaddirVersions failed: %v", err)
+		return fs.ToErrno(err)
+	} else if len(merged) > 0 {
 		return syscall.ENOTEMPTY
 	}
 	if err := shadowBackend.RecordRmdir(epochID, origChild); err != nil {
@@ -683,6 +743,10 @@ func (n *OverlayNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 	origChild := n.origChildPath(name)
 	res := shadowBackend.Resolve(epochID, origChild)
+	if res.Err != nil {
+		log.Printf("[overlay] Unlink Resolve failed: %v", res.Err)
+		return syscall.EIO
+	}
 	if !res.Exists {
 		return syscall.ENOENT
 	}
@@ -708,6 +772,10 @@ func (n *OverlayNode) Rename(ctx context.Context, name string, newParent fs.Inod
 	// Source must exist in the epoch's view (Resolve also rejects deleted
 	// ancestors and records the read-from edge on the moved version).
 	srcRes := shadowBackend.Resolve(epochID, oldOrig)
+	if srcRes.Err != nil {
+		log.Printf("[overlay] Rename source Resolve failed: %v", srcRes.Err)
+		return syscall.EIO
+	}
 	if !srcRes.Exists {
 		return syscall.ENOENT
 	}
@@ -717,8 +785,14 @@ func (n *OverlayNode) Rename(ctx context.Context, name string, newParent fs.Inod
 	}
 	// Destination: renaming ONTO a deleted name is legal (it overwrites the
 	// whiteout); only a deleted destination PARENT is an error.
-	if pRes := shadowBackend.Resolve(epochID, filepath.Dir(newOrig)); filepath.Clean(filepath.Dir(newOrig)) != filepath.Clean(n.root.origDir) && !pRes.Exists {
-		return syscall.ENOENT
+	if pRes := shadowBackend.Resolve(epochID, filepath.Dir(newOrig)); filepath.Clean(filepath.Dir(newOrig)) != filepath.Clean(n.root.origDir) {
+		if pRes.Err != nil {
+			log.Printf("[overlay] Rename parent Resolve failed: %v", pRes.Err)
+			return syscall.EIO
+		}
+		if !pRes.Exists {
+			return syscall.ENOENT
+		}
 	}
 
 	// POSIX rename type/emptiness validation against the merged view the
@@ -726,6 +800,10 @@ func (n *OverlayNode) Rename(ctx context.Context, name string, newParent fs.Inod
 	// but a later promotion would fail with EISDIR / ENOTDIR / ENOTEMPTY —
 	// leaving the epoch permanently un-finalisable.
 	dstRes := shadowBackend.Resolve(epochID, newOrig)
+	if dstRes.Err != nil {
+		log.Printf("[overlay] Rename destination Resolve failed: %v", dstRes.Err)
+		return syscall.EIO
+	}
 	if dstRes.Exists {
 		var dstSt syscall.Stat_t
 		if err := syscall.Lstat(dstRes.PhysicalPath, &dstSt); err == nil {
@@ -738,7 +816,10 @@ func (n *OverlayNode) Rename(ctx context.Context, name string, newParent fs.Inod
 				return syscall.EISDIR
 			case srcIsDir && dstIsDir:
 				// POSIX: dst dir must be empty (merged view).
-				if merged, err := shadowBackend.MergeReaddirVersions(epochID, newOrig); err == nil && len(merged) > 0 {
+				if merged, err := shadowBackend.MergeReaddirVersions(epochID, newOrig); err != nil {
+					log.Printf("[overlay] Rename MergeReaddirVersions failed: %v", err)
+					return fs.ToErrno(err)
+				} else if len(merged) > 0 {
 					return syscall.ENOTEMPTY
 				}
 			}
@@ -769,7 +850,10 @@ func (n *OverlayNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.Se
 	// Reject before any attribute modification when the path is hidden by a
 	// whiteout (own or ancestor) — stale cached inodes must not modify
 	// already-deleted files.
-	if res := shadowBackend.Resolve(epochID, n.origPath()); !res.Exists {
+	if res := shadowBackend.Resolve(epochID, n.origPath()); res.Err != nil {
+		log.Printf("[overlay] Setattr Resolve failed: %v", res.Err)
+		return syscall.EIO
+	} else if !res.Exists {
 		return syscall.ENOENT
 	}
 
@@ -865,6 +949,10 @@ func (n *OverlayNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 		return nil, errno
 	}
 	res := shadowBackend.Resolve(epochID, n.origPath())
+	if res.Err != nil {
+		log.Printf("[overlay] Readlink Resolve failed: %v", res.Err)
+		return nil, syscall.EIO
+	}
 	if !res.Exists {
 		return nil, syscall.ENOENT
 	}

@@ -11,23 +11,21 @@ use crate::bpf_loader::{BpfManager, IpcPolicyEntry, NetPolicyEntry, ProcPolicy, 
 use crate::event_handler::InterceptEvent;
 use crate::memory_tracker::MemoryTracker;
 
-/// Map an InterceptEvent's event_type to the unified effect_class.
-/// This is used when granting restart tokens: the token must carry the
-/// same effect_class that check_policy() will compute for the syscall.
-fn effect_class_from_event(event: &InterceptEvent) -> u8 {
+fn effect_policy_parts_from_event(event: &InterceptEvent) -> (u8, u8) {
     use crate::policy_generated::*;
     // FORK (101) is a process-lifecycle event, not an effect encoded via
-    // ENCODE_EVENT; its low byte (101) is not a valid effect_class. Fork is
-    // never intercepted (it is emitted directly by the sched_process_fork
-    // tracepoint, bypassing do_intercept), so no restart token is granted for
-    // it — this branch is defensive only.
+    // ENCODE_EVENT; it is never intercepted through do_intercept, so this
+    // defensive fallback is not expected to authorize any real syscall.
     if event.event_type == 101 {
-        return CLASS_NETWORK;
+        return (CLASS_NETWORK, OP_CONNECT);
     }
-    // All intercepted events carry the unified (class | op<<8) encoding; the
-    // low byte is exactly the effect_class check_policy() will compute for the
-    // same syscall, so the restart token and the policy lookup agree.
-    event_class_of(event.event_type as u16)
+    // All intercepted events carry the unified (class | op<<8) encoding. The
+    // restart token must match both class and operation so one-shot resume for
+    // CONNECT cannot authorize BIND, PTRACE cannot authorize KILL, etc.
+    (
+        event_class_of(event.event_type as u16),
+        event_op_of(event.event_type as u16),
+    )
 }
 
 /// State of a frozen process
@@ -155,11 +153,12 @@ impl ProcessManager {
         // Grant a one-shot restart token for the pending syscall (if any).
         // The token is consumed on the next matching syscall_nr, then deleted.
         if frozen.event.syscall_nr != 0 {
-            let effect_class = effect_class_from_event(&frozen.event);
+            let (effect_class, operation) = effect_policy_parts_from_event(&frozen.event);
             self.bpf_manager.grant_restart_token(
                 frozen.event.pid,  // tid (thread that was intercepted)
                 frozen.event.syscall_nr,
                 effect_class,
+                operation,
             )?;
         }
 
@@ -436,10 +435,10 @@ impl ProcessManager {
     ///
     /// Schema (all integer fields; addr/port HOST order, 0 = wildcard):
     ///   {
-    ///     "classes": [{"effect_class": 2, "mode": 2}, ...],  // mode 1=allow-all, 2=fine
-    ///     "network": [{"family": 2, "addr": u32, "port": u16, "allow": 1}, ...],
-    ///     "ipc":     [{"ipc_type": 1, "target": u64, "allow": 1}, ...],
-    ///     "signal":  [{"target_cgroup": u64, "allow": 1}, ...]
+    ///     "classes": [{"effect_class": 2, "operation": 1, "mode": 2}, ...],
+    ///     "network": [{"operation": 1, "family": 2, "addr": u32, "port": u16, "allow": 1}, ...],
+    ///     "ipc":     [{"operation": 3, "ipc_type": 1, "target": u64, "allow": 1}, ...],
+    ///     "signal":  [{"operation": 1, "target_cgroup": u64, "allow": 1}, ...]
     ///   }
     pub fn parse_proc_policy(v: &serde_json::Value) -> Result<ProcPolicy> {
         fn req_u64(obj: &serde_json::Value, field: &str, max: u64) -> Result<u64> {
@@ -466,11 +465,15 @@ impl ProcessManager {
                 if cls < 1 {
                     anyhow::bail!("effect_class must be >= 1");
                 }
+                let op = req_u64(c, "operation", u8::MAX as u64)?;
+                if op < 1 {
+                    anyhow::bail!("operation must be >= 1");
+                }
                 let mode = req_u64(c, "mode", 2)?;
                 if mode < 1 {
-                    anyhow::bail!("class mode must be 1 (allow-all) or 2 (fine-grained)");
+                    anyhow::bail!("operation mode must be 1 (allow) or 2 (fine-grained)");
                 }
-                out.classes.push((cls as u8, mode as u8));
+                out.classes.push((cls as u8, op as u8, mode as u8));
             }
         }
 
@@ -479,6 +482,7 @@ impl ProcessManager {
                 .ok_or_else(|| anyhow::anyhow!("'network' must be an array"))?;
             for e in arr {
                 out.network.push(NetPolicyEntry {
+                    operation: req_u64(e, "operation", u8::MAX as u64)? as u8,
                     family: req_u64(e, "family", u8::MAX as u64)? as u8,
                     addr: req_u64(e, "addr", u32::MAX as u64)? as u32,
                     port: req_u64(e, "port", u16::MAX as u64)? as u16,
@@ -496,6 +500,7 @@ impl ProcessManager {
                     anyhow::bail!("ipc_type must be >= 1");
                 }
                 out.ipc.push(IpcPolicyEntry {
+                    operation: req_u64(e, "operation", u8::MAX as u64)? as u8,
                     ipc_type: ipc_type as u8,
                     target: req_u64(e, "target", u64::MAX)?,
                     allow: req_allow(e)?,
@@ -508,6 +513,7 @@ impl ProcessManager {
                 .ok_or_else(|| anyhow::anyhow!("'signal' must be an array"))?;
             for e in arr {
                 out.signal.push(SigPolicyEntry {
+                    operation: req_u64(e, "operation", u8::MAX as u64)? as u8,
                     target_cgroup: req_u64(e, "target_cgroup", u64::MAX)?,
                     allow: req_allow(e)?,
                 });
@@ -720,11 +726,12 @@ impl ProcessManager {
         // fenced again (SPECULATIVE mode — no permanent bypass).
         if let Some(fp) = self.frozen.get(&baseline) {
             if fp.event.syscall_nr != 0 {
-                let effect_class = effect_class_from_event(&fp.event);
+                let (effect_class, operation) = effect_policy_parts_from_event(&fp.event);
                 let _ = self.bpf_manager.grant_restart_token(
                     fp.event.pid,
                     fp.event.syscall_nr,
                     effect_class,
+                    operation,
                 );
             }
         }

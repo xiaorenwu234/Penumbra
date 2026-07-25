@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"log"
 	"os"
 	"path/filepath"
@@ -29,12 +30,15 @@ type PersistState struct {
 	FormatVersion int                      `json:"format_version"`
 	Seq           int64                    `json:"seq"`
 	NextVersion   uint64                   `json:"next_version"`
+	ImplicitCtr   int64                    `json:"implicit_ctr,omitempty"`
+	NextGroupID   int                      `json:"next_group_id,omitempty"`
 	Epochs        map[string]*PersistEpoch `json:"epochs"`
 	Versions      []PersistVersion         `json:"versions"`
 	VisibleHead   map[string]uint64        `json:"visible_head"`
 	Dependents    map[string][]string      `json:"dependents"`
 	DependsOn     map[string][]string      `json:"depends_on"`
 	ActiveEpochs  map[string]string        `json:"active_epochs"` // cgroupID -> epochID
+	ActiveGroups  map[int]*PersistGroup    `json:"active_groups,omitempty"`
 }
 
 // PersistEpoch is the per-epoch state serialized to disk. The epoch's
@@ -47,6 +51,16 @@ type PersistEpoch struct {
 	State       AgentLifecycle `json:"state"`
 	FinalizeErr string         `json:"finalize_err,omitempty"`
 	ReadFrom    []uint64       `json:"read_from,omitempty"`
+}
+
+// PersistGroup preserves an in-flight/finalized SCC group across checkpoint
+// recovery so ack_release_group can remain fail-closed and retryable.
+type PersistGroup struct {
+	ID          int      `json:"id"`
+	Members     []string `json:"members"`
+	GraphGen    int64    `json:"graph_gen"`
+	State       string   `json:"state"`
+	FinalizeErr string   `json:"finalize_err,omitempty"`
 }
 
 // PersistVersion is the flat serialized form of a FileVersion. Shared by the
@@ -112,12 +126,15 @@ func (b *Backend) snapshot() *PersistState {
 		FormatVersion: persistFormatVersion,
 		Seq:           b.seq,
 		NextVersion:   b.nextVersion,
+		ImplicitCtr:   b.implicitCtr,
+		NextGroupID:   b.nextGroupID,
 		Epochs:        make(map[string]*PersistEpoch, len(b.epochs)),
 		Versions:      make([]PersistVersion, 0, len(b.versionByID)),
 		VisibleHead:   make(map[string]uint64, len(b.visibleHead)),
 		Dependents:    make(map[string][]string, len(b.dependents)),
 		DependsOn:     make(map[string][]string, len(b.dependsOn)),
 		ActiveEpochs:  make(map[string]string, len(b.activeEpochByCgroup)),
+		ActiveGroups:  make(map[int]*PersistGroup, len(b.activeGroups)),
 	}
 
 	for id, ep := range b.epochs {
@@ -163,6 +180,19 @@ func (b *Backend) snapshot() *PersistState {
 	for cg, ep := range b.activeEpochByCgroup {
 		state.ActiveEpochs[cg] = string(ep)
 	}
+	for gid, g := range b.activeGroups {
+		pg := &PersistGroup{
+			ID:          g.id,
+			Members:     make([]string, 0, len(g.members)),
+			GraphGen:    g.graphGen,
+			State:       g.state,
+			FinalizeErr: g.finalizeErr,
+		}
+		for _, id := range g.members {
+			pg.Members = append(pg.Members, string(id))
+		}
+		state.ActiveGroups[gid] = pg
+	}
 	return state
 }
 
@@ -176,6 +206,8 @@ func (b *Backend) loadState(state *PersistState) error {
 	}
 	b.seq = state.Seq
 	b.nextVersion = state.NextVersion
+	b.implicitCtr = state.ImplicitCtr
+	b.nextGroupID = state.NextGroupID
 
 	b.epochs = make(map[EpochID]*EpochState, len(state.Epochs))
 	for id, pe := range state.Epochs {
@@ -236,6 +268,30 @@ func (b *Backend) loadState(state *PersistState) error {
 	b.activeEpochByCgroup = make(map[string]EpochID, len(state.ActiveEpochs))
 	for cg, ep := range state.ActiveEpochs {
 		b.activeEpochByCgroup[cg] = EpochID(ep)
+	}
+	b.activeGroups = make(map[int]*finalizeGroup, len(state.ActiveGroups))
+	for gid, pg := range state.ActiveGroups {
+		if pg == nil {
+			continue
+		}
+		members := make([]EpochID, 0, len(pg.Members))
+		for _, id := range pg.Members {
+			members = append(members, EpochID(id))
+		}
+		id := pg.ID
+		if id == 0 {
+			id = gid
+		}
+		b.activeGroups[gid] = &finalizeGroup{
+			id:          id,
+			members:     members,
+			graphGen:    pg.GraphGen,
+			state:       pg.State,
+			finalizeErr: pg.FinalizeErr,
+		}
+		if gid > b.nextGroupID {
+			b.nextGroupID = gid
+		}
 	}
 
 	log.Printf("[backend] state recovered: %d epochs, %d versions, %d heads",
@@ -327,7 +383,7 @@ func fsyncDir(dir string) error {
 
 // --- WAL (Write-Ahead Log) ---
 
-// WALRecord represents a single v2 WAL entry.
+// WALRecord represents a single v2 WAL entry inside a transaction envelope.
 //
 // SeqNum is a record-level sequence number used by replay to skip records
 // already incorporated into the latest checkpoint snapshot.
@@ -351,28 +407,55 @@ type WALRecord struct {
 	ObjectPath  string `json:"object_path,omitempty"`
 }
 
-// appendWAL atomically appends a batch of records to the WAL file
-// (newline-delimited JSON) and fsyncs both the file and its parent
-// directory to guarantee durability.
+type walFrame struct {
+	Format   int    `json:"v"`
+	Op       string `json:"wal_op"`
+	TxID     string `json:"tx_id,omitempty"`
+	Count    int    `json:"count,omitempty"`
+	Checksum uint32 `json:"checksum,omitempty"`
+}
+
+// appendWAL appends one transaction envelope to the WAL file and fsyncs both
+// the file and its parent directory to guarantee durability.
 //
-// All records are serialized into a single in-memory buffer first, then
-// written with one Write call. This ensures atomicity: if the write
-// fails mid-batch, no partial (orphan) records are left in the file.
-// Without this, a partial failure would leave record N in the file
-// while its waiter received an error and aborted the mutation — replay
-// would then silently re-apply an "aborted" operation.
+// The transaction format is:
+//
+//	tx_begin(tx_id, count, checksum), record..., tx_commit(tx_id)
+//
+// Replay applies only complete transactions whose record payload checksum
+// matches the begin frame. An incomplete tail transaction is discarded; corrupt
+// or incomplete transactions followed by later data fail closed during load.
 func appendWAL(path string, records []WALRecord) error {
-	// Serialize all records into a single buffer first.
-	var buf []byte
+	if len(records) == 0 {
+		return nil
+	}
+	var recordsBuf []byte
 	for i := range records {
 		records[i].Format = persistFormatVersion
 		data, err := json.Marshal(&records[i])
 		if err != nil {
 			return fmt.Errorf("marshal WAL record: %w", err)
 		}
-		buf = append(buf, data...)
-		buf = append(buf, '\n')
+		recordsBuf = append(recordsBuf, data...)
+		recordsBuf = append(recordsBuf, '\n')
 	}
+	txID := fmt.Sprintf("%d:%d", records[0].SeqNum, len(records))
+	checksum := crc32.ChecksumIEEE(recordsBuf)
+	begin, err := json.Marshal(walFrame{Format: persistFormatVersion, Op: "tx_begin", TxID: txID, Count: len(records), Checksum: checksum})
+	if err != nil {
+		return fmt.Errorf("marshal WAL tx_begin: %w", err)
+	}
+	commit, err := json.Marshal(walFrame{Format: persistFormatVersion, Op: "tx_commit", TxID: txID})
+	if err != nil {
+		return fmt.Errorf("marshal WAL tx_commit: %w", err)
+	}
+
+	var buf []byte
+	buf = append(buf, begin...)
+	buf = append(buf, '\n')
+	buf = append(buf, recordsBuf...)
+	buf = append(buf, commit...)
+	buf = append(buf, '\n')
 
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
@@ -380,7 +463,7 @@ func appendWAL(path string, records []WALRecord) error {
 	}
 	if _, err := f.Write(buf); err != nil {
 		f.Close()
-		return fmt.Errorf("write WAL batch: %w", err)
+		return fmt.Errorf("write WAL transaction: %w", err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
@@ -397,9 +480,9 @@ func appendWAL(path string, records []WALRecord) error {
 	return nil
 }
 
-// loadWAL reads all WAL records from the file. Returns nil slice if the
-// file does not exist. A record from an unsupported format generation is a
-// hard error (fail closed), NOT a silent skip.
+// loadWAL reads complete WAL transactions from the file. Returns nil slice if
+// the file does not exist. Unsupported format, standalone records, or non-tail
+// corrupt transactions are hard errors (fail closed), NOT silent skips.
 func loadWAL(path string) ([]WALRecord, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -410,29 +493,88 @@ func loadWAL(path string) ([]WALRecord, error) {
 	}
 	defer f.Close()
 
-	var records []WALRecord
+	var lines [][]byte
 	scanner := bufio.NewScanner(f)
 	// Allow large lines (up to 4MB per record).
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+		line := append([]byte(nil), scanner.Bytes()...)
+		if len(line) != 0 {
+			lines = append(lines, line)
 		}
-		var rec WALRecord
-		if err := json.Unmarshal(line, &rec); err != nil {
-			// Partial/corrupt record at tail — stop here (crash mid-write).
-			log.Printf("[backend] WAL: skipping corrupt record: %v", err)
-			break
-		}
-		if rec.Format != persistFormatVersion {
-			return nil, fmt.Errorf("WAL record format %d unsupported (want %d): clear the staging dir to start fresh",
-				rec.Format, persistFormatVersion)
-		}
-		records = append(records, rec)
 	}
 	if err := scanner.Err(); err != nil {
-		return records, fmt.Errorf("scan WAL: %w", err)
+		return nil, fmt.Errorf("scan WAL: %w", err)
+	}
+
+	var records []WALRecord
+	var tx *walFrame
+	var txRecords []WALRecord
+	var txBuf []byte
+
+	for i, line := range lines {
+		lastLine := i == len(lines)-1
+		var frame walFrame
+		if err := json.Unmarshal(line, &frame); err != nil {
+			if lastLine {
+				log.Printf("[backend] WAL: discarding corrupt tail line: %v", err)
+				break
+			}
+			return nil, fmt.Errorf("WAL corrupt non-tail line %d: %w", i+1, err)
+		}
+		if frame.Format != persistFormatVersion {
+			return nil, fmt.Errorf("WAL record format %d unsupported (want %d): clear the staging dir to start fresh",
+				frame.Format, persistFormatVersion)
+		}
+
+		switch frame.Op {
+		case "tx_begin":
+			if tx != nil {
+				return nil, fmt.Errorf("WAL transaction %q missing commit before line %d", tx.TxID, i+1)
+			}
+			if frame.TxID == "" || frame.Count < 0 {
+				return nil, fmt.Errorf("WAL malformed tx_begin at line %d", i+1)
+			}
+			begin := frame
+			tx = &begin
+			txRecords = nil
+			txBuf = nil
+		case "tx_commit":
+			if tx == nil {
+				return nil, fmt.Errorf("WAL tx_commit without tx_begin at line %d", i+1)
+			}
+			if frame.TxID != tx.TxID || len(txRecords) != tx.Count || crc32.ChecksumIEEE(txBuf) != tx.Checksum {
+				if lastLine {
+					log.Printf("[backend] WAL: discarding incomplete/corrupt tail transaction %q", tx.TxID)
+					return records, nil
+				}
+				return nil, fmt.Errorf("WAL transaction %q failed integrity check at line %d", tx.TxID, i+1)
+			}
+			records = append(records, txRecords...)
+			tx = nil
+			txRecords = nil
+			txBuf = nil
+		case "":
+			if tx == nil {
+				return nil, fmt.Errorf("WAL record outside transaction at line %d", i+1)
+			}
+			var rec WALRecord
+			if err := json.Unmarshal(line, &rec); err != nil {
+				return nil, fmt.Errorf("unmarshal WAL record at line %d: %w", i+1, err)
+			}
+			if rec.Format != persistFormatVersion {
+				return nil, fmt.Errorf("WAL record format %d unsupported (want %d): clear the staging dir to start fresh",
+					rec.Format, persistFormatVersion)
+			}
+			txRecords = append(txRecords, rec)
+			txBuf = append(txBuf, line...)
+			txBuf = append(txBuf, '\n')
+		default:
+			return nil, fmt.Errorf("WAL unknown frame %q at line %d", frame.Op, i+1)
+		}
+	}
+	if tx != nil {
+		log.Printf("[backend] WAL: discarding incomplete tail transaction %q", tx.TxID)
 	}
 	return records, nil
 }

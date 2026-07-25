@@ -877,30 +877,21 @@ func (b *Backend) beginEpochInternal(epochID EpochID, cgroupID, sessionID string
 	log.Printf("[backend] BeginEpoch: epoch=%q cgroup=%q session=%q", epochID, cgroupID, sessionID)
 }
 
-// EpochForCgroup returns the epoch that FUSE operations from cgroupID should
-// be attributed to. When the cgroup has no usable active epoch (none
-// registered, or the registered one has entered Finalizing/Finalized), a
-// fresh implicit epoch is durably registered so cgroup-only legacy flows
-// keep working.
+// EpochForCgroup returns the explicitly active epoch that FUSE operations from
+// cgroupID should be attributed to. Production paths fail closed when no active
+// epoch exists or the epoch has already entered Finalizing/Finalized; creating
+// implicit epochs after release would produce speculative state with no
+// orchestrator/policy owner.
 func (b *Backend) EpochForCgroup(cgroupID string) (EpochID, error) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	if id, ok := b.activeEpochByCgroup[cgroupID]; ok {
 		if ep, live := b.epochs[id]; live && ep.State < Finalizing {
-			b.mu.Unlock()
 			return id, nil
 		}
+		return "", fmt.Errorf("no writable active epoch for cgroup %q (epoch %q is closed or missing)", cgroupID, id)
 	}
-	// Allocate a fresh implicit epoch id. The counter uniquifies successors
-	// after a previous implicit epoch finalized or rolled back.
-	b.implicitCtr++
-	n := b.implicitCtr
-	b.mu.Unlock()
-
-	id := EpochID(fmt.Sprintf("implicit:%s#%d", cgroupID, n))
-	if err := b.BeginEpoch(id, cgroupID, ""); err != nil {
-		return "", err
-	}
-	return id, nil
+	return "", fmt.Errorf("no explicit active epoch for cgroup %q", cgroupID)
 }
 
 // ActiveEpochForCgroup reports the currently-bound epoch of a cgroup without
@@ -1094,14 +1085,18 @@ func (b *Backend) Resolve(epochID EpochID, origPath string) ResolveResult {
 	need := b.needsReadDepLocked(epochID, res)
 	b.mu.Unlock()
 	if need {
-		b.recordReadDep(epochID, res.Version, obj)
+		if err := b.recordReadDep(epochID, res.Version, obj); err != nil {
+			res.Err = err
+			res.Exists = false
+			res.PhysicalPath = ""
+		}
 	}
 	return res
 }
 
 // recordReadDep durably records a read-from edge (WAL "read_dep") and applies
 // it. Follows the standard write-ahead protocol.
-func (b *Backend) recordReadDep(epochID EpochID, vid VersionID, obj ObjectID) {
+func (b *Backend) recordReadDep(epochID EpochID, vid VersionID, obj ObjectID) error {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
@@ -1109,7 +1104,7 @@ func (b *Backend) recordReadDep(epochID EpochID, vid VersionID, obj ObjectID) {
 	ep := b.ensureEpoch(epochID, "")
 	if _, dup := ep.ReadFrom[vid]; dup {
 		b.mu.Unlock()
-		return
+		return nil
 	}
 	seqNum := b.nextSeq()
 	rec := WALRecord{EpochID: string(epochID), SeqNum: seqNum,
@@ -1119,7 +1114,7 @@ func (b *Backend) recordReadDep(epochID EpochID, vid VersionID, obj ObjectID) {
 	if err := <-b.submitWAL(rec); err != nil {
 		log.Printf("[backend] recordReadDep WAL: %v", err)
 		b.applyTurnAbort(seqNum)
-		return
+		return err
 	}
 
 	b.mu.Lock()
@@ -1129,6 +1124,7 @@ func (b *Backend) recordReadDep(epochID EpochID, vid VersionID, obj ObjectID) {
 		b.mu.Unlock()
 	}()
 	b.readDepInternal(epochID, vid)
+	return nil
 }
 
 // readDepInternal applies a read-from edge. Must be called with b.mu held.
@@ -1183,9 +1179,13 @@ func (b *Backend) MergeReaddirVersions(epochID EpochID, origDir string) ([]Merge
 	}
 	b.mu.Unlock()
 
-	// Record the namespace read-from edges durably (outside b.mu).
+	// Record the namespace read-from edges durably (outside b.mu). If any
+	// dependency cannot be persisted, fail closed: returning a directory listing
+	// without its read-from edge would make a later producer rollback invisible.
 	for _, d := range deps {
-		b.recordReadDep(epochID, d.vid, d.obj)
+		if err := b.recordReadDep(epochID, d.vid, d.obj); err != nil {
+			return nil, err
+		}
 	}
 
 	result := make([]MergedDirEntry, 0, len(overrides))
@@ -1366,11 +1366,8 @@ func (b *Backend) createVersion(epochID EpochID, origPath string, spec versionSp
 	defer b.opRW.RUnlock()
 
 	obj := filepath.Clean(origPath)
-	var stage string
 	if spec.op != OpWhiteout {
-		var err error
-		stage, err = stagePathFor(b.stagingDir, b.trackedDir, epochID, obj)
-		if err != nil {
+		if _, err := relFromTracked(b.trackedDir, obj); err != nil {
 			return nil, err
 		}
 	} else {
@@ -1405,6 +1402,15 @@ func (b *Backend) createVersion(epochID EpochID, origPath string, spec versionSp
 	seqNum := b.nextSeq()
 	vid := VersionID(b.nextVersion)
 	b.nextVersion++
+	stage := ""
+	if spec.op != OpWhiteout {
+		var err error
+		stage, err = stagePathFor(b.stagingDir, b.trackedDir, epochID, vid, obj)
+		if err != nil {
+			b.mu.Unlock()
+			return nil, err
+		}
+	}
 	v := &FileVersion{
 		ID:          vid,
 		Owner:       epochID,
@@ -1497,6 +1503,9 @@ func (b *Backend) RecordMknod(epochID EpochID, origPath string, mode uint32, rde
 // are rejected (EPERM), matching link(2). Returns the link's stage path.
 func (b *Backend) RecordLink(epochID EpochID, targetOrig, linkOrig string) (string, error) {
 	tgt := b.Resolve(epochID, targetOrig) // records the read-from edge
+	if tgt.Err != nil {
+		return "", tgt.Err
+	}
 	if !tgt.Exists {
 		return "", syscall.ENOENT
 	}
@@ -1535,8 +1544,7 @@ func (b *Backend) RecordRename(epochID EpochID, oldPath, newPath string) error {
 	if strings.HasPrefix(cleanNew, cleanOld+string(os.PathSeparator)) {
 		return fmt.Errorf("rename %q into its own subdirectory %q is not allowed", oldPath, newPath)
 	}
-	dstStage, err := stagePathFor(b.stagingDir, b.trackedDir, epochID, cleanNew)
-	if err != nil {
+	if _, err := relFromTracked(b.trackedDir, cleanNew); err != nil {
 		return err
 	}
 	if _, err := relFromTracked(b.trackedDir, cleanOld); err != nil {
@@ -1560,6 +1568,11 @@ func (b *Backend) RecordRename(epochID EpochID, oldPath, newPath string) error {
 	dstVid := VersionID(b.nextVersion)
 	srcVid := VersionID(b.nextVersion + 1)
 	b.nextVersion += 2
+	dstStage, stageErr := stagePathFor(b.stagingDir, b.trackedDir, epochID, dstVid, cleanNew)
+	if stageErr != nil {
+		b.mu.Unlock()
+		return stageErr
+	}
 	dstV := &FileVersion{
 		ID: dstVid, Owner: epochID, LogicalPath: cleanNew, StagePath: dstStage,
 		Seq: seq1, Operation: OpWrite, State: VSpeculative, RenameFrom: cleanOld,
@@ -1579,7 +1592,9 @@ func (b *Backend) RecordRename(epochID EpochID, oldPath, newPath string) error {
 	// The rename READS the source version it moves: record that dependency
 	// durably before the mutation lands.
 	if needSrcDep {
-		b.recordReadDep(epochID, src.Version, cleanOld)
+		if err := b.recordReadDep(epochID, src.Version, cleanOld); err != nil {
+			return err
+		}
 	}
 
 	// Both records go in one fsync; share the same waiter.

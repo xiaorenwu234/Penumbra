@@ -24,7 +24,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from policy.policy_ir import CLASS_IDS  # noqa: E402
+from policy.policy_ir import CLASS_IDS, OP_IDS  # noqa: E402
 
 
 RUN_KERNEL_TESTS = os.environ.get("SHADOW_RUN_KERNEL_EFFECT_TESTS") == "1"
@@ -155,6 +155,7 @@ sys.exit(0 if ret == 0 else min(err or 1, 125))
             "action": "install_class_policy",
             "cgroup_path": self.cgroup_path,
             "effect_class": CLASS_IDS["SYSTEM"],
+            "operation": OP_IDS[("SYSTEM", "NAMESPACE")],
             "allow": 1,
         })
         self.client.request({"action": "set_epoch_mode", "cgroup_path": self.cgroup_path, "mode": 2})

@@ -26,6 +26,8 @@ struct Request {
     #[serde(default)]
     effect_class: Option<u8>,
     #[serde(default)]
+    operation: Option<u8>,
+    #[serde(default)]
     allow: Option<u8>,
     #[serde(default)]
     tid: Option<u32>,
@@ -930,12 +932,20 @@ impl SocketServer {
                         pids: None,
                     };
                 };
+                let Some(operation) = req.operation else {
+                    return Response {
+                        status: "error".into(),
+                        message: Some("operation required".into()),
+                        frozen: None,
+                        pids: None,
+                    };
+                };
                 let allow = req.allow.unwrap_or(0);
                 match bpf_manager.cgroup_id_from_path(cgroup_path) {
-                    Ok(cg_id) => match bpf_manager.install_class_policy(cg_id, effect_class, allow) {
+                    Ok(cg_id) => match bpf_manager.install_class_policy(cg_id, effect_class, operation, allow) {
                         Ok(()) => Response {
                             status: "ok".into(),
-                            message: Some(format!("Installed class_policy({})={} for cgroup {}", effect_class, allow, cgroup_path)),
+                            message: Some(format!("Installed class_policy({},{})={} for cgroup {}", effect_class, operation, allow, cgroup_path)),
                             frozen: None,
                             pids: None,
                         },
@@ -1006,10 +1016,11 @@ impl SocketServer {
                     };
                 };
                 let effect_class = req.effect_class.unwrap_or(crate::policy_generated::CLASS_NETWORK);
-                match bpf_manager.grant_restart_token(tid, syscall_nr, effect_class) {
+                let operation = req.operation.unwrap_or(crate::policy_generated::OP_CONNECT);
+                match bpf_manager.grant_restart_token(tid, syscall_nr, effect_class, operation) {
                     Ok(()) => Response {
                         status: "ok".into(),
-                        message: Some(format!("Granted restart token: tid={} syscall={} class={}", tid, syscall_nr, effect_class)),
+                        message: Some(format!("Granted restart token: tid={} syscall={} class={} operation={}", tid, syscall_nr, effect_class, operation)),
                         frozen: None,
                         pids: None,
                     },

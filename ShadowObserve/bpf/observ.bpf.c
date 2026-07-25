@@ -145,7 +145,20 @@ int BPF_PROG(observ_file_open, struct file *file, int ret) {
     if (!evt) return 0;
     unsigned int flags = BPF_CORE_READ(file, f_flags);
     evt->arg1 = flags;
-    evt->event_type = (flags & O_CREAT) ? FS_EVENT_CREATE : FS_EVENT_OPEN;
+    evt->event_type = cri_open_event(flags);
+    observ_set_path(evt, BPF_CORE_READ(file, f_path.dentry), evt->path);
+    submit_event(evt);
+    return 0;
+}
+
+SEC("lsm/file_permission")
+int BPF_PROG(observ_file_permission, struct file *file, int mask, int ret) {
+    if (ret != 0) return 0;
+    if (!(mask & MAY_WRITE)) return 0;
+    struct observ_event *evt = reserve_event();
+    if (!evt) return 0;
+    evt->event_type = FS_EVENT_WRITE;
+    evt->arg1 = (__u32)mask;
     observ_set_path(evt, BPF_CORE_READ(file, f_path.dentry), evt->path);
     submit_event(evt);
     return 0;

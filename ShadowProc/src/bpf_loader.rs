@@ -20,12 +20,14 @@ use shadow_proc_skel::*;
 
 use crate::event_handler::InterceptEvent;
 
-/// Key for the class_policy BPF hash map.
+/// Key for the operation policy BPF hash map.
 /// Matches `struct class_policy_key` in shadow_proc.bpf.c.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct ClassPolicyKey {
     cgroup_id: u64,
     effect_class: u8,
+    operation: u8,
 }
 
 /// Value for the restart_token BPF hash map.
@@ -34,7 +36,8 @@ struct ClassPolicyKey {
 struct RestartTokenVal {
     syscall_nr: u32,
     effect_class: u8,
-    _pad0: [u8; 3],
+    operation: u8,
+    _pad0: [u8; 2],
 }
 
 /// Key for the network_policy BPF hash map.
@@ -45,7 +48,7 @@ struct RestartTokenVal {
 pub struct NetPolicyKey {
     pub cgroup_id: u64,
     pub family: u8,
-    pub _pad0: u8,
+    pub operation: u8,
     pub port: u16,
     pub addr: u32,
 }
@@ -58,7 +61,8 @@ pub struct NetPolicyKey {
 pub struct IpcPolicyKey {
     pub cgroup_id: u64,
     pub ipc_type: u8,
-    pub _pad0: [u8; 7],
+    pub operation: u8,
+    pub _pad0: [u8; 6],
     pub target: u64,
 }
 
@@ -69,6 +73,8 @@ pub struct IpcPolicyKey {
 #[derive(Clone, Copy)]
 pub struct SigPolicyKey {
     pub cgroup_id: u64,
+    pub operation: u8,
+    pub _pad0: [u8; 7],
     pub target_cgroup: u64,
 }
 
@@ -76,6 +82,7 @@ pub struct SigPolicyKey {
 /// 0 is the wildcard at that position).
 #[derive(Debug, Clone, Copy)]
 pub struct NetPolicyEntry {
+    pub operation: u8,
     pub family: u8,
     pub addr: u32,
     pub port: u16,
@@ -86,6 +93,7 @@ pub struct NetPolicyEntry {
 /// target 0 = any target of that type).
 #[derive(Debug, Clone, Copy)]
 pub struct IpcPolicyEntry {
+    pub operation: u8,
     pub ipc_type: u8,
     pub target: u64,
     pub allow: u8,
@@ -94,16 +102,17 @@ pub struct IpcPolicyEntry {
 /// One fine-grained signal entry (target_cgroup 0 = any target).
 #[derive(Debug, Clone, Copy)]
 pub struct SigPolicyEntry {
+    pub operation: u8,
     pub target_cgroup: u64,
     pub allow: u8,
 }
 
-/// Fine-grained process-layer policy for one cgroup (P0-5).
-/// classes: (effect_class, mode) — mode 1 = class-wide allow,
+/// Operation-aware process-layer policy for one cgroup (P0-5).
+/// classes: (effect_class, operation, mode) — mode 1 = operation-wide allow,
 /// mode 2 = fine-grained (the per-endpoint maps decide, default-deny).
 #[derive(Debug, Clone, Default)]
 pub struct ProcPolicy {
-    pub classes: Vec<(u8, u8)>,
+    pub classes: Vec<(u8, u8, u8)>,
     pub network: Vec<NetPolicyEntry>,
     pub ipc: Vec<IpcPolicyEntry>,
     pub signal: Vec<SigPolicyEntry>,
@@ -116,6 +125,30 @@ struct FinePolicyKeys {
     net: Vec<NetPolicyKey>,
     ipc: Vec<IpcPolicyKey>,
     sig: Vec<SigPolicyKey>,
+}
+
+fn all_policy_operations() -> Vec<(u8, Vec<u8>)> {
+    use crate::policy_generated::*;
+    vec![
+        (CLASS_FILESYSTEM, vec![
+            OP_READ, OP_WRITE, OP_CREATE, OP_DELETE, OP_RENAME, OP_LINK,
+            OP_SYMLINK, OP_TRUNCATE, OP_CHMOD, OP_CHOWN, OP_MKDIR, OP_RMDIR,
+        ]),
+        (CLASS_NETWORK, vec![OP_CONNECT, OP_BIND, OP_SEND]),
+        (CLASS_IPC, vec![
+            OP_PIPE_WRITE, OP_UNIX_WRITE, OP_SYSV_SHM, OP_SYSV_MSG,
+            OP_SYSV_SEM, OP_POSIX_MQ, OP_SHARED_MAPPING,
+        ]),
+        (CLASS_SIGNAL, vec![OP_KILL, OP_PTRACE]),
+        (CLASS_PRIVILEGE, vec![
+            OP_EXEC_PRIV, OP_SETUID, OP_SETGID, OP_SETGROUPS, OP_CAPSET,
+        ]),
+        (CLASS_OUTPUT, vec![OP_WRITE_OUT, OP_SENDFILE, OP_SPLICE, OP_IO_URING]),
+        (CLASS_SYSTEM, vec![
+            OP_MOUNT, OP_NAMESPACE, OP_KEYRING, OP_BPF, OP_PERF,
+            OP_TTY_IOCTL, OP_PROCESS_VM,
+        ]),
+    ]
 }
 
 /// Raw bpf() syscall wrapper for MAP_DELETE_ELEM
@@ -472,12 +505,14 @@ impl BpfManager {
         tid: u32,
         syscall_nr: u32,
         effect_class: u8,
+        operation: u8,
     ) -> Result<()> {
         let key_bytes = tid.to_ne_bytes();
         let val = RestartTokenVal {
             syscall_nr,
             effect_class,
-            _pad0: [0u8; 3],
+            operation,
+            _pad0: [0u8; 2],
         };
         unsafe {
             libc_bpf_map_update_elem(
@@ -507,17 +542,19 @@ impl BpfManager {
         Ok(())
     }
 
-    /// Install a class-level policy entry: per (cgroup, effect_class) -> allow/deny.
+    /// Install an operation-level policy entry: per (cgroup, effect_class, operation) -> allow/deny.
     /// Only consulted in MODE_ENFORCED. Default-deny: absent entry = deny.
     pub fn install_class_policy(
         &self,
         cgroup_id: u64,
         effect_class: u8,
+        operation: u8,
         allow: u8,
     ) -> Result<()> {
         let key = ClassPolicyKey {
             cgroup_id,
             effect_class,
+            operation,
         };
         unsafe {
             libc_bpf_map_update_elem(
@@ -548,28 +585,27 @@ impl BpfManager {
         Ok(())
     }
 
-    /// Install allow-all class policies for a cgroup and set ENFORCED mode.
+    /// Install allow-all operation policies for a cgroup and set ENFORCED mode.
     ///
     /// This is the equivalent of the old `clear_stopped_full` (permanent
-    /// full release): it lets the process run to completion by allowing
-    /// all effect classes. The process's pending syscall still needs a
-    /// restart token to pass on the first restart (grant_restart_token).
+    /// full release): it lets the process run to completion by allowing every
+    /// operation in every effect class.
     pub fn enforce_allow_all(&self, cgroup_id: u64) -> Result<()> {
-        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_NETWORK, 1)?;
-        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_IPC, 1)?;
-        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_SIGNAL, 1)?;
-        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_PRIVILEGE, 1)?;
-        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_OUTPUT, 1)?;
-        self.install_class_policy(cgroup_id, crate::policy_generated::CLASS_SYSTEM, 1)?;
+        for (cls, ops) in all_policy_operations() {
+            for op in ops {
+                self.install_class_policy(cgroup_id, cls, op, 1)?;
+            }
+        }
         self.set_epoch_mode(cgroup_id, crate::policy_generated::MODE_ENFORCED)?;
         Ok(())
     }
 
-    /// Delete a single class_policy entry for a cgroup + effect_class.
-    pub fn clear_class_policy(&self, cgroup_id: u64, effect_class: u8) -> Result<()> {
+    /// Delete a single class_policy entry for a cgroup + effect_class + operation.
+    pub fn clear_class_policy(&self, cgroup_id: u64, effect_class: u8, operation: u8) -> Result<()> {
         let key = ClassPolicyKey {
             cgroup_id,
             effect_class,
+            operation,
         };
         unsafe {
             libc_bpf_map_delete_elem(self.class_policy_fd, &key as *const _ as *const _);
@@ -582,12 +618,13 @@ impl BpfManager {
     pub fn install_net_policy(
         &self,
         cgroup_id: u64,
+        operation: u8,
         family: u8,
         addr: u32,
         port: u16,
         allow: u8,
     ) -> Result<()> {
-        let key = NetPolicyKey { cgroup_id, family, _pad0: 0, port, addr };
+        let key = NetPolicyKey { cgroup_id, family, operation, port, addr };
         unsafe {
             bpf_map_update_checked(
                 self.network_policy_fd,
@@ -601,11 +638,12 @@ impl BpfManager {
     pub fn install_ipc_policy(
         &self,
         cgroup_id: u64,
+        operation: u8,
         ipc_type: u8,
         target: u64,
         allow: u8,
     ) -> Result<()> {
-        let key = IpcPolicyKey { cgroup_id, ipc_type, _pad0: [0; 7], target };
+        let key = IpcPolicyKey { cgroup_id, ipc_type, operation, _pad0: [0; 6], target };
         unsafe {
             bpf_map_update_checked(
                 self.ipc_policy_fd,
@@ -619,10 +657,11 @@ impl BpfManager {
     pub fn install_signal_policy(
         &self,
         cgroup_id: u64,
+        operation: u8,
         target_cgroup: u64,
         allow: u8,
     ) -> Result<()> {
-        let key = SigPolicyKey { cgroup_id, target_cgroup };
+        let key = SigPolicyKey { cgroup_id, operation, _pad0: [0; 7], target_cgroup };
         unsafe {
             bpf_map_update_checked(
                 self.signal_policy_fd,
@@ -639,11 +678,11 @@ impl BpfManager {
     /// half-installed policy can never take effect.
     pub fn enforce_policy(&self, cgroup_id: u64, policy: &ProcPolicy) -> Result<()> {
         let mut keys = FinePolicyKeys::default();
-        let mut classes_done: Vec<u8> = Vec::new();
+        let mut classes_done: Vec<(u8, u8)> = Vec::new();
         let result = (|| -> Result<()> {
             for e in &policy.network {
                 let key = NetPolicyKey {
-                    cgroup_id, family: e.family, _pad0: 0,
+                    cgroup_id, family: e.family, operation: e.operation,
                     port: e.port, addr: e.addr,
                 };
                 unsafe {
@@ -657,7 +696,8 @@ impl BpfManager {
             }
             for e in &policy.ipc {
                 let key = IpcPolicyKey {
-                    cgroup_id, ipc_type: e.ipc_type, _pad0: [0; 7], target: e.target,
+                    cgroup_id, ipc_type: e.ipc_type, operation: e.operation,
+                    _pad0: [0; 6], target: e.target,
                 };
                 unsafe {
                     bpf_map_update_checked(
@@ -669,7 +709,10 @@ impl BpfManager {
                 keys.ipc.push(key);
             }
             for e in &policy.signal {
-                let key = SigPolicyKey { cgroup_id, target_cgroup: e.target_cgroup };
+                let key = SigPolicyKey {
+                    cgroup_id, operation: e.operation, _pad0: [0; 7],
+                    target_cgroup: e.target_cgroup,
+                };
                 unsafe {
                     bpf_map_update_checked(
                         self.signal_policy_fd,
@@ -679,8 +722,8 @@ impl BpfManager {
                 }
                 keys.sig.push(key);
             }
-            for &(cls, mode) in &policy.classes {
-                let ckey = ClassPolicyKey { cgroup_id, effect_class: cls };
+            for &(cls, op, mode) in &policy.classes {
+                let ckey = ClassPolicyKey { cgroup_id, effect_class: cls, operation: op };
                 unsafe {
                     bpf_map_update_checked(
                         self.class_policy_fd,
@@ -688,7 +731,7 @@ impl BpfManager {
                         &mode as *const _ as *const _,
                     )?;
                 }
-                classes_done.push(cls);
+                classes_done.push((cls, op));
             }
             self.set_epoch_mode(cgroup_id, crate::policy_generated::MODE_ENFORCED)?;
             Ok(())
@@ -705,8 +748,8 @@ impl BpfManager {
             for k in &keys.sig {
                 unsafe { libc_bpf_map_delete_elem(self.signal_policy_fd, k as *const _ as *const _); }
             }
-            for &cls in &classes_done {
-                let _ = self.clear_class_policy(cgroup_id, cls);
+            for &(cls, op) in &classes_done {
+                let _ = self.clear_class_policy(cgroup_id, cls, op);
             }
             let _ = self.clear_epoch_mode(cgroup_id);
             return Err(e);
@@ -745,12 +788,11 @@ impl BpfManager {
     /// to ensure a clean SPECULATIVE start.
     pub fn clear_all_policies(&self, cgroup_id: u64) -> Result<()> {
         self.clear_epoch_mode(cgroup_id)?;
-        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_NETWORK)?;
-        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_IPC)?;
-        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_SIGNAL)?;
-        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_PRIVILEGE)?;
-        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_OUTPUT)?;
-        self.clear_class_policy(cgroup_id, crate::policy_generated::CLASS_SYSTEM)?;
+        for (cls, ops) in all_policy_operations() {
+            for op in ops {
+                self.clear_class_policy(cgroup_id, cls, op)?;
+            }
+        }
         self.clear_fine_policies(cgroup_id)?;
         Ok(())
     }

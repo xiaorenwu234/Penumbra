@@ -13,7 +13,8 @@ import (
 // Staging layout (v2, per-epoch MVCC):
 //
 //	staging/
-//	  epochs/<escaped-epoch-id>/files/<rel-path>   # private version files
+//	  epochs/<escaped-epoch-id>/versions/<version-id>/files/<rel-path>
+//	                                               # immutable version payloads
 //	  epochs/<escaped-epoch-id>/files/<dir>/.shadow.wh.<name>
 //	                                               # debug whiteout markers
 //	  metadata/.shadow_state.json                  # v2 checkpoint
@@ -25,9 +26,10 @@ import (
 // but are never consulted for visibility.
 
 const (
-	epochsDirName   = "epochs"
-	metadataDirName = "metadata"
-	epochFilesDir   = "files"
+	epochsDirName    = "epochs"
+	metadataDirName  = "metadata"
+	epochFilesDir    = "files"
+	epochVersionsDir = "versions"
 	// whiteoutPrefix names the debug marker recorded next to a whiteout
 	// version's would-be stage path.
 	whiteoutPrefix = ".shadow.wh."
@@ -65,8 +67,8 @@ func relFromTracked(trackedDir, origPath string) (string, error) {
 	return rel, nil
 }
 
-// stagePathFor maps an orig path to the given epoch's private version file.
-func stagePathFor(stagingDir, trackedDir string, epochID EpochID, origPath string) (string, error) {
+// stagePathFor maps an orig path to a concrete immutable version payload.
+func stagePathFor(stagingDir, trackedDir string, epochID EpochID, versionID VersionID, origPath string) (string, error) {
 	rel, err := relFromTracked(trackedDir, origPath)
 	if err != nil {
 		return "", err
@@ -74,7 +76,8 @@ func stagePathFor(stagingDir, trackedDir string, epochID EpochID, origPath strin
 	if rel == "" {
 		return "", fmt.Errorf("cannot version the tracked root itself")
 	}
-	return filepath.Join(epochDirFor(stagingDir, epochID), epochFilesDir, rel), nil
+	return filepath.Join(epochDirFor(stagingDir, epochID), epochVersionsDir,
+		fmt.Sprintf("%d", versionID), epochFilesDir, rel), nil
 }
 
 // whiteoutMarkerFor maps an orig path to the epoch's debug whiteout marker.
