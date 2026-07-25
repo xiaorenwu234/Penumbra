@@ -1149,11 +1149,12 @@ class SessionProxy:
         """Freeze the live shell as baseline and fork+resume a speculative
         candidate. After this returns, run()/commit()/reject() act on the epoch.
 
-        Phase 4: performs admission control and fd snapshot before freezing
-        so the baseline can be losslessly restored on reject.  If the process
-        is not admissible (multi-threaded, has children, writable MAP_SHARED,
-        pending signals, or non-regular fds), raises NotAdmissibleError so the
-        caller can degrade to non-speculative mode.
+        Phase 4: performs admission control, freezes the baseline, rejects
+        rollback-unsafe tmp regular-file fds, and snapshots fd/tmp state at the
+        stopped epoch boundary. If the process is not admissible (multi-threaded,
+        has children, writable MAP_SHARED, pending signals, unsafe tmp fds, or
+        non-regular fds), raises NotAdmissibleError so the caller can degrade to
+        non-speculative mode.
         """
         sess = self.sessions[sid]
         if sess.epoch is not None:
