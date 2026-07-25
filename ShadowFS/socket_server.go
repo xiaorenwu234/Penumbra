@@ -239,6 +239,20 @@ func (s *SocketServer) handleRequest(req Request) Response {
 		}
 		return Response{Status: "ok", EpochID: epochID}
 
+	case "authorize":
+		epochID, err := resolveEpoch(req, true)
+		if err != nil {
+			return Response{Status: "error", Message: err.Error()}
+		}
+		log.Printf("[socket] authorize epoch=%q", epochID)
+		res, err := shadowBackend.Authorize(epochID)
+		if err != nil {
+			return Response{Status: "error", Message: err.Error()}
+		}
+		r := res.CanRelease
+		return Response{Status: "ok", EpochID: string(epochID), State: res.State.String(),
+			Releasable: &r, FinalizeErr: firstFailure(res)}
+
 	case "commit":
 		epochID, err := resolveEpoch(req, true)
 		if err != nil {

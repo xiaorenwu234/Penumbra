@@ -28,6 +28,7 @@ struct ClassPolicyKey {
     cgroup_id: u64,
     effect_class: u8,
     operation: u8,
+    _pad0: [u8; 6],
 }
 
 /// Value for the restart_token BPF hash map.
@@ -398,15 +399,16 @@ impl BpfManager {
             i
         };
 
-        // Update cgroup_map[idx] = cgroup_fd
+        // Update cgroup_map[idx] = cgroup_fd. This must fail closed: if the
+        // kernel map update fails, the cgroup is not monitored at all.
         let key_bytes = idx.to_ne_bytes();
         let fd_bytes = cgroup_fd.as_raw_fd().to_ne_bytes();
         unsafe {
-            libc_bpf_map_update_elem(
+            bpf_map_update_checked(
                 self.cgroup_map_fd,
                 key_bytes.as_ptr() as *const _,
                 fd_bytes.as_ptr() as *const _,
-            );
+            )?;
         }
 
         // Keep the fd alive (dropping it would invalidate the map entry).
@@ -414,7 +416,7 @@ impl BpfManager {
         slots.by_path.insert(path_key, idx);
 
         // Keep cgroup_count at (highest occupied index + 1).
-        Self::sync_cgroup_count(self.cgroup_count_fd, &slots);
+        Self::sync_cgroup_count(self.cgroup_count_fd, &slots)?;
 
         eprintln!("[+] Added cgroup {:?} at index {}", cgroup_path, idx);
         Ok(idx)
@@ -443,7 +445,7 @@ impl BpfManager {
         // Recycle the index and tighten cgroup_count so check_cgroup() stops
         // scanning past the highest live slot.
         slots.free.push(idx);
-        Self::sync_cgroup_count(self.cgroup_count_fd, &slots);
+        Self::sync_cgroup_count(self.cgroup_count_fd, &slots)?;
 
         eprintln!("[+] Removed cgroup {:?} (freed index {})", cgroup_path, idx);
         Ok(())
@@ -453,7 +455,7 @@ impl BpfManager {
     /// Empty interior slots are safe: bpf_current_task_under_cgroup() on a
     /// deleted CGROUP_ARRAY entry returns an error (not 1), so check_cgroup()
     /// skips them.
-    fn sync_cgroup_count(count_fd: i32, slots: &CgroupSlots) {
+    fn sync_cgroup_count(count_fd: i32, slots: &CgroupSlots) -> Result<()> {
         let count: u32 = slots
             .used
             .keys()
@@ -463,11 +465,11 @@ impl BpfManager {
             .unwrap_or(0);
         let count_key: u32 = 0;
         unsafe {
-            libc_bpf_map_update_elem(
+            bpf_map_update_checked(
                 count_fd,
                 count_key.to_ne_bytes().as_ptr() as *const _,
                 count.to_ne_bytes().as_ptr() as *const _,
-            );
+            )
         }
     }
 
@@ -515,13 +517,12 @@ impl BpfManager {
             _pad0: [0u8; 2],
         };
         unsafe {
-            libc_bpf_map_update_elem(
+            bpf_map_update_checked(
                 self.restart_token_fd,
                 key_bytes.as_ptr() as *const _,
                 &val as *const _ as *const _,
-            );
+            )
         }
-        Ok(())
     }
 
     /// Set the epoch mode for a cgroup.
@@ -533,13 +534,12 @@ impl BpfManager {
         let key_bytes = cgroup_id.to_ne_bytes();
         let val_bytes = mode.to_ne_bytes();
         unsafe {
-            libc_bpf_map_update_elem(
+            bpf_map_update_checked(
                 self.epoch_mode_fd,
                 key_bytes.as_ptr() as *const _,
                 val_bytes.as_ptr() as *const _,
-            );
+            )
         }
-        Ok(())
     }
 
     /// Install an operation-level policy entry: per (cgroup, effect_class, operation) -> allow/deny.
@@ -555,15 +555,15 @@ impl BpfManager {
             cgroup_id,
             effect_class,
             operation,
+            _pad0: [0; 6],
         };
         unsafe {
-            libc_bpf_map_update_elem(
+            bpf_map_update_checked(
                 self.class_policy_fd,
                 &key as *const _ as *const _,
                 &allow as *const _ as *const _,
-            );
+            )
         }
-        Ok(())
     }
 
     /// Clear the epoch mode for a cgroup, resetting it to MODE_SPECULATIVE
@@ -606,6 +606,7 @@ impl BpfManager {
             cgroup_id,
             effect_class,
             operation,
+            _pad0: [0; 6],
         };
         unsafe {
             libc_bpf_map_delete_elem(self.class_policy_fd, &key as *const _ as *const _);
@@ -723,7 +724,7 @@ impl BpfManager {
                 keys.sig.push(key);
             }
             for &(cls, op, mode) in &policy.classes {
-                let ckey = ClassPolicyKey { cgroup_id, effect_class: cls, operation: op };
+                let ckey = ClassPolicyKey { cgroup_id, effect_class: cls, operation: op, _pad0: [0; 6] };
                 unsafe {
                     bpf_map_update_checked(
                         self.class_policy_fd,
@@ -824,11 +825,11 @@ impl BpfManager {
         let key: u32 = 0;
         let val: u32 = if enabled { 1 } else { 0 };
         unsafe {
-            libc_bpf_map_update_elem(
+            bpf_map_update_checked(
                 self.cow_enabled_fd,
                 key.to_ne_bytes().as_ptr() as *const _,
                 val.to_ne_bytes().as_ptr() as *const _,
-            );
+            )?;
         }
         eprintln!("[+] COW fork auto-tracking: {}", if enabled { "enabled" } else { "disabled" });
         Ok(())

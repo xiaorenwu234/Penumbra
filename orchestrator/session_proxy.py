@@ -174,8 +174,9 @@ class SpeculationDomainLauncher:
     2.  Read-only root filesystem — blocks direct writes to host paths.
         The only writable mounts are:
           • ShadowFS (FUSE, separate mount — versioned, rollback-safe)
-          • /sys/fs/cgroup (separate mount — needed by cgroup_exec)
           • Per-candidate tmpfs at /tmp, /dev/shm, /var/tmp, /run (ephemeral)
+        /sys/fs/cgroup is remounted read-only inside the candidate namespace;
+        the trusted parent is responsible for placing the process in cgroups.
     3.  Per-candidate tmpfs at /dev/shm — the host's shared tmpfs is a
         persistent write channel that bypasses ShadowFS entirely (POSIX shm
         files, host-visible content), so it is replaced before anything
@@ -289,14 +290,13 @@ class SpeculationDomainLauncher:
         #    ShadowFS (FUSE) and cgroup2 are separate mounts, unaffected.
         _mount("", "/", None, _MS_REMOUNT | _MS_RDONLY)
 
-        # 9. Remount /proc and /sys as read-only to block procfs/sysfs
-        #    escape vectors (e.g. /proc/sysrq-trigger, /proc/sys/*,
-        #    /sys/class/*, /sys/devices/*).  /sys/fs/cgroup is a separate
-        #    submount and remains writable so cgroup_exec can write to
-        #    cgroup.procs.  When the path is a mount point the remount is
-        #    mandatory — a silently skipped remount would leave those
-        #    vectors writable.
-        for p in ("/proc", "/sys"):
+        # 9. Remount /proc, /sys and cgroupfs as read-only to block procfs,
+        #    sysfs and cgroup-controller escape vectors.  Candidate processes
+        #    must not be able to move/freeze/kill domain-external processes by
+        #    writing cgroupfs; the trusted parent performs cgroup placement.
+        #    When the path is a mount point the remount is mandatory — a
+        #    silently skipped remount would leave those vectors writable.
+        for p in ("/proc", "/sys", "/sys/fs/cgroup"):
             if os.path.ismount(p):
                 _mount("", p, None, _MS_REMOUNT | _MS_RDONLY)
 

@@ -196,6 +196,7 @@ class _OrchestratorJournal:
         cgroup: Dict[str, Any] = {}
         output: Dict[str, str] = {}
         release_groups: Dict[int, Any] = {}
+        sid_groups: Dict[str, set] = {}
         for rec in records:
             op = rec.get("op")
             sid = rec.get("sid")
@@ -209,7 +210,15 @@ class _OrchestratorJournal:
                         "cgroup": cg,
                         "epoch": rec.get("epoch", ""),
                         "sid": sid,
+                        "released_cgroups": set(),
                     }
+                    if sid:
+                        sid_groups.setdefault(sid, set()).add(gid)
+                continue
+            if op == "release_member_done":
+                gid = rec.get("group_id")
+                if gid in release_groups and cg:
+                    release_groups[gid].setdefault("released_cgroups", set()).add(cg)
                 continue
             if not sid:
                 continue
@@ -229,6 +238,8 @@ class _OrchestratorJournal:
                 output[sid] = rec.get("output", "")
             elif op == "commit_done":
                 stage[sid] = "done"
+                for gid in sid_groups.get(sid, set()):
+                    release_groups.pop(gid, None)
             elif op == "rollback":
                 stage[sid] = "rollback"
                 output.pop(sid, None)
@@ -236,6 +247,9 @@ class _OrchestratorJournal:
                      for sid, st in stage.items() if st == "fs"}
         undecided = {sid: cgroup.get(sid)
                      for sid, st in stage.items() if st == "intent"}
+        for info in release_groups.values():
+            if isinstance(info.get("released_cgroups"), set):
+                info["released_cgroups"] = sorted(info["released_cgroups"])
         return {"sessions": sessions, "committed": committed,
                 "undecided": undecided, "release_groups": release_groups}
 
@@ -398,12 +412,16 @@ class ShadowOrchestrator:
         state = _OrchestratorJournal.replay(records)
         with self._sessions_lock:
             self._sessions.update(state["sessions"])
-        # FS-committed but release not confirmed: canonical outcome is COMMITTED.
+        # FS-committed but release not confirmed: canonical outcome is COMMITTED,
+        # but external release/ShadowFS ack may still be incomplete. Never write
+        # commit_done here; release_groups below must finish the write-ahead
+        # release state machine first.
         for sid, (cg, output) in state["committed"].items():
             self._recovered_outputs[sid] = output
             log.warning("RECOVERY sid=%s cgroup=%s: epoch was FS-committed before "
-                        "crash -> resolving as COMMITTED (transcript recovered, "
-                        "%d bytes)", sid, cg, len(output or ""))
+                        "crash -> result is COMMITTED, release still requires "
+                        "journal-guided completion (%d bytes recovered)",
+                        sid, cg, len(output or ""))
             if cg:
                 try:
                     # Nudge ShadowFS to (idempotently) finish finalizing the
@@ -412,7 +430,9 @@ class ShadowOrchestrator:
                                             "cgroup_id": cg})
                 except Exception as e:  # noqa: BLE001
                     log.warning("  retry_finalize(%s) during recovery: %s", cg, e)
-            self._journal.append("commit_done", sid=sid, cgroup=cg)
+                if hasattr(self, "_pending_lock"):
+                    with self._pending_lock:
+                        self._pending_release.add(cg)
         # Commit started but FS decision never confirmed durable: reconcile with
         # ShadowFS. If it reports the epoch finalized, treat as committed; else
         # the epoch is NOT committed and no output is released (fail-closed).
@@ -422,10 +442,52 @@ class ShadowOrchestrator:
                         "finalized=%s -> resolving as %s", sid, cg, finalized,
                         "COMMITTED" if finalized else "NOT committed (output withheld)")
         for gid, info in state.get("release_groups", {}).items():
+            members = info.get("members", [])
+            primary_cg = info.get("cgroup", "")
+            epoch = info.get("epoch", "")
+            released = set(info.get("released_cgroups", []))
             log.info("RECOVERY group_id=%d: release_intent recorded (members=%s "
-                     "graph_gen=%d) -- group was finalized; members should be "
-                     "released or re-acked", gid, info.get("members", []),
-                     info.get("graph_generation", 0))
+                     "graph_gen=%d released=%s) -- completing release before ack",
+                     gid, members, info.get("graph_generation", 0), sorted(released))
+            member_cgroups = self._resolve_member_cgroups(members, primary_cg)
+            if member_cgroups is None:
+                if primary_cg and hasattr(self, "_pending_lock"):
+                    with self._pending_lock:
+                        self._pending_release.add(primary_cg)
+                log.warning("  recovery group %d: cannot resolve all member "
+                            "cgroups -- leaving release pending", gid)
+                continue
+            failed = []
+            for mcg in member_cgroups:
+                if mcg in released:
+                    continue
+                ok, _ = self._release_proc(mcg, skip_ack=True)
+                if ok:
+                    self._journal.append("release_member_done", cgroup=mcg,
+                                         group_id=gid, epoch=epoch)
+                    released.add(mcg)
+                else:
+                    failed.append(mcg)
+                    with self._pending_lock:
+                        self._pending_release.add(mcg)
+            if failed:
+                log.warning("  recovery group %d: release failed for %s -- not "
+                            "acking group", gid, failed)
+                continue
+            if self._fs_group_ack(gid, primary_cg, epoch):
+                sid = info.get("sid")
+                if sid:
+                    self._journal.append("commit_done", sid=sid, cgroup=primary_cg)
+                if hasattr(self, "_pending_lock"):
+                    for mcg in member_cgroups:
+                        with self._pending_lock:
+                            self._pending_release.discard(mcg)
+            else:
+                if hasattr(self, "_pending_ack_lock"):
+                    with self._pending_ack_lock:
+                        self._pending_ack.add((primary_cg, epoch or ""))
+                log.warning("  recovery group %d: ack failed -- parked for "
+                            "ack-only retry", gid)
         log.info("Journal recovery: %d session(s), %d committed-pending, %d undecided",
                  len(state["sessions"]), len(state["committed"]), len(state["undecided"]))
 
@@ -616,7 +678,43 @@ class ShadowOrchestrator:
         log.info("  prepare_resolution: group_id=%d members=%s graph_gen=%d",
                  group_id, members, graph_gen)
 
-        # Step 2: begin_finalize — authorize + promote all members as a group.
+        member_cgroups = self._resolve_member_cgroups(members, cgroup_id)
+        if member_cgroups is None:
+            return {"status": "error",
+                    "message": "prepare_resolution members cannot be mapped to cgroups"}
+
+        # Freeze every SCC member before ShadowFS captures mmap/writeback state.
+        # A primary-only freeze lets siblings keep running while the group is
+        # being finalized, so fail closed if any member cannot be stopped.
+        proc_client = getattr(self, "proc_client", None)
+        if proc_client is not None:
+            for mcg in member_cgroups:
+                try:
+                    freeze_resp = proc_client.request({
+                        "action": "freeze_by_cgroup",
+                        "cgroup_id": mcg,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    return {"status": "error", "message": f"freeze {mcg}: {e}"}
+                if not isinstance(freeze_resp, dict) or freeze_resp.get("status") != "ok":
+                    return {"status": "error",
+                            "message": f"freeze {mcg}: {freeze_resp}"}
+
+        # Record the primary epoch's own authorization decision. BeginFinalize
+        # will refuse if any SCC sibling has not already been independently
+        # authorized by its own policy path.
+        auth_req = {"action": "authorize", "cgroup_id": cgroup_id}
+        if epoch_id:
+            auth_req["epoch_id"] = epoch_id
+        try:
+            auth = self.fs_client.request(auth_req)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": f"authorize: {e}"}
+        if not isinstance(auth, dict) or auth.get("status") != "ok":
+            return auth
+
+        # Step 2: begin_finalize — promote only after all members are already
+        # independently AuthorizedPending.
         # The graph_generation is checked by ShadowFS for TOCTOU: if the
         # dependency graph changed between prepare and begin, it refuses.
         try:
@@ -1512,57 +1610,84 @@ class ShadowOrchestrator:
                         "finalize_err": fs_result.get("finalize_err", "")}
             # DECISION POINT: the file layer finalized durably, so the
             # canonical outcome is now COMMITTED. Snapshot the committed
-            # transcript into the journal BEFORE the destructive process
-            # commit, so a crash here still yields a deterministic (committed)
-            # result with retrievable output.
+            # transcript into the journal BEFORE any externally-visible process
+            # release, so recovery can deterministically resume the release.
+            committed_output = proxy.peek_epoch_output(session_id)
             self._journal.append("fs_committed", sid=session_id, cgroup=cgroup_id,
-                                 output=proxy.peek_epoch_output(session_id))
-            # Step 2: FS finalized -> perform the DESTRUCTIVE process commit
-            # (discard baseline, keep candidate canonical) and release the
-            # buffered speculative output.
-            try:
-                proxy.finalize_commit(session_id)
-            except Exception as e:  # noqa: BLE001
-                # Outcome is already durably COMMITTED (journaled): a retry of
-                # session_commit_epoch / restart recovery finishes the release.
-                log.error("  finalize_commit (process layer) failed: %s", e)
-                return {"status": "error", "message": str(e)}
-            # Release any OTHER SCC members (P0-7): the primary session was
-            # just committed via the proxy, but a finalized group may include
-            # sibling cgroups whose frozen processes also need resuming +
-            # output flushing. The primary is skipped (proxy handled it) and
-            # the group ack is issued once below.
-            for mcg in self._resolve_member_cgroups(
-                    fs_result["members"], cgroup_id):
-                if mcg == cgroup_id:
-                    continue
-                ok, _ = self._release_proc(mcg, skip_ack=True)
-                if not ok:
-                    with self._pending_lock:
-                        self._pending_release.add(mcg)
-                    log.warning("  Release of sibling member cgroup=%s failed "
-                                "-- deferred", mcg)
-            # Step 3a: write durable release_intent to journal (Phase 3).
+                                 output=committed_output)
+
+            member_cgroups = self._resolve_member_cgroups(
+                fs_result["members"], cgroup_id)
+            if member_cgroups is None:
+                log.error("  cannot resolve all release-group members -- NOT "
+                          "releasing/acking session commit")
+                return {"status": "error", "decision": "authorized_pending",
+                        "message": "cannot resolve all release-group members",
+                        "released": False}
+
+            # Durable release_intent must precede every externally-visible
+            # process/output release, including the session primary.
             self._journal.append("release_intent",
                                 sid=session_id, cgroup=cgroup_id,
                                 group_id=fs_result["group_id"],
                                 members=fs_result["members"],
                                 graph_generation=fs_result["graph_generation"],
                                 epoch=epoch_id or "")
-            # Step 3: external effects are out -- group ack so ShadowFS drops
-            # all finalized records in the group. A failed ack is parked for
-            # the ack-only retry loop, never re-fenced.
-            if not self._fs_group_ack(fs_result["group_id"], cgroup_id,
-                                      epoch_id or ""):
+
+            # Release sibling members first. If any sibling cannot be released,
+            # keep the primary session fenced and do NOT ack the group.
+            sibling_failed = False
+            for mcg in member_cgroups:
+                if mcg == cgroup_id:
+                    continue
+                ok, _ = self._release_proc(mcg, skip_ack=True)
+                if ok:
+                    self._journal.append("release_member_done", cgroup=mcg,
+                                         group_id=fs_result["group_id"],
+                                         epoch=epoch_id or "")
+                else:
+                    sibling_failed = True
+                    with self._pending_lock:
+                        self._pending_release.add(mcg)
+                    log.warning("  Release of sibling member cgroup=%s failed "
+                                "-- deferred; group not acked", mcg)
+            if sibling_failed:
+                return {"status": "error", "decision": "authorized_pending",
+                        "message": "one or more sibling releases failed",
+                        "released": False}
+
+            # All siblings are out (or none exist). Release the primary session
+            # via the SessionProxy-specific commit path, then mark it done.
+            try:
+                proxy.finalize_commit(session_id)
+            except Exception as e:  # noqa: BLE001
+                # Outcome is already durably COMMITTED and release_intent is
+                # durable: recovery/retry must finish the primary release before
+                # group ack.
+                log.error("  finalize_commit (process layer) failed: %s", e)
+                return {"status": "error", "message": str(e),
+                        "released": False}
+            self._journal.append("release_member_done", cgroup=cgroup_id,
+                                 group_id=fs_result["group_id"],
+                                 epoch=epoch_id or "")
+
+            # External effects for every member are out -- only now may ShadowFS
+            # drop the group's terminal records.
+            acked = self._fs_group_ack(fs_result["group_id"], cgroup_id,
+                                       epoch_id or "")
+            if not acked:
                 with self._pending_ack_lock:
                     self._pending_ack.add((cgroup_id, epoch_id or ""))
                 log.warning("  ack_release_group(%d) failed -- parked for "
                             "ack-only retry", fs_result["group_id"])
+                return {"status": "ok", "output": committed_output,
+                        "released": True, "ack_pending": True}
         self._journal.append("commit_done", sid=session_id, cgroup=cgroup_id)
         with self._sessions_lock:
             self._session_epochs.pop(session_id, None)
         self._recovered_outputs.pop(session_id, None)
-        return {"status": "ok", "output": proxy.get_output(session_id)}
+        return {"status": "ok", "output": proxy.get_output(session_id),
+                "released": True}
 
     def session_rollback_epoch(self, session_id: str) -> dict:
         """

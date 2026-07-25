@@ -288,6 +288,24 @@ func (b *Backend) replayWAL(records []WALRecord) {
 				b.readDepInternal(EpochID(rec.EpochID), VersionID(rec.ReadVersion))
 			case "release_ack":
 				b.ackReleaseInternal(EpochID(rec.EpochID))
+			case "group_prepare":
+				members := make([]EpochID, 0, len(rec.Members))
+				for _, m := range rec.Members {
+					members = append(members, EpochID(m))
+				}
+				if rec.GroupID > 0 {
+					b.activeGroups[rec.GroupID] = &finalizeGroup{
+						id:       rec.GroupID,
+						members:  members,
+						graphGen: rec.GraphGeneration,
+						state:    "pending",
+					}
+					if rec.GroupID > b.nextGroupID {
+						b.nextGroupID = rec.GroupID
+					}
+				}
+			case "group_delete":
+				delete(b.activeGroups, rec.GroupID)
 			default:
 				log.Printf("[backend] WAL: unknown control op %q", rec.ControlOp)
 			}
@@ -586,20 +604,28 @@ func (b *Backend) CloseEpochFDs(epochID EpochID) {
 // flushEpochFDs fsyncs every tracked fd of the epoch so that any data the
 // kernel has written back through the FUSE data path — including dirty pages
 // of a writable MAP_SHARED mmap the process already msync'd — is durable on
-// the stage copy BEFORE promotion moves it onto orig. Best-effort.
-func (b *Backend) flushEpochFDs(epochID EpochID) {
+// the stage copy BEFORE promotion moves it onto orig. Any fsync failure aborts
+// finalization fail-closed.
+func (b *Backend) flushEpochFDs(epochID EpochID) error {
 	b.openFDsMu.Lock()
 	fds := make([]*TrackedFD, len(b.openFDs[epochID]))
 	copy(fds, b.openFDs[epochID])
 	b.openFDsMu.Unlock()
+	var errs []string
 	for _, tfd := range fds {
 		if tfd.IsClosed() {
 			continue
 		}
 		if err := syscall.Fsync(tfd.FD()); err != nil {
-			log.Printf("[backend] flushEpochFDs: epoch=%q fd=%d: %v", epochID, tfd.FD(), err)
+			msg := fmt.Sprintf("fd=%d: %v", tfd.FD(), err)
+			log.Printf("[backend] flushEpochFDs: epoch=%q %s", epochID, msg)
+			errs = append(errs, msg)
 		}
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("fsync tracked fd(s): %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // --- Commit-time writable MAP_SHARED quiescence ---
@@ -677,14 +703,18 @@ func (b *Backend) quiesceMappings(ep *EpochState) error {
 	}
 	pids, err := cgroupPIDs(ep.CgroupID)
 	if err != nil {
-		return nil // cgroup gone / unreadable -> no live processes
+		return fmt.Errorf("read cgroup processes for %q: %w", ep.CgroupID, err)
 	}
 	flushed := 0
 	var errs []string
 	for _, pid := range pids {
 		maps, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", pid))
 		if err != nil {
-			continue // process exited between listing and read
+			if os.IsNotExist(err) {
+				continue // process exited between listing and read
+			}
+			errs = append(errs, fmt.Sprintf("pid %d: read /proc/maps: %v", pid, err))
+			continue
 		}
 		regions := parseWritableSharedMaps(string(maps), b.mountDir)
 		if len(regions) == 0 {
@@ -1087,6 +1117,15 @@ func (b *Backend) Resolve(epochID EpochID, origPath string) ResolveResult {
 	if need {
 		if err := b.recordReadDep(epochID, res.Version, obj); err != nil {
 			res.Err = err
+			res.Exists = false
+			res.PhysicalPath = ""
+			return res
+		}
+		b.mu.Lock()
+		_, stillPresent := b.versionByID[res.Version]
+		b.mu.Unlock()
+		if !stillPresent {
+			res.Err = fmt.Errorf("resolved version %d disappeared while recording read dependency", res.Version)
 			res.Exists = false
 			res.PhysicalPath = ""
 		}
@@ -1867,16 +1906,16 @@ type CommitResult struct {
 // only becomes releasable once every object whose chain it participates in
 // has been durably promoted and every upstream dependency is Finalized.
 //
-// An unknown epoch is REGISTERED here (a no-file-op epoch) and immediately
-// driven to Finalized, so the release path never has to treat "not tracked"
-// as "safe" (fail-closed).
-func (b *Backend) Commit(epochID EpochID) (CommitResult, error) {
+// Authorize records an independent policy decision for one epoch. It only
+// advances Speculative -> AuthorizedPending and does NOT quiesce/promote; group
+// finalization is allowed only after every SCC member has been authorized by
+// its own policy path.
+func (b *Backend) Authorize(epochID EpochID) (CommitResult, error) {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
 	b.mu.Lock()
-	if ep := b.epochs[epochID]; ep != nil && ep.State >= Finalized {
-		// Idempotent: already finalized.
+	if ep := b.epochs[epochID]; ep != nil && ep.State >= AuthorizedPending {
 		res := b.lifecycleResultLocked(epochID)
 		b.mu.Unlock()
 		return res, nil
@@ -1886,9 +1925,9 @@ func (b *Backend) Commit(epochID EpochID) (CommitResult, error) {
 	b.mu.Unlock()
 
 	if err := <-b.submitWAL(rec); err != nil {
-		log.Printf("[backend] Commit WAL: %v", err)
+		log.Printf("[backend] Authorize WAL: %v", err)
 		b.applyTurnAbort(seqNum)
-		return CommitResult{}, fmt.Errorf("commit WAL: %w", err)
+		return CommitResult{}, fmt.Errorf("authorize WAL: %w", err)
 	}
 
 	b.mu.Lock()
@@ -1897,13 +1936,43 @@ func (b *Backend) Commit(epochID EpochID) (CommitResult, error) {
 		b.applyTurnDone(seqNum)
 		b.mu.Unlock()
 	}()
-	b.commitInternal(epochID)
+	ep := b.ensureEpoch(epochID, "")
+	if ep.State < AuthorizedPending {
+		ep.State = AuthorizedPending
+		log.Printf("[backend] Authorize: epoch=%q authorized (pending finalization)", epochID)
+	}
 	return b.lifecycleResultLocked(epochID), nil
 }
 
-// commitInternal AUTHORIZES the epoch (Speculative -> AuthorizedPending),
-// registering it first if it never touched the shadowed filesystem, then
-// runs the promotion/finalization pass. Must be called with b.mu held.
+// Commit authorizes an epoch and immediately tries to finalize it. It is kept
+// for single-epoch compatibility; SCC flows should call Authorize for each
+// independently approved member, then BeginFinalize for the group.
+func (b *Backend) Commit(epochID EpochID) (CommitResult, error) {
+	if _, err := b.Authorize(epochID); err != nil {
+		return CommitResult{}, err
+	}
+
+	b.opRW.RLock()
+	defer b.opRW.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ep := b.ensureEpoch(epochID, "")
+	if err := b.quiesceMappings(ep); err != nil {
+		ep.FinalizeErr = fmt.Sprintf("mmap quiesce: %v", err)
+		log.Printf("[backend] Commit: epoch=%q finalization ABORTED: %v", epochID, err)
+		return b.lifecycleResultLocked(epochID), nil
+	}
+	if err := b.flushEpochFDs(epochID); err != nil {
+		ep.FinalizeErr = fmt.Sprintf("flush fds: %v", err)
+		log.Printf("[backend] Commit: epoch=%q finalization ABORTED: %v", epochID, err)
+		return b.lifecycleResultLocked(epochID), nil
+	}
+	_ = b.tryPromoteAll()
+	return b.lifecycleResultLocked(epochID), nil
+}
+
+// commitInternal is used only by old replay-compatible paths that already hold
+// b.mu. New group flows authorize explicitly, then finalize the whole SCC.
 func (b *Backend) commitInternal(epochID EpochID) {
 	ep := b.ensureEpoch(epochID, "")
 	if ep.State < AuthorizedPending {
@@ -1921,7 +1990,11 @@ func (b *Backend) commitInternal(epochID EpochID) {
 	}
 	// Then fsync the tracked fds so promotion moves fully up-to-date stage
 	// copies.
-	b.flushEpochFDs(epochID)
+	if err := b.flushEpochFDs(epochID); err != nil {
+		ep.FinalizeErr = fmt.Sprintf("flush fds: %v", err)
+		log.Printf("[backend] Commit: epoch=%q finalization ABORTED: %v", epochID, err)
+		return
+	}
 	_ = b.tryPromoteAll()
 }
 
@@ -1945,7 +2018,11 @@ func (b *Backend) RetryFinalize(epochID EpochID) (CommitResult, error) {
 		log.Printf("[backend] RetryFinalize: epoch=%q ABORTED: %v", epochID, err)
 		return b.lifecycleResultLocked(epochID), nil
 	}
-	b.flushEpochFDs(epochID)
+	if err := b.flushEpochFDs(epochID); err != nil {
+		ep.FinalizeErr = fmt.Sprintf("flush fds: %v", err)
+		log.Printf("[backend] RetryFinalize: epoch=%q ABORTED: %v", epochID, err)
+		return b.lifecycleResultLocked(epochID), nil
+	}
 	_ = b.tryPromoteAll()
 	return b.lifecycleResultLocked(epochID), nil
 }
@@ -2049,13 +2126,21 @@ func (b *Backend) ackReleaseInternal(epochID EpochID) {
 // promotions since the last barrier, then clears the set. This is the
 // crash-atomic group-publish durability point: it runs BEFORE any epoch in
 // the group is marked Finalized. Must be called with b.mu held.
-func (b *Backend) publishBarrier() {
+func (b *Backend) publishBarrier() error {
+	var errs []string
 	for dir := range b.publishDirs {
 		if err := fsyncDir(dir); err != nil && !os.IsNotExist(err) {
-			log.Printf("[backend] publishBarrier fsync %q: %v", dir, err)
+			msg := fmt.Sprintf("%q: %v", dir, err)
+			log.Printf("[backend] publishBarrier fsync %s", msg)
+			errs = append(errs, msg)
+			continue
 		}
 		delete(b.publishDirs, dir)
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("publish barrier fsync: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // tryPromoteAll iterates over every object with a speculative head and
@@ -2419,7 +2504,14 @@ func (b *Backend) finalizeSCCIfReady(scc []EpochID) bool {
 	// Ready: finalize the whole component atomically. Publish barrier FIRST
 	// so the group's on-disk state is durable as a unit before ANY member
 	// becomes releasable.
-	b.publishBarrier()
+	if err := b.publishBarrier(); err != nil {
+		for _, id := range scc {
+			if ep := b.epochs[id]; ep != nil {
+				ep.FinalizeErr = err.Error()
+			}
+		}
+		return false
+	}
 	if len(scc) > 1 {
 		log.Printf("[backend] finalize SCC (cycle) as a unit: %v", scc)
 	}
@@ -2502,13 +2594,14 @@ func (b *Backend) PrepareResolution(epochID EpochID) (PrepareResolutionResult, e
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	ep, ok := b.epochs[epochID]
 	if !ok {
+		b.mu.Unlock()
 		return PrepareResolutionResult{}, fmt.Errorf("prepare_resolution: epoch %q not found", epochID)
 	}
 	if ep.State >= Finalizing {
+		b.mu.Unlock()
 		return PrepareResolutionResult{}, fmt.Errorf("prepare_resolution: epoch %q already %s", epochID, ep.State)
 	}
 
@@ -2526,6 +2619,7 @@ func (b *Backend) PrepareResolution(epochID EpochID) (PrepareResolutionResult, e
 		}
 	}
 	if group == nil {
+		b.mu.Unlock()
 		return PrepareResolutionResult{}, fmt.Errorf("prepare_resolution: epoch %q not in any SCC", epochID)
 	}
 
@@ -2536,20 +2630,36 @@ func (b *Backend) PrepareResolution(epochID EpochID) (PrepareResolutionResult, e
 		members = append(members, string(id))
 	}
 	sort.Strings(members)
+	graphGen := b.graphGen
+	seqNum := b.nextSeq()
+	rec := WALRecord{SeqNum: seqNum, ControlOp: "group_prepare",
+		GroupID: gid, Members: members, GraphGeneration: graphGen}
+	b.mu.Unlock()
 
+	if err := <-b.submitWAL(rec); err != nil {
+		b.applyTurnAbort(seqNum)
+		return PrepareResolutionResult{}, fmt.Errorf("prepare_resolution WAL: %w", err)
+	}
+
+	b.mu.Lock()
+	b.applyTurnWait(seqNum)
+	defer func() {
+		b.applyTurnDone(seqNum)
+		b.mu.Unlock()
+	}()
 	b.activeGroups[gid] = &finalizeGroup{
 		id:       gid,
 		members:  group,
-		graphGen: b.graphGen,
+		graphGen: graphGen,
 		state:    "pending",
 	}
 
 	log.Printf("[backend] PrepareResolution: epoch=%q group_id=%d members=%v graph_gen=%d",
-		epochID, gid, members, b.graphGen)
+		epochID, gid, members, graphGen)
 	return PrepareResolutionResult{
 		GroupID:         gid,
 		Members:         members,
-		GraphGeneration: b.graphGen,
+		GraphGeneration: graphGen,
 	}, nil
 }
 
@@ -2561,9 +2671,9 @@ type BeginFinalizeResult struct {
 // BeginFinalize starts the promote/finalize pass for an entire group (SCC).
 // The graph_generation must match the current b.graphGen; a mismatch means
 // the dependency graph changed between PrepareResolution and BeginFinalize
-// (TOCTOU) and the call is refused. Each member is authorized and driven
-// through the same commitInternal path as an individual Commit. All WAL
-// commit records are submitted as a single batch for group-atomic durability.
+// (TOCTOU) and the call is refused. Every member must already be independently
+// AuthorizedPending; this function must not authorize one member on behalf of
+// another.
 func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (BeginFinalizeResult, error) {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
@@ -2584,12 +2694,18 @@ func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (BeginFinali
 			"begin_finalize: graph_generation mismatch (caller=%d, current=%d): dependency graph changed (TOCTOU)",
 			graphGeneration, b.graphGen)
 	}
-	// Verify every member is still present and not yet finalizing.
+	// Verify every member is still present, independently authorized, and not
+	// already finalizing. A primary epoch's policy decision must not authorize
+	// its SCC siblings.
 	for _, id := range g.members {
 		ep, ok := b.epochs[id]
 		if !ok {
 			b.mu.Unlock()
 			return BeginFinalizeResult{}, fmt.Errorf("begin_finalize: member %q disappeared", id)
+		}
+		if ep.State < AuthorizedPending {
+			b.mu.Unlock()
+			return BeginFinalizeResult{}, fmt.Errorf("begin_finalize: member %q not independently authorized (state=%s)", id, ep.State)
 		}
 		if ep.State >= Finalizing {
 			b.mu.Unlock()
@@ -2597,35 +2713,7 @@ func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (BeginFinali
 		}
 	}
 
-	members := g.members
-	seqNums := make([]int64, len(members))
-	recs := make([]WALRecord, len(members))
-	for i, id := range members {
-		seqNums[i] = b.nextSeq()
-		recs[i] = WALRecord{EpochID: string(id), SeqNum: seqNums[i], ControlOp: "commit"}
-	}
-	b.mu.Unlock()
-
-	// Submit all WAL records as a single batch for group-atomic durability.
-	if err := <-b.submitWAL(recs...); err != nil {
-		for _, sn := range seqNums {
-			b.applyTurnAbort(sn)
-		}
-		return BeginFinalizeResult{}, fmt.Errorf("begin_finalize WAL: %w", err)
-	}
-
-	// Apply each seq in order: authorize each member.
-	b.mu.Lock()
-	for i, sn := range seqNums {
-		b.applyTurnWait(sn)
-		ep := b.ensureEpoch(members[i], "")
-		if ep.State < AuthorizedPending {
-			ep.State = AuthorizedPending
-			log.Printf("[backend] BeginFinalize: epoch=%q authorized (group %d)", members[i], groupID)
-		}
-		b.applyTurnDone(sn)
-	}
-	// Still holding mu from the last applyTurnDone.
+	members := append([]EpochID(nil), g.members...)
 	defer b.mu.Unlock()
 
 	// Quiesce + flush each member, then promote.
@@ -2643,7 +2731,14 @@ func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (BeginFinali
 			log.Printf("[backend] BeginFinalize: epoch=%q ABORTED: %v", id, err)
 			continue
 		}
-		b.flushEpochFDs(id)
+		if err := b.flushEpochFDs(id); err != nil {
+			ep.FinalizeErr = fmt.Sprintf("flush fds: %v", err)
+			if firstErr == "" {
+				firstErr = fmt.Sprintf("member %q: flush fds: %v", id, err)
+			}
+			log.Printf("[backend] BeginFinalize: epoch=%q ABORTED: %v", id, err)
+			continue
+		}
 	}
 	_ = b.tryPromoteAll()
 
@@ -2741,18 +2836,32 @@ func (b *Backend) AckReleaseGroup(groupID int) error {
 		}
 	}
 	if len(pending) == 0 {
+		seqNum := b.nextSeq()
+		rec := WALRecord{SeqNum: seqNum, ControlOp: "group_delete", GroupID: groupID}
+		b.mu.Unlock()
+		if err := <-b.submitWAL(rec); err != nil {
+			b.applyTurnAbort(seqNum)
+			return fmt.Errorf("ack_release_group delete WAL: %w", err)
+		}
+		b.mu.Lock()
+		b.applyTurnWait(seqNum)
 		delete(b.activeGroups, groupID)
+		b.applyTurnDone(seqNum)
 		b.mu.Unlock()
 		log.Printf("[backend] AckReleaseGroup: group=%d already fully acked", groupID)
 		return nil
 	}
 
-	seqNums := make([]int64, len(pending))
-	recs := make([]WALRecord, len(pending))
-	for i, id := range pending {
-		seqNums[i] = b.nextSeq()
-		recs[i] = WALRecord{EpochID: string(id), SeqNum: seqNums[i], ControlOp: "release_ack"}
+	seqNums := make([]int64, 0, len(pending)+1)
+	recs := make([]WALRecord, 0, len(pending)+1)
+	for _, id := range pending {
+		seqNum := b.nextSeq()
+		seqNums = append(seqNums, seqNum)
+		recs = append(recs, WALRecord{EpochID: string(id), SeqNum: seqNum, ControlOp: "release_ack"})
 	}
+	deleteSeq := b.nextSeq()
+	seqNums = append(seqNums, deleteSeq)
+	recs = append(recs, WALRecord{SeqNum: deleteSeq, ControlOp: "group_delete", GroupID: groupID})
 	b.mu.Unlock()
 
 	if err := <-b.submitWAL(recs...); err != nil {
@@ -2765,10 +2874,13 @@ func (b *Backend) AckReleaseGroup(groupID int) error {
 	b.mu.Lock()
 	for i, sn := range seqNums {
 		b.applyTurnWait(sn)
-		b.ackReleaseInternal(pending[i])
+		if i < len(pending) {
+			b.ackReleaseInternal(pending[i])
+		} else {
+			delete(b.activeGroups, groupID)
+		}
 		b.applyTurnDone(sn)
 	}
-	delete(b.activeGroups, groupID)
 	b.mu.Unlock()
 
 	log.Printf("[backend] AckReleaseGroup: group=%d released (%d members)", groupID, len(pending))

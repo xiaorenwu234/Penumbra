@@ -299,14 +299,17 @@ class PolicyIR:
         Wildcard event_type (-1) is kept as-is for the audit engine, which
         uses -1 to mean "any event type".
         """
-        return [
-            {
+        out: List[Dict] = []
+        for r in self.rules:
+            rule = {
                 "event_type": r["event_type"],  # -1 for wildcard
                 "action": r["action"],
                 "path_pattern": r["path_pattern"],
             }
-            for r in self.rules
-        ]
+            if "endpoint" in r:
+                rule["endpoint"] = dict(r["endpoint"])
+            out.append(rule)
+        return out
 
     def to_bpf_whitelist(self) -> List[Dict]:
         """Emit whitelist entries for the ShadowObserve BPF enforcer.

@@ -220,6 +220,7 @@ struct class_policy_key {
     __u64 cgroup_id;
     __u8  effect_class;
     __u8  operation;
+    __u8  _pad0[6];
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);

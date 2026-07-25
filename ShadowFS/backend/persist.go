@@ -390,7 +390,8 @@ func fsyncDir(dir string) error {
 //
 // ControlOp marks the record as a state-management op rather than a
 // mutation. Empty means "normal mutation" (Version != nil). Recognised
-// values: "begin_epoch", "commit", "rollback", "read_dep", "release_ack".
+// values: "begin_epoch", "commit", "rollback", "read_dep", "release_ack",
+// "group_prepare", "group_delete".
 type WALRecord struct {
 	// Format is the WAL record generation (persistFormatVersion). Records
 	// without it are legacy v1 records and abort recovery.
@@ -405,6 +406,10 @@ type WALRecord struct {
 	// ReadVersion + ObjectPath carry a read_dep record's observed version.
 	ReadVersion uint64 `json:"read_version,omitempty"`
 	ObjectPath  string `json:"object_path,omitempty"`
+	// GroupID/Members/GraphGeneration carry group_prepare/group_delete records.
+	GroupID         int      `json:"group_id,omitempty"`
+	Members         []string `json:"members,omitempty"`
+	GraphGeneration int64    `json:"graph_generation,omitempty"`
 }
 
 type walFrame struct {
