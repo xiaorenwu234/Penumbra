@@ -4,10 +4,11 @@ Unit tests for the Phase 1 fence / finalization hardening:
 
   * _release_proc discards baselines (commit_by_cgroup) BEFORE the full release
     (continue_by_cgroup), and fails CLOSED if the baseline discard fails.
-  * session_commit_epoch is FS-FIRST: the reversible quiesce runs, the file
-    layer is gated, and the DESTRUCTIVE process commit (finalize_commit, which
-    discards the baseline) happens ONLY on ShadowFS success. On FS failure the
-    baseline is preserved (finalize_commit is never called).
+  * session_commit_epoch drives the REAL finalization path: reversible
+    quiesce, whole-agent FS "commit" (authorize + promote), a fail-closed
+    can_release gate, and only THEN the destructive process commit
+    (finalize_commit) + marker close + release ack. On FS failure or a
+    not-yet-Finalized agent the baseline is preserved.
   * session_run holds SPECULATIVE output pending during an epoch (never returns
     it to the caller before finalization).
   * An unknown policy event_type fails CLOSED (ValueError) instead of being
@@ -168,16 +169,21 @@ def _session_orch(proxy, fs_handler):
     orch._sessions_lock = threading.Lock()
     orch._journal = _NullJournal()
     orch._recovered_outputs = {}
+    orch._release_lock = threading.RLock()
+    orch._pending_ack = set()
+    orch._pending_ack_lock = threading.Lock()
     return orch
 
 
 class TestSessionCommitEpochFSFirst(unittest.TestCase):
     def test_fs_success_finalizes_and_releases(self):
-        """FS commit_epoch ok => quiesce THEN finalize; transcript released."""
+        """FS commit ok + Finalized => quiesce THEN finalize; marker closed,
+        release acked, transcript released."""
         proxy = FakeProxy(output="OUT")
 
         def fs(req):
-            self.assertEqual(req["action"], "commit_epoch")
+            if req["action"] in ("commit", "can_release"):
+                return {"status": "ok", "releasable": True}
             return {"status": "ok"}
 
         orch = _session_orch(proxy, fs)
@@ -190,9 +196,18 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
         self.assertIn("finalize_commit", proxy.calls)
         self.assertLess(proxy.calls.index("quiesce_for_commit"),
                         proxy.calls.index("finalize_commit"))
+        # The REAL finalization path was driven: whole-agent commit + the
+        # fail-closed release gate, then the marker close and the release ack.
+        acts = orch.fs_client.actions()
+        self.assertIn("commit", acts)
+        self.assertIn("can_release", acts)
+        self.assertIn("commit_epoch", acts)
+        self.assertIn("ack_release", acts)
+        self.assertLess(acts.index("commit"), acts.index("can_release"))
+        self.assertLess(acts.index("can_release"), acts.index("ack_release"))
 
     def test_fs_failure_preserves_baseline(self):
-        """FS commit_epoch fail => quiesce ran but finalize_commit NEVER called
+        """FS commit fail => quiesce ran but finalize_commit NEVER called
         (baseline preserved so the epoch can still be rolled back)."""
         proxy = FakeProxy()
 
@@ -206,6 +221,30 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
         self.assertIn("quiesce_for_commit", proxy.calls)
         self.assertNotIn("finalize_commit", proxy.calls,
                          "baseline must NOT be discarded when FS fails")
+        self.assertNotIn("ack_release", orch.fs_client.actions())
+
+    def test_not_finalized_preserves_baseline(self):
+        """FS commit ok but agent NOT Finalized (deferred promotion/upstream)
+        => authorized_pending, baseline preserved, nothing acked."""
+        proxy = FakeProxy()
+
+        def fs(req):
+            if req["action"] == "commit":
+                return {"status": "ok", "releasable": False}
+            if req["action"] == "can_release":
+                return {"status": "ok", "releasable": False}
+            return {"status": "ok"}
+
+        orch = _session_orch(proxy, fs)
+        resp = orch.session_commit_epoch("sid1")
+
+        self.assertEqual(resp["status"], "error")
+        self.assertEqual(resp.get("decision"), "authorized_pending")
+        self.assertNotIn("finalize_commit", proxy.calls,
+                         "baseline must NOT be discarded before Finalized")
+        acts = orch.fs_client.actions()
+        self.assertNotIn("commit_epoch", acts, "marker must stay open")
+        self.assertNotIn("ack_release", acts)
 
 
 class RunProxy:

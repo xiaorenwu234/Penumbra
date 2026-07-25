@@ -670,16 +670,36 @@ impl ProcessManager {
     }
 
     /// Commit all tracked processes in a cgroup.
+    ///
+    /// FAIL CLOSED on partial failure: if ANY tracked process fails to commit,
+    /// this returns Err (listing every failed pid) instead of silently
+    /// reporting partial success -- the orchestrator must keep the cgroup
+    /// fenced and retry rather than release against a half-committed state.
+    /// Already-committed pids are no longer tracked, so a retry is safe: it
+    /// skips them and re-attempts only the failures.
     pub fn commit_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
         let pids: Vec<u32> = self.frozen.values()
             .filter(|p| p.cgroup_path == cgroup_path)
             .map(|p| p.tgid)
             .collect();
         let mut committed = Vec::new();
+        let mut failures = Vec::new();
         for pid in pids {
-            if self.memory_tracker.is_tracking(pid) && self.commit_process(pid).is_ok() {
-                committed.push(pid);
+            if !self.memory_tracker.is_tracking(pid) {
+                continue; // non-versioned frozen process: nothing to commit
             }
+            match self.commit_process(pid) {
+                Ok(()) => committed.push(pid),
+                Err(e) => failures.push(format!("pid {}: {}", pid, e)),
+            }
+        }
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "commit_by_cgroup {}: {} process(es) failed to commit [{}] \
+                 ({} committed before the failure; retry re-attempts only the \
+                 failures)",
+                cgroup_path, failures.len(), failures.join("; "), committed.len()
+            );
         }
         Ok(committed)
     }

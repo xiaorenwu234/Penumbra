@@ -89,6 +89,14 @@ class SocketClient:
         self.close()
 
 
+class JournalCorruptError(RuntimeError):
+    """The durable journal is corrupt in a non-torn-tail way (a record BEFORE
+    the last one is unparseable). For a security control plane this must FAIL
+    CLOSED: recovery cannot trust a journal with holes in the middle, so the
+    orchestrator refuses to start until the operator inspects/moves the file.
+    """
+
+
 class _OrchestratorJournal:
     """Append-only durable journal of session-finalization decisions.
 
@@ -131,21 +139,34 @@ class _OrchestratorJournal:
                 os.close(fd)
 
     def load(self) -> list:
+        """Parse the journal. FAIL CLOSED on corruption: only the LAST record
+        may be unparseable (a torn write from a crash mid-append) and is then
+        dropped; a bad record anywhere BEFORE the tail means the journal was
+        truncated/tampered/bit-rotted and raises JournalCorruptError instead of
+        silently recovering from partial history.
+        """
         try:
             with open(self.path, "r") as f:
-                out = []
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        out.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        # A torn last record (crash mid-write) is ignored.
-                        continue
-                return out
+                lines = f.readlines()
         except FileNotFoundError:
             return []
+        out = []
+        last = len(lines) - 1
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                if i == last:
+                    # Torn final record (crash mid-write): safe to drop.
+                    continue
+                raise JournalCorruptError(
+                    f"{self.path}: unparseable record at line {i + 1} "
+                    f"(not the tail) -- refusing to recover from a corrupt "
+                    f"journal (fail closed)")
+        return out
 
     @staticmethod
     def replay(records: list) -> dict:
@@ -327,14 +348,11 @@ class ShadowOrchestrator:
         deterministic outcome. Reconstructs the session→cgroup map, makes the
         committed transcript of any FS-committed-but-unreleased epoch
         retrievable, and reconciles undecided commits against ShadowFS (the
-        authoritative WAL-backed layer). Fail-open on a corrupt journal: start
-        fresh rather than refuse to boot.
+        authoritative WAL-backed layer). A corrupt journal FAILS CLOSED: the
+        JournalCorruptError propagates and the orchestrator refuses to start,
+        so a caller can never observe results derived from partial history.
         """
-        try:
-            records = self._journal.load()
-        except Exception as e:  # noqa: BLE001
-            log.warning("journal load failed: %s -- starting fresh", e)
-            return
+        records = self._journal.load()
         if not records:
             return
         state = _OrchestratorJournal.replay(records)
@@ -1086,7 +1104,16 @@ class ShadowOrchestrator:
     def session_commit_epoch(self, session_id: str) -> dict:
         """
         Accept the current epoch: keep the candidate as canonical (ShadowProc)
-        AND accept the epoch's file changes (ShadowFS). The session lives on.
+        AND durably PROMOTE the epoch's file changes (ShadowFS). The session
+        lives on.
+
+        This drives the FULL finalization path -- FS "commit" (authorize +
+        promote to orig), a fail-closed can_release gate, the destructive
+        process commit, and the release ack -- NOT the marker-only
+        "commit_epoch" control op. The old convenience path only closed the
+        epoch marker while the files stayed un-promoted in the overlay, yet it
+        destroyed the baseline and released output: a later whole-agent
+        rollback could then undo "committed" files with no baseline left.
         """
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
@@ -1104,31 +1131,71 @@ class ShadowOrchestrator:
         except Exception as e:  # noqa: BLE001
             log.error("  quiesce_for_commit (process layer) failed: %s", e)
             return {"status": "error", "message": str(e)}
-        # Gate on the file layer: only proceed to the destructive process commit
-        # once ShadowFS has finalized the epoch's file changes.
-        fs_resp = self.fs_client.request({
-            "action": "commit_epoch",
-            "cgroup_id": cgroup_id,
-        })
-        if fs_resp.get("status") != "ok":
-            # FS did NOT finalize: do NOT discard the baseline. The epoch stays
-            # intact (candidate still frozen) so it can be rolled back later.
-            log.error("  ShadowFS commit_epoch failed: %s -- baseline preserved",
-                      fs_resp.get("message"))
-            return fs_resp
-        # DECISION POINT: the file layer finalized durably, so the canonical
-        # outcome is now COMMITTED. Snapshot the committed transcript into the
-        # journal BEFORE the destructive process commit, so a crash here still
-        # yields a deterministic (committed) result with retrievable output.
-        self._journal.append("fs_committed", sid=session_id, cgroup=cgroup_id,
-                             output=proxy.peek_epoch_output(session_id))
-        # FS finalized: perform the DESTRUCTIVE process commit (discard baseline,
-        # keep candidate canonical) and release the buffered speculative output.
-        try:
-            proxy.finalize_commit(session_id)
-        except Exception as e:  # noqa: BLE001
-            log.error("  finalize_commit (process layer) failed: %s", e)
-            return {"status": "error", "message": str(e)}
+        with self._release_lock:
+            # Step 1: REAL file finalization -- authorize + promote every dirty
+            # path durably onto orig (the same path the whole-agent commit
+            # uses), not just close the epoch marker.
+            try:
+                fs_resp = self.fs_client.request({
+                    "action": "commit",
+                    "cgroup_id": cgroup_id,
+                })
+            except Exception as e:  # noqa: BLE001 - fail closed, baseline kept
+                log.error("  ShadowFS commit unreachable: %s -- baseline "
+                          "preserved", e)
+                return {"status": "error", "message": str(e)}
+            if fs_resp.get("status") != "ok":
+                # FS did NOT finalize: do NOT discard the baseline. The epoch
+                # stays intact (candidate still frozen) so it can be rolled
+                # back later.
+                log.error("  ShadowFS commit failed: %s -- baseline preserved",
+                          fs_resp.get("message"))
+                return fs_resp
+            # Step 2: fail-closed gate -- only proceed to the destructive
+            # process commit once ShadowFS confirms the agent reached Finalized
+            # (all promotions durable, all upstreams finalized). The gate is
+            # re-queried rather than trusting the commit echo.
+            if not self._fs_can_release(cgroup_id):
+                log.error("  cgroup=%s authorized but NOT finalized -- baseline "
+                          "preserved (epoch stays fenced; retry the commit)",
+                          cgroup_id)
+                return {"status": "error", "decision": "authorized_pending",
+                        "message": "file layer not finalized; epoch kept "
+                                   "intact for retry",
+                        "finalize_err": fs_resp.get("finalize_err") or ""}
+            # DECISION POINT: the file layer finalized durably, so the
+            # canonical outcome is now COMMITTED. Snapshot the committed
+            # transcript into the journal BEFORE the destructive process
+            # commit, so a crash here still yields a deterministic (committed)
+            # result with retrievable output.
+            self._journal.append("fs_committed", sid=session_id, cgroup=cgroup_id,
+                                 output=proxy.peek_epoch_output(session_id))
+            # Close the (now-moot) epoch marker so the agent's next epoch
+            # starts clean. Best-effort: the files are already promoted.
+            try:
+                self.fs_client.request({"action": "commit_epoch",
+                                        "cgroup_id": cgroup_id})
+            except Exception as e:  # noqa: BLE001
+                log.warning("  commit_epoch marker close failed: %s", e)
+            # Step 3: FS finalized -> perform the DESTRUCTIVE process commit
+            # (discard baseline, keep candidate canonical) and release the
+            # buffered speculative output.
+            try:
+                proxy.finalize_commit(session_id)
+            except Exception as e:  # noqa: BLE001
+                # Outcome is already durably COMMITTED (journaled): a retry of
+                # session_commit_epoch / restart recovery finishes the release.
+                log.error("  finalize_commit (process layer) failed: %s", e)
+                return {"status": "error", "message": str(e)}
+            # Step 4: external effects are out -- ack so ShadowFS drops the
+            # finalized record (otherwise the session's NEXT epoch would write
+            # onto a terminal Finalized agent). A failed ack is parked for the
+            # ack-only retry loop, never re-fenced.
+            if not self._fs_ack_release(cgroup_id):
+                with self._pending_ack_lock:
+                    self._pending_ack.add(cgroup_id)
+                log.warning("  ack_release(%s) failed -- parked for ack-only "
+                            "retry", cgroup_id)
         self._journal.append("commit_done", sid=session_id, cgroup=cgroup_id)
         self._recovered_outputs.pop(session_id, None)
         return {"status": "ok", "output": proxy.get_output(session_id)}

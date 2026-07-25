@@ -12,7 +12,8 @@ import tempfile
 import threading
 import unittest
 
-from shadow_orchestrator import ShadowOrchestrator, _OrchestratorJournal
+from shadow_orchestrator import (ShadowOrchestrator, _OrchestratorJournal,
+                                 JournalCorruptError)
 
 
 class FakeFsClient:
@@ -114,6 +115,33 @@ class TestJournalIO(unittest.TestCase):
             self.assertEqual(len(recs), 2)
             self.assertEqual(recs[0]["op"], "open")
             self.assertEqual(recs[1]["op"], "fs_committed")
+
+    def test_midfile_corruption_fails_closed(self):
+        # Corruption BEFORE the tail is NOT a torn write: recovery must refuse
+        # to build state from partial history (fail closed).
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "j.jsonl")
+            j = _OrchestratorJournal(p)
+            j.append("open", sid="s1", cgroup="/cg1")
+            with open(p, "a") as f:
+                f.write("GARBAGE-NOT-JSON\n")  # complete (newline'd) bad record
+            j.append("fs_committed", sid="s1", cgroup="/cg1", output="R")
+            with self.assertRaises(JournalCorruptError):
+                j.load()
+
+    def test_corrupt_journal_refuses_recovery(self):
+        # _recover_from_journal must propagate the corruption instead of
+        # silently starting fresh.
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "j.jsonl")
+            j = _OrchestratorJournal(p)
+            j.append("open", sid="s1", cgroup="/cg1")
+            with open(p, "a") as f:
+                f.write("{broken\n")
+            j.append("close", sid="s1")
+            orch = _new_orch(p)
+            with self.assertRaises(JournalCorruptError):
+                orch._recover_from_journal()
 
     def test_rewrite_compaction(self):
         with tempfile.TemporaryDirectory() as d:

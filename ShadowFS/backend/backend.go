@@ -877,23 +877,28 @@ func cgroupPIDs(cgroupID string) ([]int, error) {
 // Idempotent: a shared file mapping's memory IS the file's intended content, so
 // writing it back is safe even for pages that were already flushed. Requires
 // the agent to be frozen (stable memory); callers invoke it from the commit
-// path where ShadowProc has already frozen the cgroup. Only files that already
-// have an overlay copy (i.e. tracked/dirty, hence promotable) are quiesced; a
-// mapping of a never-copied-up file is logged and skipped. Best-effort per
-// region. Returns the number of regions flushed.
-func (b *Backend) quiesceMappings(cgroupID string) int {
+// path where ShadowProc has already frozen the cgroup.
+//
+// FAIL CLOSED: if ANY writable MAP_SHARED region of a ShadowFS-backed file is
+// found but cannot be fully captured (no overlay copy, /proc/<pid>/mem
+// unreadable, or a copy/sync error), an error is returned and the caller MUST
+// abort finalization -- promoting would otherwise publish a file that silently
+// misses the process's dirty mmap pages. Vacuous success (no such mappings, or
+// the cgroup/processes are already gone, e.g. during WAL replay) returns nil.
+func (b *Backend) quiesceMappings(cgroupID string) error {
 	if b.mountDir == "" {
-		return 0 // mountpoint unknown -> cannot match maps entries
+		return nil // mountpoint unknown (not yet mounted) -> cannot match maps entries
 	}
 	pids, err := cgroupPIDs(cgroupID)
 	if err != nil {
-		return 0 // cgroup gone / unreadable -> nothing to quiesce
+		return nil // cgroup gone / unreadable -> no live processes, nothing to quiesce
 	}
 	flushed := 0
+	var errs []string
 	for _, pid := range pids {
 		maps, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", pid))
 		if err != nil {
-			continue
+			continue // process exited between listing and read
 		}
 		regions := parseWritableSharedMaps(string(maps), b.mountDir)
 		if len(regions) == 0 {
@@ -901,11 +906,15 @@ func (b *Backend) quiesceMappings(cgroupID string) int {
 		}
 		mem, err := os.OpenFile(fmt.Sprintf("/proc/%d/mem", pid), os.O_RDONLY, 0)
 		if err != nil {
-			log.Printf("[backend] quiesceMappings: open /proc/%d/mem: %v", pid, err)
+			// Regions exist but their memory cannot be read: their dirty pages
+			// would be silently lost by promotion. Abort.
+			errs = append(errs, fmt.Sprintf("pid %d: open /proc/mem: %v", pid, err))
 			continue
 		}
 		for _, r := range regions {
-			if b.quiesceRegion(mem, r) {
+			if err := b.quiesceRegion(mem, r); err != nil {
+				errs = append(errs, fmt.Sprintf("pid %d %q: %v", pid, r.mountPath, err))
+			} else {
 				flushed++
 			}
 		}
@@ -915,36 +924,40 @@ func (b *Backend) quiesceMappings(cgroupID string) int {
 		log.Printf("[backend] quiesceMappings: agent=%q flushed %d writable MAP_SHARED region(s)",
 			cgroupID, flushed)
 	}
-	return flushed
+	if len(errs) > 0 {
+		return fmt.Errorf("quiesce failed for %d writable MAP_SHARED region(s): %s",
+			len(errs), strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // quiesceRegion copies one region's bytes from the frozen process's memory
 // (/proc/<pid>/mem) into its overlay copy at the mapped file offset. Returns
-// true on a successful (possibly partial) capture + fsync.
-func (b *Backend) quiesceRegion(mem *os.File, r mapRegion) bool {
+// nil only on a COMPLETE capture + fsync; any shortfall is an error so the
+// caller aborts finalization instead of promoting a partially-captured file.
+func (b *Backend) quiesceRegion(mem *os.File, r mapRegion) error {
 	root := strings.TrimSuffix(b.mountDir, "/")
 	rel := strings.TrimPrefix(r.mountPath, root)
 	origPath := filepath.Join(b.trackedDir, rel)
 	overlayPath, err := overlayPathFor(b.stagingDir, b.trackedDir, origPath)
 	if err != nil {
-		return false
+		return fmt.Errorf("overlay path: %w", err)
 	}
-	// Only quiesce files that already have an overlay copy (tracked/dirty, so
-	// promotion will carry them). Injecting a brand-new tracked write during
-	// commit is out of scope.
+	// A writable shared mapping of a tracked file that has NO overlay copy
+	// means dirty pages exist that promotion cannot carry at all. Fail closed:
+	// admission is supposed to exclude such sessions, so hitting this at
+	// commit time is an integrity violation, not a skippable edge case.
 	if st, serr := os.Lstat(overlayPath); serr != nil || st.IsDir() {
-		log.Printf("[backend] quiesceMappings: %q has no overlay copy -- skipped", r.mountPath)
-		return false
+		return fmt.Errorf("no overlay copy for mapped file (dirty mmap pages would be lost)")
 	}
 	out, err := os.OpenFile(overlayPath, os.O_WRONLY, 0)
 	if err != nil {
-		return false
+		return fmt.Errorf("open overlay: %w", err)
 	}
 	defer out.Close()
 	const chunk = 1 << 20 // 1 MiB
 	buf := make([]byte, chunk)
 	total := r.end - r.start
-	ok := true
 	for done := uint64(0); done < total; {
 		n := chunk
 		if remaining := total - done; remaining < uint64(n) {
@@ -953,24 +966,24 @@ func (b *Backend) quiesceRegion(mem *os.File, r mapRegion) bool {
 		rn, rerr := mem.ReadAt(buf[:n], int64(r.start+done))
 		if rn > 0 {
 			if _, werr := out.WriteAt(buf[:rn], int64(r.offset+done)); werr != nil {
-				ok = false
-				break
+				return fmt.Errorf("write overlay at %#x: %w", r.offset+done, werr)
 			}
 			done += uint64(rn)
 		}
 		if rerr != nil {
-			// Unreadable page (hole) or EOF: stop. A partial capture is still a
-			// strict improvement over losing all of the process's dirty pages.
-			break
+			if done >= total {
+				break // final chunk returned data + EOF together
+			}
+			return fmt.Errorf("read process memory at %#x: %w", r.start+done, rerr)
 		}
 		if rn == 0 {
-			break
+			return fmt.Errorf("short read of process memory at %#x", r.start+done)
 		}
 	}
 	if err := out.Sync(); err != nil {
-		ok = false
+		return fmt.Errorf("sync overlay: %w", err)
 	}
-	return ok
+	return nil
 }
 
 // --- Dependency graph ---
@@ -2641,9 +2654,17 @@ func (b *Backend) commitInternal(cgroupID string) {
 	}
 	// Capture the (frozen) agent's dirty writable MAP_SHARED pages into the
 	// overlay BEFORE promotion, closing the mmap writeback gap for pages the
-	// frozen process never got to flush itself. Then fsync the tracked fds so
-	// promotion renames a fully up-to-date overlay copy.
-	b.quiesceMappings(cgroupID)
+	// frozen process never got to flush itself. FAIL CLOSED: if the capture is
+	// incomplete, abort finalization (the agent stays AuthorizedPending with
+	// FinalizeErr set, releasable=false) instead of promoting files that
+	// silently miss dirty mmap pages. retry_finalize re-attempts the quiesce.
+	if err := b.quiesceMappings(cgroupID); err != nil {
+		agent.FinalizeErr = fmt.Sprintf("mmap quiesce: %v", err)
+		log.Printf("[backend] Commit: agent=%q finalization ABORTED: %v", cgroupID, err)
+		return
+	}
+	// Then fsync the tracked fds so promotion renames a fully up-to-date
+	// overlay copy.
 	b.flushAgentFDs(cgroupID)
 	_ = b.tryPromoteAll()
 }
@@ -2665,6 +2686,14 @@ func (b *Backend) RetryFinalize(cgroupID string) (CommitResult, error) {
 	}
 	if agent.State < AuthorizedPending {
 		return CommitResult{}, fmt.Errorf("retry_finalize: agent %q not authorized (state=%s)", cgroupID, agent.State)
+	}
+	// Re-attempt the writable-MAP_SHARED quiesce with the same fail-closed
+	// gate as commitInternal: promotion must never run against an overlay
+	// that is missing dirty mmap pages.
+	if err := b.quiesceMappings(cgroupID); err != nil {
+		agent.FinalizeErr = fmt.Sprintf("mmap quiesce: %v", err)
+		log.Printf("[backend] RetryFinalize: agent=%q ABORTED: %v", cgroupID, err)
+		return b.lifecycleResultLocked(cgroupID), nil
 	}
 	b.flushAgentFDs(cgroupID)
 	_ = b.tryPromoteAll()
