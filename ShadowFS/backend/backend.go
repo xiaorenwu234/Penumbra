@@ -237,7 +237,9 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 		return nil, fmt.Errorf("load WAL: %w", err)
 	}
 	if len(records) > 0 {
-		b.replayWAL(records)
+		if err := b.replayWAL(records); err != nil {
+			return nil, fmt.Errorf("replay WAL: %w", err)
+		}
 	}
 	// NOTE: epochs are NOT auto-authorized on recovery. An epoch is
 	// authorized only if a durable "commit" WAL record was replayed above.
@@ -262,7 +264,7 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 // the on-disk stage state is also REDONE via materializeVersionLocked (run
 // BEFORE the version is inserted into the chain, exactly like live apply, so
 // the copy-up source resolution is identical).
-func (b *Backend) replayWAL(records []WALRecord) {
+func (b *Backend) replayWAL(records []WALRecord) error {
 	snapshotSeq := b.seq
 	applied := 0
 	for i := range records {
@@ -277,9 +279,15 @@ func (b *Backend) replayWAL(records []WALRecord) {
 				b.beginEpochInternal(EpochID(rec.EpochID), rec.CgroupID, rec.SessionID)
 			case "commit":
 				// Authorize only; the trailing tryPromoteAll in NewBackend
-				// drives promotion/finalization once ALL records are in.
+				// drives promotion/finalization once ALL records are in. Two
+				// different non-empty hashes for one epoch indicate a rejected
+				// concurrent authorization reached the WAL and must fail closed.
 				ep := b.ensureEpoch(EpochID(rec.EpochID), rec.CgroupID)
 				if rec.PolicyHash != "" {
+					if ep.PolicyHash != "" && ep.PolicyHash != rec.PolicyHash {
+						return fmt.Errorf("WAL policy_hash conflict for epoch %q: %q vs %q",
+							rec.EpochID, ep.PolicyHash, rec.PolicyHash)
+					}
 					ep.PolicyHash = rec.PolicyHash
 				}
 				if ep.State < AuthorizedPending {
@@ -340,6 +348,7 @@ func (b *Backend) replayWAL(records []WALRecord) {
 		applied++
 	}
 	log.Printf("[backend] WAL replayed: %d/%d records (filtered by snapshot seq=%d)", applied, len(records), snapshotSeq)
+	return nil
 }
 
 // --- Group-commit WAL (write-ahead with batched fsync) ---
@@ -1919,8 +1928,11 @@ func (b *Backend) Authorize(epochID EpochID, policyHash string) (CommitResult, e
 	if policyHash == "" {
 		return CommitResult{}, fmt.Errorf("authorize: policy_hash required for epoch %q", epochID)
 	}
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
+	// Serialize independent authorization per backend instance. This prevents two
+	// different policy hashes for the same epoch from both passing the pre-WAL
+	// check and reaching durable storage; replay also rejects such conflicts.
+	b.opRW.Lock()
+	defer b.opRW.Unlock()
 
 	b.mu.Lock()
 	if ep := b.epochs[epochID]; ep != nil && ep.State >= AuthorizedPending {
@@ -2733,6 +2745,8 @@ func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (BeginFinali
 	}
 
 	members := append([]EpochID(nil), g.members...)
+	g.state = "finalizing"
+	g.finalizeErr = ""
 	defer b.mu.Unlock()
 
 	// Quiesce + flush each member, then promote.
@@ -2844,9 +2858,9 @@ func (b *Backend) CancelGroup(groupID int) error {
 		b.mu.Unlock()
 		return nil
 	}
-	if g.state == "finalized" {
+	if g.state != "pending" {
 		b.mu.Unlock()
-		return fmt.Errorf("cancel_group: group %d is finalized; use ack_release_group", groupID)
+		return fmt.Errorf("cancel_group: group %d is %s; use retry/ack group flow", groupID, g.state)
 	}
 	seqNum := b.nextSeq()
 	rec := WALRecord{SeqNum: seqNum, ControlOp: "group_delete", GroupID: groupID}

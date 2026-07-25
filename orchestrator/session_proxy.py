@@ -652,6 +652,28 @@ class SessionProxy:
                 f"pidfd_open/pidfd_getfd unavailable and {len(reg_fds)} "
                 f"regular fd(s) > 2 could not be restored on reject")
 
+    def _reject_tmp_regular_fds(self, pid: int) -> None:
+        tmp_roots = ("/tmp", "/dev/shm", "/var/tmp", "/run")
+        try:
+            fd_entries = os.listdir(f"/proc/{pid}/fd")
+        except OSError as e:
+            raise NotAdmissibleError(f"cannot read /proc/{pid}/fd: {e}")
+        for fd_name in fd_entries:
+            if not fd_name.isdigit():
+                continue
+            fd_path = f"/proc/{pid}/fd/{fd_name}"
+            try:
+                link = os.readlink(fd_path)
+                fd_stat = os.stat(fd_path)
+            except OSError:
+                continue
+            if not stat.S_ISREG(fd_stat.st_mode):
+                continue
+            path = link.split(" (deleted)", 1)[0]
+            if any(path == root or path.startswith(root + "/") for root in tmp_roots):
+                raise NotAdmissibleError(
+                    f"fd {fd_name} points to rollback-unsafe tmp file: {link}")
+
     def _snapshot_fds(self, pid: int) -> list:
         """Snapshot all seekable regular-file fds (> 2) of the process.
         Returns a list of FdSnapshot.  Called after admission passes."""
@@ -1137,22 +1159,22 @@ class SessionProxy:
         if sess.epoch is not None:
             raise RuntimeError("an epoch is already active for this session")
 
-        # Phase 4: admission check — verify the baseline is snapshot-safe BEFORE
-        # any freeze/fork.  This is a precondition, not a transient failure, so
-        # it runs once outside the retry loop.
+        # Phase 4: admission check — verify the baseline is snapshot-safe before
+        # creating a candidate. Then freeze it and take fd/tmp snapshots at the
+        # same stopped epoch boundary.
         self._admit_for_versioning(sess.live_pid)
+        self.client.call("freeze_by_cgroup", cgroup_id=sess.cgroup_id)
+        if not self._wait_state_T(sess.live_pid):
+            raise RuntimeError("live shell never reached stopped state")
+        time.sleep(0.15)
+        self._reject_tmp_regular_fds(sess.live_pid)
         fd_snapshots = self._snapshot_fds(sess.live_pid)
         tmp_snapshot = self._snapshot_epoch_tmp_state(sess)
 
         last_err = None
         for attempt in range(1, retries + 1):
             try:
-                # Freeze the live shell at its idle read() boundary.
-                self.client.call("freeze_by_cgroup", cgroup_id=sess.cgroup_id)
-                if not self._wait_state_T(sess.live_pid):
-                    raise RuntimeError("live shell never reached stopped state")
-                time.sleep(0.15)
-                # Freeze original as baseline; fork the speculative candidate.
+                # Frozen original is the baseline; fork the speculative candidate.
                 resp = self.client.call("begin_speculative", pid=sess.live_pid)
                 pids = resp.get("pids") or []
                 if not pids:
@@ -1267,16 +1289,25 @@ class SessionProxy:
         self._kill_descendants(candidate)
         resp = self.client.call("reject_pid", pid=baseline)
         self._reap(candidate)
-        # pids[0] is the canonical pid from now on (the resumed baseline).
+        # pids[0] is the canonical pid from now on (the baseline). reject_pid may
+        # resume it, so immediately stop the cgroup again before restoring fd/tmp
+        # state; the caller must not observe a half-restored namespace.
         pids = resp.get("pids") or [baseline]
         sess.live_pid = pids[0]
+        self.client.call("freeze_by_cgroup", cgroup_id=sess.cgroup_id)
+        if not self._wait_state_T(sess.live_pid, timeout=3.0):
+            try:
+                os.kill(sess.live_pid, signal.SIGSTOP)
+            except OSError:
+                pass
+            self._wait_state_T(sess.live_pid, timeout=1.0)
+        # Phase 4: restore fd state and tmp state while the baseline is stopped.
+        self._restore_fds(sess.live_pid, fd_snapshots)
         if tmp_snapshot:
             self._restore_epoch_tmp_state(sess, tmp_snapshot)
         sess.epoch = None
-        # Phase 4: restore fd state and check for pending signals on the
-        # resumed baseline.
-        self._restore_fds(sess.live_pid, fd_snapshots)
         self._clear_pending_signals(sess.live_pid)
+        self.client.call("continue_pid", pid=sess.live_pid)
         # Discard the speculative transcript: from the baseline's point of view
         # the epoch never happened, so its output is never released.
         sess.epoch_buffer = []

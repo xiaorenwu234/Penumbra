@@ -74,7 +74,10 @@ impl Drop for EpochState {
         // fork) is the disposable one — kill and reap it. The baseline is the
         // real, original process and is never touched here.
         let _ = nix::sys::signal::kill(Pid::from_raw(self.candidate_pid as i32), Signal::SIGKILL);
-        let _ = waitpid(Pid::from_raw(self.candidate_pid as i32), Some(WaitPidFlag::WNOHANG));
+        let _ = waitpid(
+            Pid::from_raw(self.candidate_pid as i32),
+            Some(WaitPidFlag::WNOHANG),
+        );
     }
 }
 
@@ -106,7 +109,10 @@ impl MemoryTracker {
     /// Enable or disable descendant fork awareness.
     pub fn set_auto_track(&mut self, enabled: bool) {
         self.auto_track_enabled = enabled;
-        eprintln!("[cow] Descendant fork awareness: {}", if enabled { "enabled" } else { "disabled" });
+        eprintln!(
+            "[cow] Descendant fork awareness: {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
 
     /// Check if descendant fork awareness is enabled
@@ -149,7 +155,8 @@ impl MemoryTracker {
         if let Some(e) = self.epochs.get(&pid) {
             anyhow::bail!(
                 "Process {} already has an active epoch (candidate {})",
-                pid, e.candidate_pid
+                pid,
+                e.candidate_pid
             );
         }
         // Persistent-session admission gate. Must pass BEFORE we take the
@@ -172,12 +179,7 @@ impl MemoryTracker {
     }
 
     /// Phase 3a: finalize a reservation with the injected candidate. Under lock.
-    pub fn finish_tracking(
-        &mut self,
-        pid: u32,
-        candidate: u32,
-        orig_regs: libc::user_regs_struct,
-    ) {
+    pub fn finish_tracking(&mut self, pid: u32, candidate: u32, orig_regs: libc::user_regs_struct) {
         self.reserving.remove(&pid);
         self.epochs.insert(
             pid,
@@ -541,11 +543,7 @@ fn maps_first_writable_shared(maps: &str) -> Option<String> {
 /// the legacy locked paths, could hang the whole daemon). So we poll with
 /// WNOHANG and give up after `timeout_ms`, turning a hang into a recoverable
 /// error.
-fn waitpid_timeout(
-    pid: Pid,
-    extra: Option<WaitPidFlag>,
-    timeout_ms: u64,
-) -> Result<WaitStatus> {
+fn waitpid_timeout(pid: Pid, extra: Option<WaitPidFlag>, timeout_ms: u64) -> Result<WaitStatus> {
     let mut flags = WaitPidFlag::WNOHANG;
     if let Some(f) = extra {
         flags |= f;
@@ -600,8 +598,7 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     // 1b. SEIZE does not create a ptrace-stop, so explicitly interrupt the
     //     (group-stopped) target to obtain a ptrace-stop we can operate on.
     //     PTRACE_INTERRUPT injects no signal either.
-    ptrace::interrupt(target)
-        .with_context(|| format!("ptrace interrupt {} failed", pid))?;
+    ptrace::interrupt(target).with_context(|| format!("ptrace interrupt {} failed", pid))?;
 
     match waitpid_timeout(target, None, 2000) {
         // Under SEIZE, the interrupt/group-stop is reported as an event stop.
@@ -617,12 +614,14 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     }
 
     // 2. Get current registers
-    let orig_regs = ptrace::getregs(target)
-        .context("Failed to get registers")?;
+    let orig_regs = ptrace::getregs(target).context("Failed to get registers")?;
 
     // 3. Find a syscall instruction in the process's memory
     let syscall_addr = find_syscall_instruction(pid, &orig_regs)?;
-    eprintln!("[cow] Found syscall instruction at 0x{:x} for pid {}", syscall_addr, pid);
+    eprintln!(
+        "[cow] Found syscall instruction at 0x{:x} for pid {}",
+        syscall_addr, pid
+    );
 
     // 4. Set up registers for clone(CLONE_PARENT|SIGCHLD, 0, 0, 0, 0) → a
     //    fork-like COW SIBLING that raises SIGCHLD to its parent on exit.
@@ -648,22 +647,20 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     //    candidates leaked as permanent zombies under the launcher.
     let mut new_regs = orig_regs;
     new_regs.rip = syscall_addr;
-    new_regs.rax = libc::SYS_clone as u64;   // __NR_clone = 56
-    new_regs.rdi = CLONE_PARENT | SIGCHLD;   // flags = CLONE_PARENT + exit_signal SIGCHLD (COW; reapable)
-    new_regs.rsi = 0;                        // child_stack = NULL (use parent's stack)
-    new_regs.rdx = 0;                        // parent_tidptr = NULL
-    new_regs.r10 = 0;                        // child_tidptr = NULL
-    new_regs.r8 = 0;                         // tls = NULL
+    new_regs.rax = libc::SYS_clone as u64; // __NR_clone = 56
+    new_regs.rdi = CLONE_PARENT | SIGCHLD; // flags = CLONE_PARENT + exit_signal SIGCHLD (COW; reapable)
+    new_regs.rsi = 0; // child_stack = NULL (use parent's stack)
+    new_regs.rdx = 0; // parent_tidptr = NULL
+    new_regs.r10 = 0; // child_tidptr = NULL
+    new_regs.r8 = 0; // tls = NULL
 
     // 5. (Fork/clone/vfork trace options were already armed at PTRACE_SEIZE time.)
-    ptrace::setregs(target, new_regs)
-        .context("Failed to set registers for clone injection")?;
+    ptrace::setregs(target, new_regs).context("Failed to set registers for clone injection")?;
 
     // 6. Continue execution — process will execute the clone() syscall.
     //    With PTRACE_O_TRACECLONE/FORK, the kernel will stop the parent with
     //    a PTRACE_EVENT before it resumes after clone.
-    ptrace::cont(target, None)
-        .context("Failed to continue for clone injection")?;
+    ptrace::cont(target, None).context("Failed to continue for clone injection")?;
 
     // 7. Wait for the fork/clone ptrace event
     let child_pid: u32 = loop {
@@ -675,8 +672,8 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
                     || event == libc::PTRACE_EVENT_VFORK
                     || event == libc::PTRACE_EVENT_CLONE
                 {
-                    let child = ptrace::getevent(target)
-                        .context("Failed to get event data (child pid)")?;
+                    let child =
+                        ptrace::getevent(target).context("Failed to get event data (child pid)")?;
                     eprintln!(
                         "[cow] Got ptrace event {} (fork/clone/vfork), candidate pid = {}",
                         event, child
@@ -684,24 +681,27 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
                     break child as u32;
                 }
                 // Any other event stop (e.g. group-stop): resume and keep waiting.
-                eprintln!("[cow] Ignoring ptrace event {} during injection, continuing", event);
+                eprintln!(
+                    "[cow] Ignoring ptrace event {} during injection, continuing",
+                    event
+                );
                 ptrace::cont(target, None)
                     .context("Failed to continue after non-fork ptrace event")?;
             }
             Ok(WaitStatus::Stopped(_, Signal::SIGTRAP)) => {
                 // Could be syscall-stop without TRACESYSGOOD; just continue
-                ptrace::cont(target, None)
-                    .context("Failed to continue after SIGTRAP")?;
+                ptrace::cont(target, None).context("Failed to continue after SIGTRAP")?;
             }
             Ok(WaitStatus::Stopped(_, Signal::SIGCHLD)) => {
                 // SIGCHLD from the fork itself; suppress and continue
-                ptrace::cont(target, None)
-                    .context("Failed to continue after SIGCHLD")?;
+                ptrace::cont(target, None).context("Failed to continue after SIGCHLD")?;
             }
             Ok(WaitStatus::Stopped(_, sig)) => {
-                eprintln!("[cow] Unexpected signal {:?} during clone injection, suppressing", sig);
-                ptrace::cont(target, None)
-                    .context("Failed to continue after unexpected signal")?;
+                eprintln!(
+                    "[cow] Unexpected signal {:?} during clone injection, suppressing",
+                    sig
+                );
+                ptrace::cont(target, None).context("Failed to continue after unexpected signal")?;
             }
             Ok(status) => {
                 ptrace::setregs(target, orig_regs).ok();
@@ -722,7 +722,11 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     // 8. The candidate is auto-traced (PTRACE_O_TRACECLONE/FORK auto-attaches
     //    the child to the tracer). Wait for its initial ptrace-stop, then detach
     //    it with SIGSTOP.
-    match waitpid_timeout(Pid::from_raw(child_pid as i32), Some(WaitPidFlag::__WALL), 2000) {
+    match waitpid_timeout(
+        Pid::from_raw(child_pid as i32),
+        Some(WaitPidFlag::__WALL),
+        2000,
+    ) {
         Ok(WaitStatus::Stopped(_, _)) | Ok(WaitStatus::PtraceEvent(_, _, _)) => {}
         _ => {
             // Try a blocking wait if WNOHANG didn't catch it
@@ -743,10 +747,12 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     let _ = ptrace::setregs(Pid::from_raw(child_pid as i32), orig_regs);
 
     let _ = nix::sys::signal::kill(Pid::from_raw(child_pid as i32), Signal::SIGSTOP);
-    ptrace::detach(Pid::from_raw(child_pid as i32), Some(Signal::SIGSTOP))
-        .unwrap_or_else(|e| {
-            eprintln!("[cow] Warning: detach from candidate {} failed: {}", child_pid, e);
-        });
+    ptrace::detach(Pid::from_raw(child_pid as i32), Some(Signal::SIGSTOP)).unwrap_or_else(|e| {
+        eprintln!(
+            "[cow] Warning: detach from candidate {} failed: {}",
+            child_pid, e
+        );
+    });
 
     // 9. Restore the baseline's registers to the snapshot state and leave it
     //    group-stopped at a CLEAN userspace boundary.
@@ -761,8 +767,7 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     //    sticks. Here we only restore rip/args to the snapshot so the baseline
     //    parks at a well-defined userspace return boundary (rip just past the
     //    original `syscall`).
-    ptrace::setregs(target, orig_regs)
-        .context("Failed to restore baseline snapshot registers")?;
+    ptrace::setregs(target, orig_regs).context("Failed to restore baseline snapshot registers")?;
 
     // 10. Detach from the baseline (it remains SIGSTOP-frozen). The baseline is
     //     the pristine rollback copy and stays frozen until the epoch is
@@ -770,7 +775,10 @@ fn inject_fork_via_ptrace(pid: u32) -> Result<(u32, libc::user_regs_struct)> {
     ptrace::detach(target, Some(Signal::SIGSTOP))
         .with_context(|| format!("Failed to detach from pid {}", pid))?;
 
-    eprintln!("[cow] Injected clone: baseline pid {} → candidate {}", pid, child_pid);
+    eprintln!(
+        "[cow] Injected clone: baseline pid {} → candidate {}",
+        pid, child_pid
+    );
 
     Ok((child_pid, orig_regs))
 }
@@ -820,7 +828,10 @@ fn restore_baseline_for_restart(pid: u32, orig_regs: &libc::user_regs_struct) ->
         Ok(WaitStatus::PtraceEvent(_, _, _)) | Ok(WaitStatus::Stopped(_, _)) => {}
         Ok(status) => {
             ptrace::detach(target, Some(Signal::SIGSTOP)).ok();
-            anyhow::bail!("reject: unexpected wait status after seize/interrupt: {:?}", status);
+            anyhow::bail!(
+                "reject: unexpected wait status after seize/interrupt: {:?}",
+                status
+            );
         }
         Err(e) => {
             ptrace::detach(target, Some(Signal::SIGSTOP)).ok();
@@ -861,8 +872,8 @@ fn restore_baseline_for_restart(pid: u32, orig_regs: &libc::user_regs_struct) ->
     }
 
     if rip_is_syscall && is_restart_pending(orig_regs.rax) {
-        resume_regs.rip = syscall_ip;          // back onto the `syscall` insn
-        resume_regs.rax = orig_regs.orig_rax;  // reload the syscall number
+        resume_regs.rip = syscall_ip; // back onto the `syscall` insn
+        resume_regs.rax = orig_regs.orig_rax; // reload the syscall number
         eprintln!(
             "[cow] reject rewind pid={} rip 0x{:x} -> 0x{:x} rax -> {} (orig_rax)",
             pid, orig_regs.rip, resume_regs.rip, orig_regs.orig_rax
@@ -875,8 +886,7 @@ fn restore_baseline_for_restart(pid: u32, orig_regs: &libc::user_regs_struct) ->
         );
     }
 
-    ptrace::setregs(target, resume_regs)
-        .context("reject: failed to restore baseline registers")?;
+    ptrace::setregs(target, resume_regs).context("reject: failed to restore baseline registers")?;
 
     // Detach, leaving the baseline group-stopped (SIGSTOP). The caller SIGCONTs
     // it, at which point it either re-executes the boundary syscall (rewound
@@ -932,7 +942,9 @@ fn find_syscall_instruction(pid: u32, regs: &libc::user_regs_struct) -> Result<u
     let maps = fs::read_to_string(&maps_path)?;
     for line in maps.lines() {
         if line.contains("[vdso]") {
-            let addr_parts: Vec<&str> = line.split_whitespace().next()
+            let addr_parts: Vec<&str> = line
+                .split_whitespace()
+                .next()
                 .unwrap_or("")
                 .split('-')
                 .collect();
@@ -1006,9 +1018,13 @@ mod admission_tests {
     #[test]
     fn input_gate_accepts_read_family() {
         // read() blocked on stdin: "0 0x0 0x... ..."
-        assert!(parse_syscall_is_input_gate("0 0x0 0x7 fff 0x100 0x0 0x0 0x0 0x7fff 0x44"));
+        assert!(parse_syscall_is_input_gate(
+            "0 0x0 0x7 fff 0x100 0x0 0x0 0x0 0x7fff 0x44"
+        ));
         // pselect6 (readline line editing) is still an input wait.
-        assert!(parse_syscall_is_input_gate("270 0x1 0x0 0x0 0x0 0x0 0x0 0x7fff 0x55"));
+        assert!(parse_syscall_is_input_gate(
+            "270 0x1 0x0 0x0 0x0 0x0 0x0 0x7fff 0x55"
+        ));
         // epoll_wait.
         assert!(parse_syscall_is_input_gate("232 0x3 0x0 0x0 0x0"));
     }
@@ -1033,9 +1049,7 @@ mod admission_tests {
         );
         assert!(maps_first_writable_shared(maps).is_none());
 
-        let shared = concat!(
-            "7f20-7f21 rw-s 00000000 00:05 12 /dev/shm/seg\n",
-        );
+        let shared = concat!("7f20-7f21 rw-s 00000000 00:05 12 /dev/shm/seg\n",);
         let hit = maps_first_writable_shared(shared).expect("should flag rw-s");
         assert!(hit.contains("rw-s"));
         assert!(hit.contains("/dev/shm/seg"));

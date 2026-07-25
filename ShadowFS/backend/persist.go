@@ -399,12 +399,12 @@ func fsyncDir(dir string) error {
 type WALRecord struct {
 	// Format is the WAL record generation (persistFormatVersion). Records
 	// without it are legacy v1 records and abort recovery.
-	Format    int    `json:"v"`
-	EpochID   string `json:"epoch_id,omitempty"`
-	CgroupID  string `json:"cgroup_id,omitempty"`  // begin_epoch payload
-	SessionID string `json:"session_id,omitempty"` // begin_epoch payload
-	SeqNum    int64  `json:"seq"`
-	ControlOp string `json:"control_op,omitempty"`
+	Format     int    `json:"v"`
+	EpochID    string `json:"epoch_id,omitempty"`
+	CgroupID   string `json:"cgroup_id,omitempty"`  // begin_epoch payload
+	SessionID  string `json:"session_id,omitempty"` // begin_epoch payload
+	SeqNum     int64  `json:"seq"`
+	ControlOp  string `json:"control_op,omitempty"`
 	PolicyHash string `json:"policy_hash,omitempty"`
 	// Version carries the mutation payload (nil for control records).
 	Version *PersistVersion `json:"version,omitempty"`

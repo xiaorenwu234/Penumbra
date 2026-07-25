@@ -3,14 +3,16 @@ use nix::errno::Errno;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::fs;
 
 use crate::bpf_loader::{BpfManager, IpcPolicyEntry, NetPolicyEntry, ProcPolicy, SigPolicyEntry};
 use crate::event_handler::InterceptEvent;
 use crate::memory_tracker::MemoryTracker;
+
+const MAX_VIOLATIONS: usize = 4096;
 
 fn effect_policy_parts_from_event(event: &InterceptEvent) -> (u8, u8) {
     use crate::policy_generated::*;
@@ -108,6 +110,10 @@ impl ProcessManager {
     /// Record an ENFORCED-mode violation. The triggering process was NOT
     /// SIGSTOP'd by BPF, so it must never be placed in self.frozen.
     pub fn record_violation(&mut self, event: InterceptEvent) {
+        if self.violations.len() >= MAX_VIOLATIONS {
+            let overflow = self.violations.len() + 1 - MAX_VIOLATIONS;
+            self.violations.drain(0..overflow);
+        }
         self.violations.push(event);
     }
 
@@ -136,7 +142,9 @@ impl ProcessManager {
     /// restart token is needed since ENFORCED + allow-all already permits it.
     pub fn continue_process(&mut self, pid: u32) -> Result<()> {
         let pid = self.resolve_pid(pid);
-        let frozen = self.frozen.get(&pid)
+        let frozen = self
+            .frozen
+            .get(&pid)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Process {} is not in frozen list", pid))?;
 
@@ -168,7 +176,9 @@ impl ProcessManager {
     /// use `continue_process` (transitions to ENFORCED + allow-all).
     pub fn resume_process(&mut self, pid: u32) -> Result<()> {
         let pid = self.resolve_pid(pid);
-        let frozen = self.frozen.get(&pid)
+        let frozen = self
+            .frozen
+            .get(&pid)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Process {} is not in frozen list", pid))?;
 
@@ -177,7 +187,7 @@ impl ProcessManager {
         if frozen.event.syscall_nr != 0 {
             let (effect_class, operation) = effect_policy_parts_from_event(&frozen.event);
             self.bpf_manager.grant_restart_token(
-                frozen.event.pid,  // tid (thread that was intercepted)
+                frozen.event.pid, // tid (thread that was intercepted)
                 frozen.event.syscall_nr,
                 effect_class,
                 operation,
@@ -283,7 +293,9 @@ impl ProcessManager {
         let checkpoint_id = self.next_checkpoint_id;
         self.next_checkpoint_id += 1;
 
-        let dump_dir = self.checkpoint_dir.join(format!("checkpoint-{}", checkpoint_id));
+        let dump_dir = self
+            .checkpoint_dir
+            .join(format!("checkpoint-{}", checkpoint_id));
         std::fs::create_dir_all(&dump_dir)
             .with_context(|| format!("Failed to create checkpoint dir: {:?}", dump_dir))?;
 
@@ -350,7 +362,8 @@ impl ProcessManager {
 
     /// List frozen processes filtered by cgroup path
     pub fn list_frozen_by_cgroup(&self, cgroup_path: &str) -> Vec<&FrozenProcess> {
-        self.frozen.values()
+        self.frozen
+            .values()
             .filter(|p| p.cgroup_path == cgroup_path)
             .collect()
     }
@@ -362,7 +375,9 @@ impl ProcessManager {
     /// partial release. Already-released PIDs are still reflected via the error
     /// message for diagnostics.
     pub fn continue_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
-        let pids: Vec<u32> = self.frozen.values()
+        let pids: Vec<u32> = self
+            .frozen
+            .values()
             .filter(|p| p.cgroup_path == cgroup_path)
             .map(|p| p.tgid)
             .collect();
@@ -377,7 +392,9 @@ impl ProcessManager {
         if !failed.is_empty() {
             anyhow::bail!(
                 "continue_by_cgroup partial failure in {}: resumed {:?}, failed {:?}",
-                cgroup_path, resumed, failed
+                cgroup_path,
+                resumed,
+                failed
             );
         }
         Ok(resumed)
@@ -401,7 +418,9 @@ impl ProcessManager {
             return self.continue_by_cgroup(cgroup_path);
         };
 
-        let pids: Vec<u32> = self.frozen.values()
+        let pids: Vec<u32> = self
+            .frozen
+            .values()
             .filter(|p| p.cgroup_path == cgroup_path)
             .map(|p| p.tgid)
             .collect();
@@ -409,12 +428,17 @@ impl ProcessManager {
         // Install the fine-grained policy BEFORE releasing anyone. If this
         // fails the cgroup stays in its previous mode and no process is
         // resumed (fail-closed).
-        let cg_id = self.bpf_manager.cgroup_id_from_path(cgroup_path)
-            .with_context(|| format!(
-                "continue_by_cgroup_with_policy: cannot resolve cgroup id for {}",
-                cgroup_path
-            ))?;
-        self.bpf_manager.enforce_policy(cg_id, pol)
+        let cg_id = self
+            .bpf_manager
+            .cgroup_id_from_path(cgroup_path)
+            .with_context(|| {
+                format!(
+                    "continue_by_cgroup_with_policy: cannot resolve cgroup id for {}",
+                    cgroup_path
+                )
+            })?;
+        self.bpf_manager
+            .enforce_policy(cg_id, pol)
             .context("continue_by_cgroup_with_policy: policy installation failed; not releasing")?;
 
         let mut resumed = Vec::new();
@@ -428,7 +452,9 @@ impl ProcessManager {
         if !failed.is_empty() {
             anyhow::bail!(
                 "continue_by_cgroup_with_policy partial failure in {}: resumed {:?}, failed {:?}",
-                cgroup_path, resumed, failed
+                cgroup_path,
+                resumed,
+                failed
             );
         }
         Ok(resumed)
@@ -464,11 +490,17 @@ impl ProcessManager {
     ///   }
     pub fn parse_proc_policy(v: &serde_json::Value) -> Result<ProcPolicy> {
         fn req_u64(obj: &serde_json::Value, field: &str, max: u64) -> Result<u64> {
-            let n = obj.get(field)
+            let n = obj
+                .get(field)
                 .and_then(|x| x.as_u64())
                 .ok_or_else(|| anyhow::anyhow!("policy entry missing/invalid '{}'", field))?;
             if n > max {
-                anyhow::bail!("policy field '{}' = {} out of range (max {})", field, n, max);
+                anyhow::bail!(
+                    "policy field '{}' = {} out of range (max {})",
+                    field,
+                    n,
+                    max
+                );
             }
             Ok(n)
         }
@@ -480,7 +512,8 @@ impl ProcessManager {
         let mut out = ProcPolicy::default();
 
         if let Some(classes) = v.get("classes") {
-            let arr = classes.as_array()
+            let arr = classes
+                .as_array()
                 .ok_or_else(|| anyhow::anyhow!("'classes' must be an array"))?;
             for c in arr {
                 let cls = req_u64(c, "effect_class", 7)?;
@@ -500,7 +533,8 @@ impl ProcessManager {
         }
 
         if let Some(net) = v.get("network") {
-            let arr = net.as_array()
+            let arr = net
+                .as_array()
                 .ok_or_else(|| anyhow::anyhow!("'network' must be an array"))?;
             for e in arr {
                 out.network.push(NetPolicyEntry {
@@ -514,7 +548,8 @@ impl ProcessManager {
         }
 
         if let Some(ipc) = v.get("ipc") {
-            let arr = ipc.as_array()
+            let arr = ipc
+                .as_array()
                 .ok_or_else(|| anyhow::anyhow!("'ipc' must be an array"))?;
             for e in arr {
                 let ipc_type = req_u64(e, "ipc_type", 5)?;
@@ -531,7 +566,8 @@ impl ProcessManager {
         }
 
         if let Some(sig) = v.get("signal") {
-            let arr = sig.as_array()
+            let arr = sig
+                .as_array()
                 .ok_or_else(|| anyhow::anyhow!("'signal' must be an array"))?;
             for e in arr {
                 out.signal.push(SigPolicyEntry {
@@ -547,7 +583,9 @@ impl ProcessManager {
 
     /// Kill all frozen processes in a given cgroup
     pub fn kill_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
-        let pids: Vec<u32> = self.frozen.values()
+        let pids: Vec<u32> = self
+            .frozen
+            .values()
             .filter(|p| p.cgroup_path == cgroup_path)
             .map(|p| p.tgid)
             .collect();
@@ -580,10 +618,7 @@ impl ProcessManager {
     /// forked to run the epoch speculatively. Subsequent resume/commit/rollback
     /// on the caller's pid are transparently redirected to the candidate.
     /// Returns the candidate pid (the live process for this epoch).
-    pub fn begin_speculative_unlocked(
-        pm: &Arc<Mutex<ProcessManager>>,
-        pid: u32,
-    ) -> Result<u32> {
+    pub fn begin_speculative_unlocked(pm: &Arc<Mutex<ProcessManager>>, pid: u32) -> Result<u32> {
         // Phase 1 (locked): resolve to the canonical baseline and reserve it so
         // no concurrent caller can start a second epoch for the same pid while
         // the lock is released for injection. reserve_speculative resolves the
@@ -802,10 +837,7 @@ impl ProcessManager {
                 };
                 // Never kill the baseline we are resuming, nor any other epoch's
                 // pristine versioning baseline; skip pids already killed.
-                if cpid == keep
-                    || self.memory_tracker.is_shadow_pid(cpid)
-                    || done.contains(&cpid)
-                {
+                if cpid == keep || self.memory_tracker.is_shadow_pid(cpid) || done.contains(&cpid) {
                     continue;
                 }
                 if signal::kill(Pid::from_raw(cpid as i32), Signal::SIGKILL).is_ok() {
@@ -920,7 +952,9 @@ impl ProcessManager {
     /// Already-committed pids are no longer tracked, so a retry is safe: it
     /// skips them and re-attempts only the failures.
     pub fn commit_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
-        let pids: Vec<u32> = self.frozen.values()
+        let pids: Vec<u32> = self
+            .frozen
+            .values()
             .filter(|p| p.cgroup_path == cgroup_path)
             .map(|p| p.tgid)
             .collect();
@@ -940,7 +974,10 @@ impl ProcessManager {
                 "commit_by_cgroup {}: {} process(es) failed to commit [{}] \
                  ({} committed before the failure; retry re-attempts only the \
                  failures)",
-                cgroup_path, failures.len(), failures.join("; "), committed.len()
+                cgroup_path,
+                failures.len(),
+                failures.join("; "),
+                committed.len()
             );
         }
         Ok(committed)
@@ -960,7 +997,8 @@ impl ProcessManager {
 
     /// Handle a fork event from eBPF: auto-track the child if parent is tracked.
     pub fn handle_fork_event(&mut self, parent_tgid: u32, child_tgid: u32) -> Result<bool> {
-        self.memory_tracker.handle_fork_event(parent_tgid, child_tgid)
+        self.memory_tracker
+            .handle_fork_event(parent_tgid, child_tgid)
     }
 
     /// Enable or disable COW auto-tracking of child processes.
@@ -1017,23 +1055,30 @@ impl ProcessManager {
                         Err(Errno::ESRCH) => continue,
                         Err(e) => {
                             return Err(anyhow::anyhow!(
-                                "SIGSTOP pid {} in {} failed: {}", pid, cgroup_path, e));
+                                "SIGSTOP pid {} in {} failed: {}",
+                                pid,
+                                cgroup_path,
+                                e
+                            ));
                         }
                     }
-                    let cgroup_id = read_process_cgroup(pid)
-                        .unwrap_or_else(|| cgroup_path.to_string());
+                    let cgroup_id =
+                        read_process_cgroup(pid).unwrap_or_else(|| cgroup_path.to_string());
                     let comm = fs::read_to_string(format!("/proc/{}/comm", pid))
                         .unwrap_or_default()
                         .trim()
                         .to_string();
-                    self.frozen.insert(pid, FrozenProcess {
+                    self.frozen.insert(
                         pid,
-                        tgid: pid,
-                        comm,
-                        event: InterceptEvent::dummy_freeze(pid),
-                        checkpoint_path: None,
-                        cgroup_path: cgroup_id,
-                    });
+                        FrozenProcess {
+                            pid,
+                            tgid: pid,
+                            comm,
+                            event: InterceptEvent::dummy_freeze(pid),
+                            checkpoint_path: None,
+                            cgroup_path: cgroup_id,
+                        },
+                    );
                     frozen_pids.push(pid);
                 }
             }
@@ -1054,7 +1099,9 @@ impl ProcessManager {
 
         if !converged {
             return Err(anyhow::anyhow!(
-                "freeze_by_cgroup {} did not converge after 1000 passes", cgroup_path));
+                "freeze_by_cgroup {} did not converge after 1000 passes",
+                cgroup_path
+            ));
         }
 
         // Final fail-closed proof: re-enumerate cgroup.procs after convergence
@@ -1076,7 +1123,10 @@ impl ProcessManager {
             }
             if !wait_thread_group_stopped(pid, 1000) {
                 return Err(anyhow::anyhow!(
-                    "pid {} in {} is not fully stopped after cgroup freeze", pid, cgroup_path));
+                    "pid {} in {} is not fully stopped after cgroup freeze",
+                    pid,
+                    cgroup_path
+                ));
             }
         }
 

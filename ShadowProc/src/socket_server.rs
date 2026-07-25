@@ -117,8 +117,7 @@ impl SocketServer {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o600))
-                .ok();
+            std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o600)).ok();
         }
 
         let sock_path_buf = sock_path.to_path_buf();
@@ -163,8 +162,10 @@ impl SocketServer {
                     });
                 }
                 // Timeout is expected — just loop back and check running flag
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
-                           || e.kind() == std::io::ErrorKind::TimedOut => {
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
                     continue;
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
@@ -187,7 +188,11 @@ impl SocketServer {
     fn authorized_peer(stream: &UnixStream) -> bool {
         use std::os::unix::io::AsRawFd;
         let fd = stream.as_raw_fd();
-        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         let ret = unsafe {
             libc::getsockopt(
@@ -285,7 +290,9 @@ impl SocketServer {
                     return Response {
                         status: "error".into(),
                         message: Some(format!(
-                            "refused cgroup_path outside managed root: {}", path)),
+                            "refused cgroup_path outside managed root: {}",
+                            path
+                        )),
                         frozen: None,
                         pids: None,
                     };
@@ -319,7 +326,9 @@ impl SocketServer {
                     return Response {
                         status: "error".into(),
                         message: Some(format!(
-                            "refused cgroup_path outside managed root: {}", path)),
+                            "refused cgroup_path outside managed root: {}",
+                            path
+                        )),
                         frozen: None,
                         pids: None,
                     };
@@ -340,22 +349,20 @@ impl SocketServer {
                 }
             }
 
-            "dropped_event_stats" => {
-                match bpf_manager.dropped_events() {
-                    Ok(n) => Response {
-                        status: "ok".into(),
-                        message: Some(format!("dropped_events={}", n)),
-                        frozen: None,
-                        pids: None,
-                    },
-                    Err(e) => Response {
-                        status: "error".into(),
-                        message: Some(e.to_string()),
-                        frozen: None,
-                        pids: None,
-                    },
-                }
-            }
+            "dropped_event_stats" => match bpf_manager.dropped_events() {
+                Ok(n) => Response {
+                    status: "ok".into(),
+                    message: Some(format!("dropped_events={}", n)),
+                    frozen: None,
+                    pids: None,
+                },
+                Err(e) => Response {
+                    status: "error".into(),
+                    message: Some(e.to_string()),
+                    frozen: None,
+                    pids: None,
+                },
+            },
 
             "list_violations" | "drain_violations" => {
                 let mut pm = process_manager.lock().unwrap();
@@ -365,7 +372,8 @@ impl SocketServer {
                     pm.list_violations()
                 };
                 let pids: Vec<u32> = events.iter().map(|e| e.tgid).collect();
-                let detail = events.iter()
+                let detail = events
+                    .iter()
                     .map(|e| format!("{}", e))
                     .collect::<Vec<_>>()
                     .join("; ");
@@ -379,14 +387,18 @@ impl SocketServer {
 
             "list_all_frozen" => {
                 let pm = process_manager.lock().unwrap();
-                let frozen: Vec<FrozenInfo> = pm.list_frozen().iter().map(|p| FrozenInfo {
-                    pid: p.pid,
-                    tgid: p.tgid,
-                    comm: p.comm.clone(),
-                    cgroup: p.cgroup_path.clone(),
-                    event_type: format!("{}", p.event.event_type_enum()),
-                    syscall: p.event.syscall_name().to_string(),
-                }).collect();
+                let frozen: Vec<FrozenInfo> = pm
+                    .list_frozen()
+                    .iter()
+                    .map(|p| FrozenInfo {
+                        pid: p.pid,
+                        tgid: p.tgid,
+                        comm: p.comm.clone(),
+                        cgroup: p.cgroup_path.clone(),
+                        event_type: format!("{}", p.event.event_type_enum()),
+                        syscall: p.event.syscall_name().to_string(),
+                    })
+                    .collect();
                 Response {
                     status: "ok".into(),
                     message: None,
@@ -405,14 +417,18 @@ impl SocketServer {
                     };
                 };
                 let pm = process_manager.lock().unwrap();
-                let frozen: Vec<FrozenInfo> = pm.list_frozen_by_cgroup(cgroup_id).iter().map(|p| FrozenInfo {
-                    pid: p.pid,
-                    tgid: p.tgid,
-                    comm: p.comm.clone(),
-                    cgroup: p.cgroup_path.clone(),
-                    event_type: format!("{}", p.event.event_type_enum()),
-                    syscall: p.event.syscall_name().to_string(),
-                }).collect();
+                let frozen: Vec<FrozenInfo> = pm
+                    .list_frozen_by_cgroup(cgroup_id)
+                    .iter()
+                    .map(|p| FrozenInfo {
+                        pid: p.pid,
+                        tgid: p.tgid,
+                        comm: p.comm.clone(),
+                        cgroup: p.cgroup_path.clone(),
+                        event_type: format!("{}", p.event.event_type_enum()),
+                        syscall: p.event.syscall_name().to_string(),
+                    })
+                    .collect();
                 Response {
                     status: "ok".into(),
                     message: None,
@@ -424,7 +440,9 @@ impl SocketServer {
             "list_completed" => {
                 let pm = process_manager.lock().unwrap();
                 let filter_cgroup = req.cgroup_id.as_deref();
-                let completed: Vec<FrozenInfo> = pm.list_frozen().iter()
+                let completed: Vec<FrozenInfo> = pm
+                    .list_frozen()
+                    .iter()
                     .filter(|p| p.event.is_exit_hold())
                     .filter(|p| filter_cgroup.is_none_or(|cg| p.cgroup_path == cg))
                     .map(|p| FrozenInfo {
@@ -434,7 +452,8 @@ impl SocketServer {
                         cgroup: p.cgroup_path.clone(),
                         event_type: format!("{}", p.event.event_type_enum()),
                         syscall: p.event.syscall_name().to_string(),
-                    }).collect();
+                    })
+                    .collect();
                 Response {
                     status: "ok".into(),
                     message: None,
@@ -626,7 +645,6 @@ impl SocketServer {
             // ═══════════════════════════════════════════════════════════
             // COW Memory Tracking commands
             // ═══════════════════════════════════════════════════════════
-
             "begin_speculative" => {
                 // Epoch setup runs the slow ptrace clone injection WITHOUT the
                 // ProcessManager lock held (phase 2), so concurrent clients and
@@ -664,7 +682,10 @@ impl SocketServer {
                     }
                     Response {
                         status: "ok".into(),
-                        message: Some(format!("COW tracking started for {} processes", candidates.len())),
+                        message: Some(format!(
+                            "COW tracking started for {} processes",
+                            candidates.len()
+                        )),
                         frozen: None,
                         pids: Some(candidates),
                     }
@@ -910,7 +931,6 @@ impl SocketServer {
             // ══════════════════════════════════════════════════════
             // Phase 2: Three-state model API
             // ══════════════════════════════════════════════════════
-
             "set_epoch_mode" => {
                 let Some(cgroup_path) = &req.cgroup_path else {
                     return Response {
@@ -932,7 +952,10 @@ impl SocketServer {
                     Ok(cg_id) => match bpf_manager.set_epoch_mode(cg_id, mode) {
                         Ok(()) => Response {
                             status: "ok".into(),
-                            message: Some(format!("Set epoch mode {} for cgroup {}", mode, cgroup_path)),
+                            message: Some(format!(
+                                "Set epoch mode {} for cgroup {}",
+                                mode, cgroup_path
+                            )),
                             frozen: None,
                             pids: None,
                         },
@@ -979,10 +1002,18 @@ impl SocketServer {
                 };
                 let allow = req.allow.unwrap_or(0);
                 match bpf_manager.cgroup_id_from_path(cgroup_path) {
-                    Ok(cg_id) => match bpf_manager.install_class_policy(cg_id, effect_class, operation, allow) {
+                    Ok(cg_id) => match bpf_manager.install_class_policy(
+                        cg_id,
+                        effect_class,
+                        operation,
+                        allow,
+                    ) {
                         Ok(()) => Response {
                             status: "ok".into(),
-                            message: Some(format!("Installed class_policy({},{})={} for cgroup {}", effect_class, operation, allow, cgroup_path)),
+                            message: Some(format!(
+                                "Installed class_policy({},{})={} for cgroup {}",
+                                effect_class, operation, allow, cgroup_path
+                            )),
                             frozen: None,
                             pids: None,
                         },
@@ -1015,7 +1046,10 @@ impl SocketServer {
                     Ok(cg_id) => match bpf_manager.clear_all_policies(cg_id) {
                         Ok(()) => Response {
                             status: "ok".into(),
-                            message: Some(format!("Cleared all policies for cgroup {} (reset to SPECULATIVE)", cgroup_path)),
+                            message: Some(format!(
+                                "Cleared all policies for cgroup {} (reset to SPECULATIVE)",
+                                cgroup_path
+                            )),
                             frozen: None,
                             pids: None,
                         },
@@ -1052,12 +1086,17 @@ impl SocketServer {
                         pids: None,
                     };
                 };
-                let effect_class = req.effect_class.unwrap_or(crate::policy_generated::CLASS_NETWORK);
+                let effect_class = req
+                    .effect_class
+                    .unwrap_or(crate::policy_generated::CLASS_NETWORK);
                 let operation = req.operation.unwrap_or(crate::policy_generated::OP_CONNECT);
                 match bpf_manager.grant_restart_token(tid, syscall_nr, effect_class, operation) {
                     Ok(()) => Response {
                         status: "ok".into(),
-                        message: Some(format!("Granted restart token: tid={} syscall={} class={} operation={}", tid, syscall_nr, effect_class, operation)),
+                        message: Some(format!(
+                            "Granted restart token: tid={} syscall={} class={} operation={}",
+                            tid, syscall_nr, effect_class, operation
+                        )),
                         frozen: None,
                         pids: None,
                     },

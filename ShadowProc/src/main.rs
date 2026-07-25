@@ -74,7 +74,10 @@ fn main() -> Result<()> {
     } else {
         eprintln!("║  Monitoring cgroup: (none - use socket API to add)      ║");
     }
-    eprintln!("║  Checkpoint dir:    {:37}║", args.checkpoint_dir.display());
+    eprintln!(
+        "║  Checkpoint dir:    {:37}║",
+        args.checkpoint_dir.display()
+    );
     if let Some(ref sock) = args.sock {
         eprintln!("║  Socket path:       {:37}║", sock.display());
     }
@@ -98,10 +101,8 @@ fn main() -> Result<()> {
 
     // Start BPF manager
     eprintln!("[*] Loading eBPF programs (LSM + fmod_ret)...");
-    let bpf_manager = BpfManager::start(
-        args.cgroup_path.as_deref(),
-        event_tx,
-    ).context("Failed to start BPF manager. Are you running as root? Is BPF LSM enabled?")?;
+    let bpf_manager = BpfManager::start(args.cgroup_path.as_deref(), event_tx)
+        .context("Failed to start BPF manager. Are you running as root? Is BPF LSM enabled?")?;
     let bpf_manager = Arc::new(bpf_manager);
     eprintln!("[+] eBPF programs loaded and attached successfully.");
     eprintln!("[*] Monitoring for external communication attempts...");
@@ -114,9 +115,10 @@ fn main() -> Result<()> {
     ctrlc_handler(running_clone);
 
     // Process manager (shared via Arc<Mutex>)
-    let process_manager = Arc::new(Mutex::new(
-        ProcessManager::new(args.checkpoint_dir, bpf_manager.clone())
-    ));
+    let process_manager = Arc::new(Mutex::new(ProcessManager::new(
+        args.checkpoint_dir,
+        bpf_manager.clone(),
+    )));
 
     // Start socket server if requested
     let _socket_server = if let Some(ref sock_path) = args.sock {
@@ -161,8 +163,17 @@ fn main() -> Result<()> {
 
     // Main loop
     while running.load(Ordering::Relaxed) {
-        // Check for new events (non-blocking)
-        if let Ok(event) = event_rx.try_recv() {
+        // Drain a bounded batch of ring-buffer events each tick. Handling only
+        // one event per 10ms caps throughput around 100/s and makes BPF drops
+        // likely under bursts; batching keeps the control socket responsive
+        // while letting userspace catch up with syscall-rate events.
+        let mut handled_events = 0u32;
+        while handled_events < 256 {
+            let event = match event_rx.try_recv() {
+                Ok(event) => event,
+                Err(_) => break,
+            };
+            handled_events += 1;
             let mut pm = process_manager.lock().unwrap();
 
             match event.event_type_enum() {
@@ -172,7 +183,9 @@ fn main() -> Result<()> {
                         let child_tgid = event.tgid;
                         eprintln!(
                             "\n\x1b[1;36m[FORK]\x1b[0m parent={} child={} comm={}",
-                            parent_tgid, child_tgid, event.comm_str()
+                            parent_tgid,
+                            child_tgid,
+                            event.comm_str()
                         );
                         let _ = pm.handle_fork_event(parent_tgid, child_tgid);
                     }
@@ -187,9 +200,8 @@ fn main() -> Result<()> {
                             let trigger_tgid = event.tgid;
                             pm.record_frozen(event);
 
-                            let cgroup_path = pm
-                                .get_frozen(trigger_tgid)
-                                .map(|f| f.cgroup_path.clone());
+                            let cgroup_path =
+                                pm.get_frozen(trigger_tgid).map(|f| f.cgroup_path.clone());
                             if let Some(cgroup_path) = cgroup_path {
                                 match pm.freeze_by_cgroup(&cgroup_path) {
                                     Ok(pids) if !pids.is_empty() => {
@@ -225,7 +237,9 @@ fn main() -> Result<()> {
                     }
                 }
             }
+        }
 
+        if handled_events > 0 {
             eprint!("shadow-proc> ");
             io::stderr().flush().ok();
         }
@@ -240,14 +254,15 @@ fn main() -> Result<()> {
             stdout.flush()?;
         }
 
-        // Small sleep to avoid busy-waiting
-        thread::sleep(Duration::from_millis(10));
+        // Small sleep to avoid busy-waiting without artificially capping event
+        // throughput to ~100/s.
+        thread::sleep(Duration::from_millis(1));
 
         // Roughly once a second, garbage-collect bookkeeping for processes that
         // exited on their own (crash / external kill). try_lock so this never
         // contends with event or command handling.
         tick = tick.wrapping_add(1);
-        if tick.is_multiple_of(100) {
+        if tick.is_multiple_of(1000) {
             if let Ok(mut pm) = process_manager.try_lock() {
                 pm.reap_dead();
             }
@@ -262,8 +277,11 @@ fn main() -> Result<()> {
         let mut pm = process_manager.lock().unwrap();
         let n = pm.release_all();
         if n > 0 {
-            eprintln!("[*] Handled {} frozen process(es) on shutdown \
-                       (baselines resumed, unauthorized frozen killed).", n);
+            eprintln!(
+                "[*] Handled {} frozen process(es) on shutdown \
+                       (baselines resumed, unauthorized frozen killed).",
+                n
+            );
         }
     }
     // bpf_manager is dropped via Arc when all references go out of scope

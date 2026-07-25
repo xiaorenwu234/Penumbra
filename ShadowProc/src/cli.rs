@@ -29,7 +29,10 @@ impl Cli {
                 if frozen.is_empty() {
                     println!("No frozen processes.");
                 } else {
-                    println!("{:<8} {:<8} {:<16} {:<12} {:<10} CGROUP", "PID", "TGID", "COMM", "TYPE", "SYSCALL");
+                    println!(
+                        "{:<8} {:<8} {:<16} {:<12} {:<10} CGROUP",
+                        "PID", "TGID", "COMM", "TYPE", "SYSCALL"
+                    );
                     println!("{}", "-".repeat(80));
                     for p in frozen {
                         println!(
@@ -60,7 +63,9 @@ impl Cli {
                     Some(cg) => match pm.continue_by_cgroup(&cg) {
                         Ok(pids) => println!(
                             "\x1b[32m[OK]\x1b[0m Resumed cgroup {} ({} process(es): {:?})",
-                            cg, pids.len(), pids
+                            cg,
+                            pids.len(),
+                            pids
                         ),
                         Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
                     },
@@ -154,7 +159,10 @@ impl Cli {
                 let pid: u32 = parts[1].parse().unwrap_or(0);
                 let mut pm = self.process_manager.lock().unwrap();
                 match pm.commit_process(pid) {
-                    Ok(()) => println!("\x1b[32m[OK]\x1b[0m Committed pid {} - COW shadow discarded", pid),
+                    Ok(()) => println!(
+                        "\x1b[32m[OK]\x1b[0m Committed pid {} - COW shadow discarded",
+                        pid
+                    ),
                     Err(e) => println!("\x1b[31m[ERROR]\x1b[0m {}", e),
                 }
             }
@@ -178,7 +186,10 @@ impl Cli {
             }
 
             _ => {
-                println!("Unknown command: '{}'. Type 'help' for available commands.", parts[0]);
+                println!(
+                    "Unknown command: '{}'. Type 'help' for available commands.",
+                    parts[0]
+                );
             }
         }
 

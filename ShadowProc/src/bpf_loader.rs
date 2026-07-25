@@ -2,16 +2,16 @@ use anyhow::{Context, Result};
 use crossbeam_channel::Sender;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use libbpf_rs::{MapFlags, RingBufferBuilder};
+use std::collections::HashMap;
 use std::fs::File;
 use std::os::fd::AsFd;
 use std::os::unix::io::AsRawFd;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use std::sync::Mutex;
 
 #[path = "bpf/shadow_proc.skel.rs"]
 mod shadow_proc_skel;
@@ -131,24 +131,57 @@ struct FinePolicyKeys {
 fn all_policy_operations() -> Vec<(u8, Vec<u8>)> {
     use crate::policy_generated::*;
     vec![
-        (CLASS_FILESYSTEM, vec![
-            OP_READ, OP_WRITE, OP_CREATE, OP_DELETE, OP_RENAME, OP_LINK,
-            OP_SYMLINK, OP_TRUNCATE, OP_CHMOD, OP_CHOWN, OP_MKDIR, OP_RMDIR,
-        ]),
+        (
+            CLASS_FILESYSTEM,
+            vec![
+                OP_READ,
+                OP_WRITE,
+                OP_CREATE,
+                OP_DELETE,
+                OP_RENAME,
+                OP_LINK,
+                OP_SYMLINK,
+                OP_TRUNCATE,
+                OP_CHMOD,
+                OP_CHOWN,
+                OP_MKDIR,
+                OP_RMDIR,
+            ],
+        ),
         (CLASS_NETWORK, vec![OP_CONNECT, OP_BIND, OP_SEND]),
-        (CLASS_IPC, vec![
-            OP_PIPE_WRITE, OP_UNIX_WRITE, OP_SYSV_SHM, OP_SYSV_MSG,
-            OP_SYSV_SEM, OP_POSIX_MQ, OP_SHARED_MAPPING,
-        ]),
+        (
+            CLASS_IPC,
+            vec![
+                OP_PIPE_WRITE,
+                OP_UNIX_WRITE,
+                OP_SYSV_SHM,
+                OP_SYSV_MSG,
+                OP_SYSV_SEM,
+                OP_POSIX_MQ,
+                OP_SHARED_MAPPING,
+            ],
+        ),
         (CLASS_SIGNAL, vec![OP_KILL, OP_PTRACE]),
-        (CLASS_PRIVILEGE, vec![
-            OP_EXEC_PRIV, OP_SETUID, OP_SETGID, OP_SETGROUPS, OP_CAPSET,
-        ]),
-        (CLASS_OUTPUT, vec![OP_WRITE_OUT, OP_SENDFILE, OP_SPLICE, OP_IO_URING]),
-        (CLASS_SYSTEM, vec![
-            OP_MOUNT, OP_NAMESPACE, OP_KEYRING, OP_BPF, OP_PERF,
-            OP_TTY_IOCTL, OP_PROCESS_VM,
-        ]),
+        (
+            CLASS_PRIVILEGE,
+            vec![OP_EXEC_PRIV, OP_SETUID, OP_SETGID, OP_SETGROUPS, OP_CAPSET],
+        ),
+        (
+            CLASS_OUTPUT,
+            vec![OP_WRITE_OUT, OP_SENDFILE, OP_SPLICE, OP_IO_URING],
+        ),
+        (
+            CLASS_SYSTEM,
+            vec![
+                OP_MOUNT,
+                OP_NAMESPACE,
+                OP_KEYRING,
+                OP_BPF,
+                OP_PERF,
+                OP_TTY_IOCTL,
+                OP_PROCESS_VM,
+            ],
+        ),
     ]
 }
 
@@ -329,11 +362,7 @@ impl BpfManager {
         let enabled: u32 = 1;
         skel.maps_mut()
             .config_map()
-            .update(
-                &key.to_ne_bytes(),
-                &enabled.to_ne_bytes(),
-                MapFlags::ANY,
-            )
+            .update(&key.to_ne_bytes(), &enabled.to_ne_bytes(), MapFlags::ANY)
             .context("Failed to enable config")?;
 
         // Attach all programs (LSM + fmod_ret)
@@ -511,13 +540,7 @@ impl BpfManager {
     /// deleted CGROUP_ARRAY entry returns an error (not 1), so check_cgroup()
     /// skips them.
     fn sync_cgroup_count(count_fd: i32, slots: &CgroupSlots) -> Result<()> {
-        let count: u32 = slots
-            .used
-            .keys()
-            .copied()
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(0);
+        let count: u32 = slots.used.keys().copied().max().map(|m| m + 1).unwrap_or(0);
         let count_key: u32 = 0;
         unsafe {
             bpf_map_update_checked(
@@ -656,7 +679,12 @@ impl BpfManager {
     }
 
     /// Delete a single class_policy entry for a cgroup + effect_class + operation.
-    pub fn clear_class_policy(&self, cgroup_id: u64, effect_class: u8, operation: u8) -> Result<()> {
+    pub fn clear_class_policy(
+        &self,
+        cgroup_id: u64,
+        effect_class: u8,
+        operation: u8,
+    ) -> Result<()> {
         let key = ClassPolicyKey {
             cgroup_id,
             effect_class,
@@ -680,7 +708,13 @@ impl BpfManager {
         port: u16,
         allow: u8,
     ) -> Result<()> {
-        let key = NetPolicyKey { cgroup_id, family, operation, port, addr };
+        let key = NetPolicyKey {
+            cgroup_id,
+            family,
+            operation,
+            port,
+            addr,
+        };
         unsafe {
             bpf_map_update_checked(
                 self.network_policy_fd,
@@ -699,7 +733,13 @@ impl BpfManager {
         target: u64,
         allow: u8,
     ) -> Result<()> {
-        let key = IpcPolicyKey { cgroup_id, ipc_type, operation, _pad0: [0; 6], target };
+        let key = IpcPolicyKey {
+            cgroup_id,
+            ipc_type,
+            operation,
+            _pad0: [0; 6],
+            target,
+        };
         unsafe {
             bpf_map_update_checked(
                 self.ipc_policy_fd,
@@ -717,7 +757,12 @@ impl BpfManager {
         target_cgroup: u64,
         allow: u8,
     ) -> Result<()> {
-        let key = SigPolicyKey { cgroup_id, operation, _pad0: [0; 7], target_cgroup };
+        let key = SigPolicyKey {
+            cgroup_id,
+            operation,
+            _pad0: [0; 7],
+            target_cgroup,
+        };
         unsafe {
             bpf_map_update_checked(
                 self.signal_policy_fd,
@@ -738,8 +783,11 @@ impl BpfManager {
         let result = (|| -> Result<()> {
             for e in &policy.network {
                 let key = NetPolicyKey {
-                    cgroup_id, family: e.family, operation: e.operation,
-                    port: e.port, addr: e.addr,
+                    cgroup_id,
+                    family: e.family,
+                    operation: e.operation,
+                    port: e.port,
+                    addr: e.addr,
                 };
                 unsafe {
                     bpf_map_update_checked(
@@ -752,8 +800,11 @@ impl BpfManager {
             }
             for e in &policy.ipc {
                 let key = IpcPolicyKey {
-                    cgroup_id, ipc_type: e.ipc_type, operation: e.operation,
-                    _pad0: [0; 6], target: e.target,
+                    cgroup_id,
+                    ipc_type: e.ipc_type,
+                    operation: e.operation,
+                    _pad0: [0; 6],
+                    target: e.target,
                 };
                 unsafe {
                     bpf_map_update_checked(
@@ -766,7 +817,9 @@ impl BpfManager {
             }
             for e in &policy.signal {
                 let key = SigPolicyKey {
-                    cgroup_id, operation: e.operation, _pad0: [0; 7],
+                    cgroup_id,
+                    operation: e.operation,
+                    _pad0: [0; 7],
                     target_cgroup: e.target_cgroup,
                 };
                 unsafe {
@@ -779,7 +832,12 @@ impl BpfManager {
                 keys.sig.push(key);
             }
             for &(cls, op, mode) in &policy.classes {
-                let ckey = ClassPolicyKey { cgroup_id, effect_class: cls, operation: op, _pad0: [0; 6] };
+                let ckey = ClassPolicyKey {
+                    cgroup_id,
+                    effect_class: cls,
+                    operation: op,
+                    _pad0: [0; 6],
+                };
                 unsafe {
                     bpf_map_update_checked(
                         self.class_policy_fd,
@@ -796,13 +854,19 @@ impl BpfManager {
         if let Err(e) = result {
             // Roll back to the pre-install state (fail-closed).
             for k in &keys.net {
-                unsafe { libc_bpf_map_delete_elem(self.network_policy_fd, k as *const _ as *const _); }
+                unsafe {
+                    libc_bpf_map_delete_elem(self.network_policy_fd, k as *const _ as *const _);
+                }
             }
             for k in &keys.ipc {
-                unsafe { libc_bpf_map_delete_elem(self.ipc_policy_fd, k as *const _ as *const _); }
+                unsafe {
+                    libc_bpf_map_delete_elem(self.ipc_policy_fd, k as *const _ as *const _);
+                }
             }
             for k in &keys.sig {
-                unsafe { libc_bpf_map_delete_elem(self.signal_policy_fd, k as *const _ as *const _); }
+                unsafe {
+                    libc_bpf_map_delete_elem(self.signal_policy_fd, k as *const _ as *const _);
+                }
             }
             for &(cls, op) in &classes_done {
                 let _ = self.clear_class_policy(cgroup_id, cls, op);
@@ -827,13 +891,19 @@ impl BpfManager {
             fine.remove(&cgroup_id).unwrap_or_default()
         };
         for k in &keys.net {
-            unsafe { libc_bpf_map_delete_elem(self.network_policy_fd, k as *const _ as *const _); }
+            unsafe {
+                libc_bpf_map_delete_elem(self.network_policy_fd, k as *const _ as *const _);
+            }
         }
         for k in &keys.ipc {
-            unsafe { libc_bpf_map_delete_elem(self.ipc_policy_fd, k as *const _ as *const _); }
+            unsafe {
+                libc_bpf_map_delete_elem(self.ipc_policy_fd, k as *const _ as *const _);
+            }
         }
         for k in &keys.sig {
-            unsafe { libc_bpf_map_delete_elem(self.signal_policy_fd, k as *const _ as *const _); }
+            unsafe {
+                libc_bpf_map_delete_elem(self.signal_policy_fd, k as *const _ as *const _);
+            }
         }
         Ok(())
     }
@@ -886,7 +956,10 @@ impl BpfManager {
                 val.to_ne_bytes().as_ptr() as *const _,
             )?;
         }
-        eprintln!("[+] COW fork auto-tracking: {}", if enabled { "enabled" } else { "disabled" });
+        eprintln!(
+            "[+] COW fork auto-tracking: {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
         Ok(())
     }
 }

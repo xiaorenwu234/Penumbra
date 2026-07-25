@@ -47,17 +47,17 @@ impl From<u32> for EventType {
         let cls = (val & 0xFF) as u8;
         let op = ((val >> 8) & 0xFF) as u8;
         match cls {
-            2 => EventType::Network,  // EFFECT_CLASS_NETWORK (incl. EXIT_HOLD sentinel; see is_exit_hold)
+            2 => EventType::Network, // EFFECT_CLASS_NETWORK (incl. EXIT_HOLD sentinel; see is_exit_hold)
             3 => EventType::Ipc,
             6 => EventType::WriteOutput,
             4 => match op {
-                1 => EventType::Signal,   // OP_KILL
-                2 => EventType::Ptrace,   // OP_PTRACE
+                1 => EventType::Signal, // OP_KILL
+                2 => EventType::Ptrace, // OP_PTRACE
                 _ => EventType::Unknown,
             },
             5 => match op {
-                1 => EventType::PrivExec,         // OP_EXEC_PRIV
-                _ => EventType::PrivSetuid,       // OP_SETUID/SETGID/SETGROUPS/CAPSET
+                1 => EventType::PrivExec,   // OP_EXEC_PRIV
+                _ => EventType::PrivSetuid, // OP_SETUID/SETGID/SETGROUPS/CAPSET
             },
             7 => EventType::System,
             _ => EventType::Unknown,

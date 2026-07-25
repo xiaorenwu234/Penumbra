@@ -105,6 +105,13 @@ class JournalCorruptError(RuntimeError):
     """
 
 
+GROUP_FINALIZING = "FINALIZING"
+GROUP_RELEASING = "RELEASING"
+GROUP_ACK_PENDING = "ACK_PENDING"
+GROUP_DONE = "DONE"
+MAX_EPOCH_RESULTS = 1024
+
+
 class _OrchestratorJournal:
     """Append-only durable journal of session-finalization decisions.
 
@@ -209,6 +216,28 @@ class _OrchestratorJournal:
                 # in-memory policy cache; the folded state only needs release
                 # decisions below.
                 continue
+            if op == "group_phase":
+                gid = rec.get("group_id")
+                if gid is not None:
+                    phase = rec.get("phase", GROUP_FINALIZING)
+                    if phase == GROUP_DONE:
+                        release_groups.pop(gid, None)
+                    else:
+                        release_groups[gid] = {
+                            "members": rec.get("members", []),
+                            "graph_generation": rec.get("graph_generation", 0),
+                            "cgroup": rec.get("cgroup") or cg,
+                            "epoch": rec.get("epoch", ""),
+                            "sid": rec.get("sid") or rec.get("session_id") or sid,
+                            "phase": phase,
+                            "member_cgroups": rec.get("member_cgroups", []),
+                            "policies": rec.get("policies", {}),
+                            "released_cgroups": set(rec.get("released_cgroups", [])),
+                            "primary_member": rec.get("primary_member", ""),
+                        }
+                        if release_groups[gid].get("sid"):
+                            sid_groups.setdefault(release_groups[gid]["sid"], set()).add(gid)
+                continue
             if op == "release_intent":
                 gid = rec.get("group_id")
                 if gid is not None:
@@ -217,11 +246,15 @@ class _OrchestratorJournal:
                         "graph_generation": rec.get("graph_generation", 0),
                         "cgroup": cg,
                         "epoch": rec.get("epoch", ""),
-                        "sid": sid,
-                        "released_cgroups": set(),
+                        "sid": rec.get("sid") or rec.get("session_id"),
+                        "phase": rec.get("phase", GROUP_RELEASING),
+                        "member_cgroups": rec.get("member_cgroups", []),
+                        "policies": rec.get("policies", {}),
+                        "released_cgroups": set(rec.get("released_cgroups", [])),
+                        "primary_member": rec.get("primary_member", ""),
                     }
-                    if sid:
-                        sid_groups.setdefault(sid, set()).add(gid)
+                    if release_groups[gid].get("sid"):
+                        sid_groups.setdefault(release_groups[gid]["sid"], set()).add(gid)
                 continue
             if op == "group_release_done":
                 gid = rec.get("group_id")
@@ -232,6 +265,25 @@ class _OrchestratorJournal:
                 gid = rec.get("group_id")
                 if gid in release_groups and cg:
                     release_groups[gid].setdefault("released_cgroups", set()).add(cg)
+                    if rec.get("stdout") is not None and rec.get("epoch"):
+                        release_groups[gid].setdefault("epoch_results", {})[rec["epoch"]] = {
+                            "epoch_id": rec.get("epoch"),
+                            "cgroup_id": cg,
+                            "stdout": rec.get("stdout", ""),
+                            "released": True,
+                            "group_id": gid,
+                        }
+                continue
+            if op == "epoch_result":
+                gid = rec.get("group_id")
+                if gid in release_groups and rec.get("epoch"):
+                    release_groups[gid].setdefault("epoch_results", {})[rec["epoch"]] = {
+                        "epoch_id": rec.get("epoch"),
+                        "cgroup_id": cg,
+                        "stdout": rec.get("stdout", ""),
+                        "released": bool(rec.get("released", True)),
+                        "group_id": gid,
+                    }
                 continue
             if not sid:
                 continue
@@ -453,15 +505,56 @@ class ShadowOrchestrator:
         if hasattr(self, "_authorized_lock"):
             with self._authorized_lock:
                 for rec in records:
-                    if rec.get("op") == "authorization_tombstone" and rec.get("epoch"):
-                        self._authorized_epochs.pop(rec["epoch"], None)
-                    elif rec.get("op") in ("authorization_intent", "authorized") and rec.get("epoch"):
-                        self._authorized_epochs[rec["epoch"]] = {
-                            "epoch_id": rec.get("epoch"),
+                    op = rec.get("op")
+                    epoch = rec.get("epoch")
+                    if op == "authorization_tombstone" and epoch:
+                        self._authorized_epochs.pop(epoch, None)
+                    elif op == "authorization_intent" and epoch:
+                        proc_policy = rec.get("proc_policy")
+                        policy_hash = rec.get("policy_hash", "")
+                        if proc_policy is None:
+                            log.error("authorization_intent for %s lacks proc_policy -- ignoring", epoch)
+                            continue
+                        recomputed = self._policy_hash(proc_policy)
+                        if policy_hash and recomputed != policy_hash:
+                            raise JournalCorruptError(
+                                f"authorization_intent hash mismatch for {epoch}: "
+                                f"journal={policy_hash} recomputed={recomputed}")
+                        self._authorized_epochs[epoch] = {
+                            "epoch_id": epoch,
                             "cgroup_id": rec.get("cgroup", ""),
-                            "proc_policy": rec.get("proc_policy") or {},
-                            "policy_hash": rec.get("policy_hash", ""),
+                            "proc_policy": proc_policy,
+                            "policy_hash": policy_hash or recomputed,
+                            "authorized": False,
                         }
+                    elif op == "authorized" and epoch:
+                        existing = self._authorized_epochs.get(epoch)
+                        policy_hash = rec.get("policy_hash", "")
+                        if existing is None:
+                            proc_policy = rec.get("proc_policy")
+                            if proc_policy is None:
+                                log.error("authorized for %s has no prior intent/proc_policy -- fail closed", epoch)
+                                continue
+                            recomputed = self._policy_hash(proc_policy)
+                            if policy_hash and recomputed != policy_hash:
+                                raise JournalCorruptError(
+                                    f"authorized hash mismatch for {epoch}: "
+                                    f"journal={policy_hash} recomputed={recomputed}")
+                            existing = {
+                                "epoch_id": epoch,
+                                "cgroup_id": rec.get("cgroup", ""),
+                                "proc_policy": proc_policy,
+                                "policy_hash": policy_hash or recomputed,
+                            }
+                            self._authorized_epochs[epoch] = existing
+                        else:
+                            if rec.get("cgroup"):
+                                existing["cgroup_id"] = rec.get("cgroup", "")
+                            if policy_hash and existing.get("policy_hash") != policy_hash:
+                                raise JournalCorruptError(
+                                    f"authorized hash conflicts with intent for {epoch}: "
+                                    f"intent={existing.get('policy_hash')} authorized={policy_hash}")
+                        existing["authorized"] = True
         with self._sessions_lock:
             self._sessions.update(state["sessions"])
         # FS-committed but release not confirmed: canonical outcome is COMMITTED,
@@ -495,68 +588,28 @@ class ShadowOrchestrator:
             primary_cg = info.get("cgroup", "")
             epoch = info.get("epoch", "")
             released = set(info.get("released_cgroups", []))
-            log.info("RECOVERY group_id=%d: release_intent recorded (members=%s "
-                     "graph_gen=%d released=%s) -- completing release before ack",
-                     gid, members, info.get("graph_generation", 0), sorted(released))
-            member_cgroups = self._resolve_member_cgroups(members, primary_cg)
-            policies = self._member_policies(members)
-            if member_cgroups is None or policies is None:
-                if member_cgroups is None:
-                    member_cgroups = []
-                self._park_pending_group(gid, members,
-                                         info.get("graph_generation", 0),
-                                         member_cgroups, policies,
-                                         released_cgroups=released,
-                                         ack_pending=False,
-                                         primary_cgroup=primary_cg,
-                                         epoch_id=epoch or "")
-                log.warning("  recovery group %d: cannot resolve member cgroups "
-                            "or policies -- leaving group release pending", gid)
-                continue
-            failed = []
-            for idx, mcg in enumerate(member_cgroups):
-                if mcg in released:
-                    continue
-                member_policy = None
-                if idx < len(members):
-                    member_policy = policies.get(members[idx], {}).get("proc_policy")
-                ok, _ = self._release_proc(mcg, skip_ack=True,
-                                           proc_policy=member_policy)
-                if ok:
-                    self._journal.append("release_member_done", cgroup=mcg,
-                                         group_id=gid, epoch=epoch)
-                    released.add(mcg)
-                else:
-                    failed.append(mcg)
-            if failed:
-                self._park_pending_group(gid, members,
-                                         info.get("graph_generation", 0),
-                                         member_cgroups, policies,
-                                         released_cgroups=released,
-                                         ack_pending=False,
-                                         primary_cgroup=primary_cg,
-                                         epoch_id=epoch or "")
-                log.warning("  recovery group %d: release failed for %s -- not "
-                            "acking group", gid, failed)
-                continue
-            if self._fs_group_ack(gid, primary_cg, epoch):
-                sid = info.get("sid")
-                if sid:
-                    self._journal.append("commit_done", sid=sid, cgroup=primary_cg)
-                if hasattr(self, "_pending_lock"):
-                    for mcg in member_cgroups:
-                        with self._pending_lock:
-                            self._pending_release.discard(mcg)
-            else:
-                self._park_pending_group(gid, members,
-                                         info.get("graph_generation", 0),
-                                         member_cgroups, policies,
-                                         released_cgroups=set(member_cgroups),
-                                         ack_pending=True,
-                                         primary_cgroup=primary_cg,
-                                         epoch_id=epoch or "")
-                log.warning("  recovery group %d: ack failed -- parked for "
-                            "group ack retry", gid)
+            member_cgroups = info.get("member_cgroups") or self._resolve_member_cgroups(members, primary_cg) or []
+            policies = info.get("policies") or self._member_policies(members) or {}
+            phase = info.get("phase") or (GROUP_ACK_PENDING if info.get("ack_pending") else GROUP_RELEASING)
+            for res in (info.get("epoch_results") or {}).values():
+                if res.get("epoch_id"):
+                    self._epoch_results[res["epoch_id"]] = dict(res)
+            log.info("RECOVERY group_id=%d: restored pending group phase=%s "
+                     "members=%s graph_gen=%d released=%s",
+                     gid, phase, members, info.get("graph_generation", 0),
+                     sorted(released))
+            self._park_pending_group(
+                gid, members, info.get("graph_generation", 0),
+                member_cgroups, policies,
+                released_cgroups=released,
+                ack_pending=(phase == GROUP_ACK_PENDING),
+                primary_cgroup=primary_cg,
+                epoch_id=epoch or "",
+                phase=phase,
+                session_id=info.get("sid", "") or info.get("session_id", ""),
+                primary_member=info.get("primary_member", ""),
+            )
+        self._prune_epoch_results()
         log.info("Journal recovery: %d session(s), %d committed-pending, %d undecided",
                  len(state["sessions"]), len(state["committed"]), len(state["undecided"]))
 
@@ -952,6 +1005,135 @@ class ShadowOrchestrator:
             return False
         return True
 
+    def _fs_group_status(self, group_id: int) -> Tuple[str, str]:
+        """Return (state, finalize_err) for a ShadowFS finalize group.
+
+        Any socket/malformed/error response is treated as FINALIZING by the
+        caller: unknown is never safe to release.
+        """
+        try:
+            resp = self.fs_client.request({
+                "action": "get_finalize_status",
+                "group_id": group_id,
+            })
+        except Exception as e:  # noqa: BLE001
+            log.warning("  get_finalize_status(%d) failed: %s", group_id, e)
+            return "unknown", str(e)
+        if not isinstance(resp, dict) or resp.get("status") != "ok":
+            return "unknown", resp.get("message", str(resp)) if isinstance(resp, dict) else str(resp)
+        return resp.get("state", "pending"), resp.get("finalize_err", "")
+
+    def _fs_begin_finalize_group(self, group_id: int, graph_generation: int) -> Tuple[str, str]:
+        try:
+            resp = self.fs_client.request({
+                "action": "begin_finalize",
+                "group_id": group_id,
+                "graph_generation": graph_generation,
+            })
+        except Exception as e:  # noqa: BLE001
+            log.warning("  begin_finalize(%d) retry failed: %s", group_id, e)
+            return "unknown", str(e)
+        if not isinstance(resp, dict) or resp.get("status") != "ok":
+            return "unknown", resp.get("message", str(resp)) if isinstance(resp, dict) else str(resp)
+        return resp.get("state", "pending"), resp.get("finalize_err", "")
+
+    def _prune_epoch_results(self) -> None:
+        if not hasattr(self, "_epoch_results"):
+            self._epoch_results = {}
+        while len(self._epoch_results) > MAX_EPOCH_RESULTS:
+            oldest = next(iter(self._epoch_results))
+            self._epoch_results.pop(oldest, None)
+
+    def _record_epoch_result(self, epoch_id: str, cgroup_id: str, stdout: str,
+                             group_id: int) -> None:
+        if not epoch_id:
+            return
+        if not hasattr(self, "_epoch_results"):
+            self._epoch_results = {}
+        self._epoch_results[epoch_id] = {
+            "epoch_id": epoch_id,
+            "cgroup_id": cgroup_id,
+            "stdout": stdout,
+            "released": True,
+            "group_id": group_id,
+        }
+        self._prune_epoch_results()
+        if hasattr(self, "_journal"):
+            self._journal.append("epoch_result", epoch=epoch_id, cgroup=cgroup_id,
+                                 stdout=stdout, released=True, group_id=group_id)
+
+    def _persist_group_phase(self, group: Dict[str, Any]) -> None:
+        if not hasattr(self, "_journal"):
+            return
+        released = sorted(set(group.get("released_cgroups", set())))
+        self._journal.append(
+            "group_phase",
+            group_id=group.get("group_id"),
+            phase=group.get("phase", GROUP_FINALIZING),
+            cgroup=group.get("primary_cgroup", ""),
+            epoch=group.get("epoch_id", ""),
+            sid=group.get("session_id", ""),
+            members=list(group.get("members", [])),
+            graph_generation=group.get("graph_generation", 0),
+            member_cgroups=list(group.get("member_cgroups", [])),
+            policies=group.get("policies", {}),
+            released_cgroups=released,
+            primary_member=group.get("primary_member", ""),
+        )
+
+    def _release_group_member(self, cgroup_id: str, proc_policy: Optional[Dict],
+                              session_id: str = "", is_primary_session: bool = False) -> Tuple[bool, str]:
+        if session_id and is_primary_session:
+            try:
+                proxy = self._get_proxy()
+                proxy.finalize_commit(session_id)
+                return True, proxy.get_output(session_id)
+            except Exception as e:  # noqa: BLE001
+                log.error("  finalize_commit(%s) failed during group release: %s", session_id, e)
+                return False, ""
+        return self._release_proc(cgroup_id, skip_ack=True, proc_policy=proc_policy)
+
+    def _cleanup_after_rollback(self, affected_cgroups: List[str],
+                                affected_epochs: List[str]) -> None:
+        affected_cg_set = set(affected_cgroups)
+        affected_ep_set = set(affected_epochs)
+        self._drop_authorized_members(list(affected_ep_set))
+        if not hasattr(self, "_epoch_results"):
+            self._epoch_results = {}
+        for ep in affected_ep_set:
+            self._epoch_results.pop(ep, None)
+        with self._pending_lock:
+            for cg in affected_cg_set:
+                self._pending_release.discard(cg)
+        self._ensure_group_state()
+        with self._pending_group_lock:
+            for gid, g in list(self._pending_groups.items()):
+                if (affected_ep_set.intersection(g.get("members", []))
+                        or affected_cg_set.intersection(set(g.get("member_cgroups", [])))
+                        or g.get("primary_cgroup") in affected_cg_set):
+                    self._pending_groups.pop(gid, None)
+                    if hasattr(self, "_journal"):
+                        self._journal.append("group_phase", group_id=gid,
+                                             phase=GROUP_DONE,
+                                             cgroup=g.get("primary_cgroup", ""),
+                                             epoch=g.get("epoch_id", ""))
+
+    def _drain_proc_violations(self, cgroup_id: str) -> List[str]:
+        try:
+            resp = self.proc_client.request({
+                "action": "drain_violations",
+                "cgroup_id": cgroup_id,
+            })
+        except Exception as e:  # noqa: BLE001
+            log.warning("  drain_violations(%s) failed: %s", cgroup_id, e)
+            return []
+        if not isinstance(resp, dict) or resp.get("status") != "ok":
+            return []
+        detail = resp.get("message") or ""
+        if not detail:
+            return []
+        return [v for v in detail.split("; ") if v]
+
     def _resolve_member_cgroups(self, members: List[str],
                                 primary_cgroup: str) -> Optional[List[str]]:
         """Map every epoch ID in a finalized group to its cgroup ID.
@@ -994,20 +1176,37 @@ class ShadowOrchestrator:
                             policies: Optional[Dict[str, Dict]],
                             released_cgroups: Optional[set] = None,
                             ack_pending: bool = False,
-                            primary_cgroup: str = "", epoch_id: str = "") -> None:
+                            primary_cgroup: str = "", epoch_id: str = "",
+                            phase: Optional[str] = None,
+                            session_id: str = "",
+                            primary_member: str = "") -> None:
         self._ensure_group_state()
+        if phase is None:
+            phase = GROUP_ACK_PENDING if ack_pending else GROUP_RELEASING
+        if ack_pending:
+            phase = GROUP_ACK_PENDING
+        if not primary_member and primary_cgroup and members and member_cgroups:
+            for idx, mcg in enumerate(member_cgroups):
+                if mcg == primary_cgroup and idx < len(members):
+                    primary_member = members[idx]
+                    break
+        group = {
+            "group_id": group_id,
+            "members": list(members),
+            "graph_generation": graph_generation,
+            "member_cgroups": list(member_cgroups),
+            "policies": policies or {},
+            "released_cgroups": set(released_cgroups or set()),
+            "ack_pending": phase == GROUP_ACK_PENDING,
+            "phase": phase,
+            "primary_cgroup": primary_cgroup,
+            "epoch_id": epoch_id or "",
+            "session_id": session_id or "",
+            "primary_member": primary_member or "",
+        }
         with self._pending_group_lock:
-            self._pending_groups[group_id] = {
-                "group_id": group_id,
-                "members": list(members),
-                "graph_generation": graph_generation,
-                "member_cgroups": list(member_cgroups),
-                "policies": policies or {},
-                "released_cgroups": set(released_cgroups or set()),
-                "ack_pending": ack_pending,
-                "primary_cgroup": primary_cgroup,
-                "epoch_id": epoch_id or "",
-            }
+            self._pending_groups[group_id] = group
+        self._persist_group_phase(group)
 
     def _release_group_members(self, group_id: int, members: List[str],
                                graph_generation: int,
@@ -1015,7 +1214,8 @@ class ShadowOrchestrator:
                                proc_policy: Optional[Dict] = None,
                                journal_release_intent: bool = False,
                                journal_sid: str = None,
-                               epoch_id: str = "") -> Tuple[Dict[str, str], bool]:
+                               epoch_id: str = "",
+                               session_id: str = "") -> Tuple[Dict[str, str], bool]:
         """Release ALL members of a finalized SCC group (P0-7).
 
         Previously commit / submit_policy / resolve_epoch each inlined a
@@ -1061,35 +1261,45 @@ class ShadowOrchestrator:
                                      epoch_id=epoch_id or "")
             return all_output, False
 
+        primary_member = ""
+        for idx, mcg in enumerate(member_cgroups):
+            if mcg == primary_cgroup and idx < len(members):
+                primary_member = members[idx]
+                break
+        effective_session_id = session_id or journal_sid or ""
+
         # Durable release_intent must be written BEFORE externally visible
         # release operations. Recovery can then resume unfinished members.
         if journal_release_intent:
             entry = {"cgroup": primary_cgroup, "group_id": group_id,
                      "members": members, "graph_generation": graph_generation,
-                     "epoch": epoch_id}
-            if journal_sid:
-                entry["sid"] = journal_sid
+                     "epoch": epoch_id, "phase": GROUP_RELEASING,
+                     "member_cgroups": member_cgroups,
+                     "policies": member_policies,
+                     "released_cgroups": [],
+                     "primary_member": primary_member}
+            if effective_session_id:
+                entry["sid"] = effective_session_id
             self._journal.append("release_intent", **entry)
 
         failed_members = []
         released_cgroups = set()
         for idx, mcg in enumerate(member_cgroups):
-            member_policy = member_policies.get(members[idx], {}).get("proc_policy")
-            ok, stdout = self._release_proc(mcg, skip_ack=True,
-                                            proc_policy=member_policy)
+            member_epoch = members[idx] if idx < len(members) else ""
+            member_policy = member_policies.get(member_epoch, {}).get("proc_policy")
+            is_primary_session = bool(effective_session_id and mcg == primary_cgroup)
+            ok, stdout = self._release_group_member(
+                mcg, member_policy,
+                session_id=effective_session_id,
+                is_primary_session=is_primary_session,
+            )
             if ok:
                 all_output[mcg] = stdout
-                if idx < len(members):
-                    self._epoch_results[members[idx]] = {
-                        "epoch_id": members[idx],
-                        "cgroup_id": mcg,
-                        "stdout": stdout,
-                        "released": True,
-                        "group_id": group_id,
-                    }
+                self._record_epoch_result(member_epoch, mcg, stdout, group_id)
                 if journal_release_intent:
                     self._journal.append("release_member_done", cgroup=mcg,
-                                         group_id=group_id, epoch=epoch_id)
+                                         group_id=group_id, epoch=member_epoch,
+                                         stdout=stdout)
                 released_cgroups.add(mcg)
                 if mcg == primary_cgroup:
                     primary_ok = True
@@ -1105,7 +1315,10 @@ class ShadowOrchestrator:
                                      released_cgroups=released_cgroups,
                                      ack_pending=False,
                                      primary_cgroup=primary_cgroup,
-                                     epoch_id=epoch_id or "")
+                                     epoch_id=epoch_id or "",
+                                     phase=GROUP_RELEASING,
+                                     session_id=effective_session_id,
+                                     primary_member=primary_member)
             self._try_release_pending()
             return all_output, primary_ok
 
@@ -1117,12 +1330,18 @@ class ShadowOrchestrator:
                                      released_cgroups=set(member_cgroups),
                                      ack_pending=True,
                                      primary_cgroup=primary_cgroup,
-                                     epoch_id=epoch_id or "")
+                                     epoch_id=epoch_id or "",
+                                     phase=GROUP_ACK_PENDING,
+                                     session_id=effective_session_id,
+                                     primary_member=primary_member)
             log.warning("  ack_release_group(%d) failed -- parked for retry",
                         group_id)
         else:
             self._journal.append("group_release_done", group_id=group_id,
                                  cgroup=primary_cgroup, epoch=epoch_id or "")
+            self._journal.append("group_phase", group_id=group_id,
+                                 phase=GROUP_DONE, cgroup=primary_cgroup,
+                                 epoch=epoch_id or "")
             with self._pending_group_lock:
                 self._pending_groups.pop(group_id, None)
             self._drop_authorized_members(members)
@@ -1233,7 +1452,12 @@ class ShadowOrchestrator:
                 self._retry_pending_acks()
 
     def _retry_pending_groups(self) -> None:
-        """Retry group-level release/ack without degrading to single-epoch APIs.
+        """Retry group-level finalize/release/ack without fail-open.
+
+        Phase gates:
+          FINALIZING  -> retry ShadowFS begin_finalize/status only; never release.
+          RELEASING   -> first prove ShadowFS group is finalized, then release.
+          ACK_PENDING -> external effects are already out; retry only group ack.
         Must be called with self._release_lock held.
         """
         with self._pending_group_lock:
@@ -1246,29 +1470,78 @@ class ShadowOrchestrator:
             released = set(g.get("released_cgroups", set()))
             epoch_id = g.get("epoch_id", "")
             primary = g.get("primary_cgroup", "")
+            graph_generation = g.get("graph_generation", 0)
+            session_id = g.get("session_id", "") or g.get("sid", "")
+            primary_member = g.get("primary_member", "")
+            phase = g.get("phase") or (GROUP_ACK_PENDING if g.get("ack_pending") else GROUP_RELEASING)
+
+            if phase == GROUP_ACK_PENDING:
+                if self._fs_group_ack(gid, primary, epoch_id):
+                    self._journal.append("group_release_done", group_id=gid,
+                                         cgroup=primary, epoch=epoch_id)
+                    self._journal.append("group_phase", group_id=gid,
+                                         phase=GROUP_DONE, cgroup=primary,
+                                         epoch=epoch_id)
+                    with self._pending_group_lock:
+                        self._pending_groups.pop(gid, None)
+                    self._drop_authorized_members(members)
+                continue
+
+            state, finalize_err = self._fs_group_status(gid)
+            if state != "finalized":
+                state, finalize_err = self._fs_begin_finalize_group(gid, graph_generation)
+            if state != "finalized":
+                log.warning("  group %d still not finalized (state=%s err=%s) -- not releasing",
+                            gid, state, finalize_err)
+                with self._pending_group_lock:
+                    if gid in self._pending_groups:
+                        self._pending_groups[gid]["phase"] = GROUP_FINALIZING
+                g["phase"] = GROUP_FINALIZING
+                self._persist_group_phase(g)
+                continue
+
+            if not member_cgroups:
+                resolved = self._resolve_member_cgroups(members, primary)
+                if resolved is None:
+                    log.warning("  group %d finalized but member cgroups unresolved -- not releasing", gid)
+                    continue
+                member_cgroups = resolved
+
             all_done = True
             for idx, mcg in enumerate(member_cgroups):
                 if mcg in released:
                     continue
-                member_policy = None
-                if idx < len(members):
-                    member_policy = policies.get(members[idx], {}).get("proc_policy")
-                ok, _ = self._release_proc(mcg, skip_ack=True,
-                                           proc_policy=member_policy)
+                member_epoch = members[idx] if idx < len(members) else ""
+                member_policy = policies.get(member_epoch, {}).get("proc_policy")
+                is_primary_session = bool(session_id and mcg == primary)
+                ok, stdout = self._release_group_member(
+                    mcg, member_policy,
+                    session_id=session_id,
+                    is_primary_session=is_primary_session,
+                )
                 if ok:
                     released.add(mcg)
+                    self._record_epoch_result(member_epoch, mcg, stdout, gid)
                     self._journal.append("release_member_done", cgroup=mcg,
-                                         group_id=gid, epoch=epoch_id)
+                                         group_id=gid, epoch=member_epoch,
+                                         stdout=stdout)
                 else:
                     all_done = False
             if not all_done:
                 with self._pending_group_lock:
                     if gid in self._pending_groups:
                         self._pending_groups[gid]["released_cgroups"] = released
+                        self._pending_groups[gid]["phase"] = GROUP_RELEASING
+                g["released_cgroups"] = released
+                g["phase"] = GROUP_RELEASING
+                self._persist_group_phase(g)
                 continue
             if self._fs_group_ack(gid, primary, epoch_id):
                 self._journal.append("group_release_done", group_id=gid,
                                      cgroup=primary, epoch=epoch_id)
+                self._journal.append("group_phase", group_id=gid,
+                                     phase=GROUP_DONE, cgroup=primary,
+                                     epoch=epoch_id)
                 with self._pending_group_lock:
                     self._pending_groups.pop(gid, None)
                 self._drop_authorized_members(members)
@@ -1277,6 +1550,10 @@ class ShadowOrchestrator:
                     if gid in self._pending_groups:
                         self._pending_groups[gid]["released_cgroups"] = released
                         self._pending_groups[gid]["ack_pending"] = True
+                        self._pending_groups[gid]["phase"] = GROUP_ACK_PENDING
+                g["released_cgroups"] = released
+                g["phase"] = GROUP_ACK_PENDING
+                self._persist_group_phase(g)
 
     def _retry_pending_acks(self) -> None:
         """Retry ONLY the ShadowFS ack_release for cgroups whose external
@@ -1494,7 +1771,8 @@ class ShadowOrchestrator:
                                          released_cgroups=set(),
                                          ack_pending=False,
                                          primary_cgroup=cgroup_id,
-                                         epoch_id="")
+                                         epoch_id="",
+                                         phase=GROUP_FINALIZING)
                 log.info("  cgroup=%s authorized but NOT finalized -- keeping "
                          "processes frozen, network fenced, stdout buffered "
                          "(background retry will finalize)", cgroup_id)
@@ -1530,7 +1808,8 @@ class ShadowOrchestrator:
                                          released_cgroups=set(),
                                          ack_pending=False,
                                          primary_cgroup=cgroup_id,
-                                         epoch_id="")
+                                         epoch_id="",
+                                         phase=GROUP_RELEASING)
                 log.warning("  cgroup=%s finalized but process/output release "
                             "failed -- keeping fenced, deferred for retry",
                             cgroup_id)
@@ -1633,8 +1912,10 @@ class ShadowOrchestrator:
             "cgroup_id": cgroup_id,
         })
         affected = []
+        affected_epochs = []
         if fs_resp.get("status") == "ok":
             affected = fs_resp.get("affected", []) or []
+            affected_epochs = fs_resp.get("affected_epochs", []) or []
             log.info("  fail-closed: ShadowFS rollback ok, affected: %s", affected)
         else:
             log.error("  fail-closed: ShadowFS rollback FAILED: %s",
@@ -1652,9 +1933,7 @@ class ShadowOrchestrator:
         # Discard buffered stdout + drop deferred releases for the undone cgroups.
         for cg in kill_cgroups:
             self._discard_output(cg)
-        with self._pending_lock:
-            for cg in kill_cgroups:
-                self._pending_release.discard(cg)
+        self._cleanup_after_rollback(kill_cgroups, affected_epochs)
 
         # Cleanup observation state.
         self._observe_state.pop(cgroup_id, None)
@@ -1691,6 +1970,7 @@ class ShadowOrchestrator:
             return fs_resp
 
         affected = fs_resp.get("affected", [])
+        affected_epochs = fs_resp.get("affected_epochs", [])
         log.info("  ShadowFS rollback successful, affected cgroups: %s", affected)
 
         # Step 2: Roll back the process layer for all affected cgroups. Each
@@ -1713,12 +1993,9 @@ class ShadowOrchestrator:
             self._discard_output(affected_cgroup)
         self._discard_output(cgroup_id)
 
-        # Drop any deferred releases for cgroups undone by this cascade:
+        # Drop any deferred releases for cgroups/epochs undone by this cascade:
         # their processes were rolled back, so there is nothing to release.
-        with self._pending_lock:
-            for affected_cgroup in affected:
-                self._pending_release.discard(affected_cgroup)
-            self._pending_release.discard(cgroup_id)
+        self._cleanup_after_rollback(affected + [cgroup_id], affected_epochs)
 
         return {"status": "ok", "affected": affected,
                 "killed_pids": total_killed, "resumed_pids": total_resumed}
@@ -1935,7 +2212,9 @@ class ShadowOrchestrator:
                                          released_cgroups=set(),
                                          ack_pending=False,
                                          primary_cgroup=cgroup_id,
-                                         epoch_id=epoch_id or "")
+                                         epoch_id=epoch_id or "",
+                                         phase=GROUP_FINALIZING,
+                                         session_id=session_id)
                 log.error("  cgroup=%s authorized but NOT finalized -- baseline "
                           "preserved (epoch stays fenced; retry the commit)",
                           cgroup_id)
@@ -1966,6 +2245,13 @@ class ShadowOrchestrator:
                         "message": "cannot resolve all release-group members",
                         "released": False}
 
+            primary_member = ""
+            for idx, mcg in enumerate(member_cgroups):
+                if mcg == cgroup_id and idx < len(fs_result["members"]):
+                    primary_member = fs_result["members"][idx]
+                    break
+            released_cgroups = set()
+
             # Durable release_intent must precede every externally-visible
             # process/output release, including the session primary.
             self._journal.append("release_intent",
@@ -1973,7 +2259,12 @@ class ShadowOrchestrator:
                                 group_id=fs_result["group_id"],
                                 members=fs_result["members"],
                                 graph_generation=fs_result["graph_generation"],
-                                epoch=epoch_id or "")
+                                epoch=epoch_id or "",
+                                phase=GROUP_RELEASING,
+                                member_cgroups=member_cgroups,
+                                policies=member_policies or {},
+                                released_cgroups=[],
+                                primary_member=primary_member)
 
             # Release sibling members first. If any sibling cannot be released,
             # keep the primary session fenced and do NOT ack the group.
@@ -1981,26 +2272,31 @@ class ShadowOrchestrator:
             for idx, mcg in enumerate(member_cgroups):
                 if mcg == cgroup_id:
                     continue
+                member_epoch = fs_result["members"][idx] if idx < len(fs_result["members"]) else ""
                 member_policy = None
-                if member_policies is not None and idx < len(fs_result["members"]):
-                    member_policy = member_policies.get(
-                        fs_result["members"][idx], {}).get("proc_policy")
-                ok, _ = self._release_proc(mcg, skip_ack=True,
-                                           proc_policy=member_policy)
+                if member_policies is not None:
+                    member_policy = member_policies.get(member_epoch, {}).get("proc_policy")
+                ok, stdout = self._release_proc(mcg, skip_ack=True,
+                                                proc_policy=member_policy)
                 if ok:
+                    released_cgroups.add(mcg)
+                    self._record_epoch_result(member_epoch, mcg, stdout, fs_result["group_id"])
                     self._journal.append("release_member_done", cgroup=mcg,
                                          group_id=fs_result["group_id"],
-                                         epoch=epoch_id or "")
+                                         epoch=member_epoch, stdout=stdout)
                 else:
                     sibling_failed = True
                     self._park_pending_group(fs_result["group_id"],
                                              fs_result["members"],
                                              fs_result["graph_generation"],
                                              member_cgroups, member_policies,
-                                             released_cgroups=set(member_cgroups[:idx]),
+                                             released_cgroups=released_cgroups,
                                              ack_pending=False,
                                              primary_cgroup=cgroup_id,
-                                             epoch_id=epoch_id or "")
+                                             epoch_id=epoch_id or "",
+                                             phase=GROUP_RELEASING,
+                                             session_id=session_id,
+                                             primary_member=primary_member)
                     log.warning("  Release of sibling member cgroup=%s failed "
                                 "-- deferred; group not acked", mcg)
             if sibling_failed:
@@ -2016,12 +2312,28 @@ class ShadowOrchestrator:
                 # Outcome is already durably COMMITTED and release_intent is
                 # durable: recovery/retry must finish the primary release before
                 # group ack.
+                self._park_pending_group(fs_result["group_id"],
+                                         fs_result["members"],
+                                         fs_result["graph_generation"],
+                                         member_cgroups, member_policies,
+                                         released_cgroups=released_cgroups,
+                                         ack_pending=False,
+                                         primary_cgroup=cgroup_id,
+                                         epoch_id=epoch_id or "",
+                                         phase=GROUP_RELEASING,
+                                         session_id=session_id,
+                                         primary_member=primary_member)
                 log.error("  finalize_commit (process layer) failed: %s", e)
                 return {"status": "error", "message": str(e),
                         "released": False}
+            released_cgroups.add(cgroup_id)
+            self._record_epoch_result(primary_member or (epoch_id or ""),
+                                      cgroup_id, committed_output,
+                                      fs_result["group_id"])
             self._journal.append("release_member_done", cgroup=cgroup_id,
                                  group_id=fs_result["group_id"],
-                                 epoch=epoch_id or "")
+                                 epoch=primary_member or (epoch_id or ""),
+                                 stdout=committed_output)
 
             # External effects for every member are out -- only now may ShadowFS
             # drop the group's terminal records.
@@ -2032,10 +2344,13 @@ class ShadowOrchestrator:
                                          fs_result["members"],
                                          fs_result["graph_generation"],
                                          member_cgroups, member_policies,
-                                         released_cgroups=set(member_cgroups),
+                                         released_cgroups=released_cgroups,
                                          ack_pending=True,
                                          primary_cgroup=cgroup_id,
-                                         epoch_id=epoch_id or "")
+                                         epoch_id=epoch_id or "",
+                                         phase=GROUP_ACK_PENDING,
+                                         session_id=session_id,
+                                         primary_member=primary_member)
                 log.warning("  ack_release_group(%d) failed -- parked for "
                             "group ack retry", fs_result["group_id"])
                 return {"status": "ok", "output": committed_output,
@@ -2043,6 +2358,9 @@ class ShadowOrchestrator:
         self._journal.append("commit_done", sid=session_id, cgroup=cgroup_id)
         self._journal.append("group_release_done", group_id=fs_result["group_id"],
                              cgroup=cgroup_id, epoch=epoch_id or "")
+        self._journal.append("group_phase", group_id=fs_result["group_id"],
+                             phase=GROUP_DONE, cgroup=cgroup_id,
+                             epoch=epoch_id or "")
         self._drop_authorized_members(fs_result["members"])
         with self._sessions_lock:
             self._session_epochs.pop(session_id, None)
@@ -2093,7 +2411,10 @@ class ShadowOrchestrator:
         except Exception as e:  # noqa: BLE001
             log.error("  rollback_epoch (process layer) failed after FS undo: %s", e)
             return {"status": "error", "message": str(e)}
-        self._journal.append("rollback", sid=session_id, cgroup=cgroup_id)
+        self._journal.append("rollback", sid=session_id, cgroup=cgroup_id,
+                             epoch=epoch_id or "")
+        affected_epochs = fs_resp.get("affected_epochs", []) or ([epoch_id] if epoch_id else [])
+        self._cleanup_after_rollback([cgroup_id], affected_epochs)
         with self._sessions_lock:
             self._session_epochs.pop(session_id, None)
         self._recovered_outputs.pop(session_id, None)
@@ -2251,6 +2572,15 @@ class ShadowOrchestrator:
         frozen_pids = freeze_resp.get("pids", [])
         log.info("  Froze %d processes: %s", len(frozen_pids), frozen_pids)
 
+        proc_violations = self._drain_proc_violations(cgroup_id)
+        if proc_violations:
+            return self._fail_closed(
+                cgroup_id, state,
+                "ShadowProc reported enforced-mode DENY violations: "
+                + "; ".join(proc_violations[:5]),
+                stop_observe=True,
+            )
+
         # ── Step 2: Stop observation (drains tail events, then seals log) ──
         log.info("  Step 2: Stopping observation...")
         stop_resp = self.observe_client.request({
@@ -2399,7 +2729,8 @@ class ShadowOrchestrator:
                                          released_cgroups=set(),
                                          ack_pending=False,
                                          primary_cgroup=cgroup_id,
-                                         epoch_id="")
+                                         epoch_id="",
+                                         phase=GROUP_FINALIZING)
                 log.info("  cgroup=%s independently authorized but SCC is not "
                          "ready to finalize (%s); keeping policy cached and "
                          "workload fenced", cgroup_id,
@@ -2440,7 +2771,8 @@ class ShadowOrchestrator:
                                          released_cgroups=set(),
                                          ack_pending=False,
                                          primary_cgroup=cgroup_id,
-                                         epoch_id="")
+                                         epoch_id="",
+                                         phase=GROUP_RELEASING)
                 log.warning("  cgroup=%s finalized but process/output release "
                             "failed -- keeping fenced, deferred for retry",
                             cgroup_id)
@@ -2498,12 +2830,7 @@ class ShadowOrchestrator:
             # Discard buffered stdout for all affected cgroups
             for cg in kill_cgroups:
                 self._discard_output(cg)
-            self._drop_authorized_members(affected_epochs)
-
-            # Drop any deferred releases for the undone cgroups.
-            with self._pending_lock:
-                for cg in kill_cgroups:
-                    self._pending_release.discard(cg)
+            self._cleanup_after_rollback(kill_cgroups, affected_epochs)
 
             # Cleanup observation state
             del self._observe_state[cgroup_id]
@@ -2665,6 +2992,9 @@ class OrchestratorServer:
                 if not cgroup_id:
                     return {"status": "error", "message": "cgroup_id required"}
                 return self.orch.stop_observe(cgroup_id)
+
+            elif action == "drain_violations":
+                return {"status": "ok", "violations": self.orch._drain_proc_violations(cgroup_id or "")}
 
             elif action == "submit_policy":
                 if not cgroup_id:
