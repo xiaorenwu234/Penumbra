@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use bpf_loader::BpfManager;
 use cli::Cli;
-use event_handler::{EventType, InterceptEvent};
+use event_handler::{Decision, EventType, InterceptEvent};
 use process_manager::ProcessManager;
 use socket_server::SocketServer;
 
@@ -178,34 +178,49 @@ fn main() -> Result<()> {
                     }
                 }
                 _ => {
-                    // Normal interception event
-                    eprintln!("\n\x1b[1;31m[INTERCEPTED]\x1b[0m {}", event);
-                    let trigger_tgid = event.tgid;
-                    pm.record_frozen(event);
+                    match event.decision_enum() {
+                        Decision::Fence => {
+                            // FENCE means BPF returned -ERESTARTSYS and queued
+                            // SIGSTOP. Only this path may register frozen state
+                            // and stop the rest of the cgroup as an atomic unit.
+                            eprintln!("\n\x1b[1;31m[INTERCEPTED]\x1b[0m {}", event);
+                            let trigger_tgid = event.tgid;
+                            pm.record_frozen(event);
 
-                    // Auto-freeze the rest of the cgroup so the whole group is
-                    // stopped as an atomic unit before audit/commit/rollback.
-                    // The triggering process is already SIGSTOP'd by eBPF and
-                    // recorded above; freeze_by_cgroup skips it and SIGSTOPs the
-                    // remaining siblings, recording them for later resume/kill.
-                    let cgroup_path = pm
-                        .get_frozen(trigger_tgid)
-                        .map(|f| f.cgroup_path.clone());
-                    if let Some(cgroup_path) = cgroup_path {
-                        match pm.freeze_by_cgroup(&cgroup_path) {
-                            Ok(pids) if !pids.is_empty() => {
-                                eprintln!(
-                                    "\x1b[1;33m[CGROUP-FREEZE]\x1b[0m froze {} sibling process(es) in {}: {:?}",
-                                    pids.len(), cgroup_path, pids
-                                );
+                            let cgroup_path = pm
+                                .get_frozen(trigger_tgid)
+                                .map(|f| f.cgroup_path.clone());
+                            if let Some(cgroup_path) = cgroup_path {
+                                match pm.freeze_by_cgroup(&cgroup_path) {
+                                    Ok(pids) if !pids.is_empty() => {
+                                        eprintln!(
+                                            "\x1b[1;33m[CGROUP-FREEZE]\x1b[0m froze {} sibling process(es) in {}: {:?}",
+                                            pids.len(), cgroup_path, pids
+                                        );
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        eprintln!(
+                                            "\x1b[1;33m[CGROUP-FREEZE]\x1b[0m failed to freeze cgroup {}: {}",
+                                            cgroup_path, e
+                                        );
+                                    }
+                                }
                             }
-                            Ok(_) => {}
-                            Err(e) => {
-                                eprintln!(
-                                    "\x1b[1;33m[CGROUP-FREEZE]\x1b[0m failed to freeze cgroup {}: {}",
-                                    cgroup_path, e
-                                );
-                            }
+                        }
+                        Decision::Deny => {
+                            // DENY means MODE_ENFORCED returned EPERM. The
+                            // triggering process was not stopped and must not be
+                            // recorded as frozen; keep a violation record for
+                            // the orchestrator/audit plane only.
+                            eprintln!("\n\x1b[1;35m[DENIED]\x1b[0m {}", event);
+                            pm.record_violation(event);
+                        }
+                        Decision::Allow | Decision::Unknown(_) => {
+                            // ALLOW/info lifecycle events are not fences. Unknown
+                            // decisions are logged and left out of frozen state to
+                            // avoid falsely resuming or killing a running process.
+                            eprintln!("\n\x1b[1;34m[EVENT]\x1b[0m {}", event);
                         }
                     }
                 }

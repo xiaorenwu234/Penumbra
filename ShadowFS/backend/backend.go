@@ -279,6 +279,9 @@ func (b *Backend) replayWAL(records []WALRecord) {
 				// Authorize only; the trailing tryPromoteAll in NewBackend
 				// drives promotion/finalization once ALL records are in.
 				ep := b.ensureEpoch(EpochID(rec.EpochID), rec.CgroupID)
+				if rec.PolicyHash != "" {
+					ep.PolicyHash = rec.PolicyHash
+				}
 				if ep.State < AuthorizedPending {
 					ep.State = AuthorizedPending
 				}
@@ -945,11 +948,12 @@ func (b *Backend) EpochCgroup(epochID EpochID) string {
 
 // EpochInfo is a read-only epoch summary for the control API.
 type EpochInfo struct {
-	ID        string `json:"epoch_id"`
-	CgroupID  string `json:"cgroup_id,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	State     string `json:"state"`
-	Versions  int    `json:"versions"`
+	ID         string `json:"epoch_id"`
+	CgroupID   string `json:"cgroup_id,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	State      string `json:"state"`
+	Versions   int    `json:"versions"`
+	PolicyHash string `json:"policy_hash,omitempty"`
 }
 
 // ListEpochs returns a summary of every tracked epoch.
@@ -959,11 +963,12 @@ func (b *Backend) ListEpochs() []EpochInfo {
 	out := make([]EpochInfo, 0, len(b.epochs))
 	for _, ep := range b.epochs {
 		out = append(out, EpochInfo{
-			ID:        string(ep.ID),
-			CgroupID:  ep.CgroupID,
-			SessionID: ep.SessionID,
-			State:     ep.State.String(),
-			Versions:  len(ep.Versions),
+			ID:         string(ep.ID),
+			CgroupID:   ep.CgroupID,
+			SessionID:  ep.SessionID,
+			State:      ep.State.String(),
+			Versions:   len(ep.Versions),
+			PolicyHash: ep.PolicyHash,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -1910,18 +1915,28 @@ type CommitResult struct {
 // advances Speculative -> AuthorizedPending and does NOT quiesce/promote; group
 // finalization is allowed only after every SCC member has been authorized by
 // its own policy path.
-func (b *Backend) Authorize(epochID EpochID) (CommitResult, error) {
+func (b *Backend) Authorize(epochID EpochID, policyHash string) (CommitResult, error) {
+	if policyHash == "" {
+		return CommitResult{}, fmt.Errorf("authorize: policy_hash required for epoch %q", epochID)
+	}
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
 	b.mu.Lock()
 	if ep := b.epochs[epochID]; ep != nil && ep.State >= AuthorizedPending {
+		if ep.PolicyHash != "" && ep.PolicyHash != policyHash {
+			b.mu.Unlock()
+			return CommitResult{}, fmt.Errorf("authorize: policy_hash mismatch for epoch %q", epochID)
+		}
+		if ep.PolicyHash == "" {
+			ep.PolicyHash = policyHash
+		}
 		res := b.lifecycleResultLocked(epochID)
 		b.mu.Unlock()
 		return res, nil
 	}
 	seqNum := b.nextSeq()
-	rec := WALRecord{EpochID: string(epochID), SeqNum: seqNum, ControlOp: "commit"}
+	rec := WALRecord{EpochID: string(epochID), SeqNum: seqNum, ControlOp: "commit", PolicyHash: policyHash}
 	b.mu.Unlock()
 
 	if err := <-b.submitWAL(rec); err != nil {
@@ -1937,6 +1952,10 @@ func (b *Backend) Authorize(epochID EpochID) (CommitResult, error) {
 		b.mu.Unlock()
 	}()
 	ep := b.ensureEpoch(epochID, "")
+	if ep.PolicyHash != "" && ep.PolicyHash != policyHash {
+		return CommitResult{}, fmt.Errorf("authorize apply: policy_hash mismatch for epoch %q", epochID)
+	}
+	ep.PolicyHash = policyHash
 	if ep.State < AuthorizedPending {
 		ep.State = AuthorizedPending
 		log.Printf("[backend] Authorize: epoch=%q authorized (pending finalization)", epochID)
@@ -1948,7 +1967,7 @@ func (b *Backend) Authorize(epochID EpochID) (CommitResult, error) {
 // for single-epoch compatibility; SCC flows should call Authorize for each
 // independently approved member, then BeginFinalize for the group.
 func (b *Backend) Commit(epochID EpochID) (CommitResult, error) {
-	if _, err := b.Authorize(epochID); err != nil {
+	if _, err := b.Authorize(epochID, "legacy-allow-all"); err != nil {
 		return CommitResult{}, err
 	}
 

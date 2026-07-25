@@ -336,13 +336,20 @@ class TestReleaseGroupMembers(unittest.TestCase):
             return {"status": "ok"}
         return proc
 
+    def _policy(self):
+        return {"classes": [{"effect_class": CLASS_IDS["NETWORK"],
+                              "operation": OP_IDS[("NETWORK", "CONNECT")],
+                              "mode": 1}],
+                "network": [], "ipc": [], "signal": []}
+
     def test_releases_all_members_not_just_primary(self):
         """3-member SCC -> continue_by_cgroup called for every member cgroup."""
         mapping = {"e1": "/cg-a", "e2": "/cg-b", "e3": "/cg-primary"}
         orch = self._orch(self._proc_ok(), self._fs_with_agents(mapping))
         out, primary_ok = orch._release_group_members(
             group_id=1, members=["e1", "e2", "e3"],
-            graph_generation=1, primary_cgroup="/cg-primary")
+            graph_generation=1, primary_cgroup="/cg-primary",
+            proc_policy=self._policy())
         resumes = [c["cgroup_id"] for c in orch.proc_client.calls
                    if c["action"] == "continue_by_cgroup"]
         self.assertEqual(sorted(resumes), ["/cg-a", "/cg-b", "/cg-primary"])
@@ -352,10 +359,7 @@ class TestReleaseGroupMembers(unittest.TestCase):
         """proc_policy appears in every member's continue_by_cgroup request."""
         mapping = {"e1": "/cg-a", "e2": "/cg-b"}
         orch = self._orch(self._proc_ok(), self._fs_with_agents(mapping))
-        pp = {"classes": [{"effect_class": CLASS_IDS["NETWORK"],
-                            "operation": OP_IDS[("NETWORK", "CONNECT")],
-                            "mode": 1}],
-              "network": [], "ipc": [], "signal": []}
+        pp = self._policy()
         orch._release_group_members(
             group_id=1, members=["e1", "e2"], graph_generation=1,
             primary_cgroup="/cg-a", proc_policy=pp)
@@ -365,8 +369,8 @@ class TestReleaseGroupMembers(unittest.TestCase):
         for r in resume_reqs:
             self.assertEqual(r.get("policy"), pp)
 
-    def test_no_proc_policy_means_no_policy_field(self):
-        """proc_policy=None -> continue_by_cgroup has no 'policy' key."""
+    def test_no_proc_policy_fails_closed_without_release(self):
+        """proc_policy=None -> no release; group remains parked."""
         mapping = {"e1": "/cg-a"}
         orch = self._orch(self._proc_ok(), self._fs_with_agents(mapping))
         orch._release_group_members(
@@ -374,9 +378,8 @@ class TestReleaseGroupMembers(unittest.TestCase):
             primary_cgroup="/cg-a")
         resume_reqs = [c for c in orch.proc_client.calls
                        if c["action"] == "continue_by_cgroup"]
-        self.assertEqual(len(resume_reqs), 1)
-        self.assertNotIn("policy", resume_reqs[0],
-                         "allow-all release must not carry a policy")
+        self.assertEqual(len(resume_reqs), 0)
+        self.assertIn(1, orch._pending_groups)
 
     def test_partial_failure_defers_failing_member(self):
         """One member's resume fails -> parked as group-level retry state."""
@@ -397,7 +400,8 @@ class TestReleaseGroupMembers(unittest.TestCase):
         orch = self._orch(proc, self._fs_with_agents(mapping))
         out, primary_ok = orch._release_group_members(
             group_id=1, members=["e1", "e2", "e3"],
-            graph_generation=1, primary_cgroup="/cg-ok")
+            graph_generation=1, primary_cgroup="/cg-ok",
+            proc_policy=self._policy())
         self.assertIn(1, orch._pending_groups)
         pending = orch._pending_groups[1]
         self.assertEqual(pending["member_cgroups"], ["/cg-ok", "/cg-fail", "/cg-ok2"])
@@ -414,10 +418,10 @@ class TestReleaseGroupMembers(unittest.TestCase):
         orch = self._orch(self._proc_ok(), self._fs_with_agents(mapping))
         out, primary_ok = orch._release_group_members(
             group_id=9, members=["e1", "e2"], graph_generation=1,
-            primary_cgroup="/cg-a")
+            primary_cgroup="/cg-a", proc_policy=self._policy())
         self.assertEqual(out, {})
         self.assertFalse(primary_ok)
-        self.assertIn("/cg-a", orch._pending_release)
+        self.assertIn(9, orch._pending_groups)
         self.assertNotIn("continue_by_cgroup", orch.proc_client.actions())
         self.assertNotIn("ack_release_group", orch.fs_client.actions())
 
@@ -427,7 +431,8 @@ class TestReleaseGroupMembers(unittest.TestCase):
         orch = self._orch(self._proc_ok(), self._fs_with_agents(mapping))
         orch._release_group_members(
             group_id=42, members=["e1", "e2", "e3"],
-            graph_generation=1, primary_cgroup="/cg-a")
+            graph_generation=1, primary_cgroup="/cg-a",
+            proc_policy=self._policy())
         acks = [c for c in orch.fs_client.actions()
                 if c == "ack_release_group"]
         self.assertEqual(len(acks), 1)
@@ -446,7 +451,7 @@ class TestReleaseGroupMembers(unittest.TestCase):
         orch._release_group_members(
             group_id=7, members=["e1"], graph_generation=3,
             primary_cgroup="/cg-a", journal_release_intent=True,
-            epoch_id="epoch-7")
+            epoch_id="epoch-7", proc_policy=self._policy())
         self.assertTrue(recorded, "release_intent must be journalled")
         _, kw = recorded[0]
         self.assertEqual(kw.get("group_id"), 7)

@@ -340,6 +340,43 @@ impl SocketServer {
                 }
             }
 
+            "dropped_event_stats" => {
+                match bpf_manager.dropped_events() {
+                    Ok(n) => Response {
+                        status: "ok".into(),
+                        message: Some(format!("dropped_events={}", n)),
+                        frozen: None,
+                        pids: None,
+                    },
+                    Err(e) => Response {
+                        status: "error".into(),
+                        message: Some(e.to_string()),
+                        frozen: None,
+                        pids: None,
+                    },
+                }
+            }
+
+            "list_violations" | "drain_violations" => {
+                let mut pm = process_manager.lock().unwrap();
+                let events = if req.action == "drain_violations" {
+                    pm.drain_violations()
+                } else {
+                    pm.list_violations()
+                };
+                let pids: Vec<u32> = events.iter().map(|e| e.tgid).collect();
+                let detail = events.iter()
+                    .map(|e| format!("{}", e))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Response {
+                    status: "ok".into(),
+                    message: Some(detail),
+                    frozen: None,
+                    pids: Some(pids),
+                }
+            }
+
             "list_all_frozen" => {
                 let pm = process_manager.lock().unwrap();
                 let frozen: Vec<FrozenInfo> = pm.list_frozen().iter().map(|p| FrozenInfo {

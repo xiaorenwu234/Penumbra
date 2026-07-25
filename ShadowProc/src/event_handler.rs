@@ -84,6 +84,26 @@ impl fmt::Display for EventType {
     }
 }
 
+/// Kernel decision encoded in InterceptEvent::decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    Fence,
+    Deny,
+    Unknown(u8),
+}
+
+impl fmt::Display for Decision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Decision::Allow => write!(f, "ALLOW"),
+            Decision::Fence => write!(f, "FENCE"),
+            Decision::Deny => write!(f, "DENY"),
+            Decision::Unknown(v) => write!(f, "UNKNOWN({})", v),
+        }
+    }
+}
+
 impl InterceptEvent {
     /// Get the process name as a string
     pub fn comm_str(&self) -> String {
@@ -103,6 +123,16 @@ impl InterceptEvent {
             decision: 1,
             _pad0: [0u8; 7],
             comm: [0u8; 16],
+        }
+    }
+
+    /// Decode the kernel decision byte.
+    pub fn decision_enum(&self) -> Decision {
+        match self.decision {
+            0 => Decision::Allow,
+            1 => Decision::Fence,
+            2 => Decision::Deny,
+            v => Decision::Unknown(v),
         }
     }
 
@@ -199,8 +229,9 @@ impl fmt::Display for InterceptEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "[{}] PID={} TGID={} COMM={} SYSCALL={}({})",
+            "[{}:{}] PID={} TGID={} COMM={} SYSCALL={}({})",
             self.event_type_enum(),
+            self.decision_enum(),
             self.pid,
             self.tgid,
             self.comm_str(),

@@ -296,19 +296,20 @@ class PolicyIR:
     def to_audit_rules(self) -> List[Dict]:
         """Emit rules in the format expected by ShadowObserve's audit engine.
 
-        Wildcard event_type (-1) is kept as-is for the audit engine, which
-        uses -1 to mean "any event type".
+        ShadowObserve's sealed-log schema is path/event based and cannot verify
+        network/IPC/signal endpoint fields. Endpoint constraints are therefore
+        intentionally omitted from the audit projection and are enforced only by
+        ShadowProc's release-time proc_policy maps. This keeps endpoint policies
+        submittable without pretending the sealed log audited fields it does not
+        contain.
         """
         out: List[Dict] = []
         for r in self.rules:
-            rule = {
+            out.append({
                 "event_type": r["event_type"],  # -1 for wildcard
                 "action": r["action"],
                 "path_pattern": r["path_pattern"],
-            }
-            if "endpoint" in r:
-                rule["endpoint"] = dict(r["endpoint"])
-            out.append(rule)
+            })
         return out
 
     def to_bpf_whitelist(self) -> List[Dict]:

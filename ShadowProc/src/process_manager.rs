@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use nix::errno::Errno;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::collections::{HashMap, HashSet};
@@ -66,6 +67,10 @@ pub struct ProcessManager {
     /// address the live process. Each entry also records the /proc start time of
     /// BOTH endpoints so pid reuse is detected (see `Promotion` / resolve_pid).
     promoted: HashMap<u32, Promotion>,
+    /// ENFORCED-mode hard denials reported by BPF. DENY events are not frozen:
+    /// the syscall already returned EPERM and the process continues, so they are
+    /// held separately for orchestrator/audit consumption.
+    violations: Vec<InterceptEvent>,
 }
 
 impl ProcessManager {
@@ -78,6 +83,7 @@ impl ProcessManager {
             bpf_manager,
             memory_tracker: MemoryTracker::new(),
             promoted: HashMap::new(),
+            violations: Vec::new(),
         }
     }
 
@@ -97,6 +103,22 @@ impl ProcessManager {
             cgroup_path,
         };
         self.frozen.insert(pid, frozen);
+    }
+
+    /// Record an ENFORCED-mode violation. The triggering process was NOT
+    /// SIGSTOP'd by BPF, so it must never be placed in self.frozen.
+    pub fn record_violation(&mut self, event: InterceptEvent) {
+        self.violations.push(event);
+    }
+
+    /// Drain recorded violations for the control plane.
+    pub fn drain_violations(&mut self) -> Vec<InterceptEvent> {
+        std::mem::take(&mut self.violations)
+    }
+
+    /// List recorded violations without clearing them.
+    pub fn list_violations(&self) -> Vec<InterceptEvent> {
+        self.violations.clone()
     }
 
     /// List all frozen processes
@@ -964,16 +986,17 @@ impl ProcessManager {
         };
 
         let mut frozen_pids = Vec::new();
-        // Loop to a fixpoint: a SIGSTOP'd parent cannot fork, so once a full pass
-        // over cgroup.procs stops no new pids the whole subtree is quiescent.
-        // This closes the TOCTOU/fork race where a child is forked between
-        // reading cgroup.procs and SIGSTOP'ing its parent. The 1000-pass cap is
-        // a safety bound; convergence normally takes 1-2 passes.
+        let mut converged = false;
+        let mut last_seen: HashSet<u32> = HashSet::new();
+
+        // Loop to a fixpoint: every live, non-baseline process currently in the
+        // cgroup must either already be recorded+stopped or receive SIGSTOP and
+        // reach T/t. Already-recorded pids are verified again instead of being
+        // skipped, which closes the record_frozen-before-proof hole.
         for _ in 0..1000 {
             let data = fs::read_to_string(&cgroup_dir)
                 .with_context(|| format!("Failed to read cgroup.procs: {}", cgroup_dir))?;
-
-            let mut added = false;
+            let mut seen = HashSet::new();
             for line in data.lines() {
                 let line = line.trim();
                 if line.is_empty() {
@@ -983,31 +1006,19 @@ impl ProcessManager {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
-
-                // Skip if already frozen (also makes each pass act only on
-                // genuinely new pids, so the loop converges).
-                if self.frozen.contains_key(&pid) {
-                    continue;
-                }
-
-                // Skip frozen versioning baselines: they live in the cgroup only
-                // as pristine, ptrace-snapshotted rollback copies of a tracked
-                // process. SIGSTOP'ing them again would disturb the versioning
-                // machinery, so they must never be re-frozen as siblings. (The
-                // candidate, i.e. the live fork, is NOT skipped — cgroup freeze
-                // legitimately acts on it.)
                 if self.memory_tracker.is_shadow_pid(pid) {
                     continue;
                 }
+                seen.insert(pid);
 
-                // Send SIGSTOP and prove the whole thread group actually
-                // reached a stopped state before reporting success. Without
-                // this, stop_observe sealing and ShadowFS mmap flush could race
-                // the target's last few instructions after SIGSTOP was queued.
-                if signal::kill(Pid::from_raw(pid as i32), Signal::SIGSTOP).is_ok() {
-                    if !wait_thread_group_stopped(pid, 1000) {
-                        return Err(anyhow::anyhow!(
-                            "pid {} did not reach stopped state after SIGSTOP", pid));
+                if !self.frozen.contains_key(&pid) {
+                    match signal::kill(Pid::from_raw(pid as i32), Signal::SIGSTOP) {
+                        Ok(()) => {}
+                        Err(Errno::ESRCH) => continue,
+                        Err(e) => {
+                            return Err(anyhow::anyhow!(
+                                "SIGSTOP pid {} in {} failed: {}", pid, cgroup_path, e));
+                        }
                     }
                     let cgroup_id = read_process_cgroup(pid)
                         .unwrap_or_else(|| cgroup_path.to_string());
@@ -1015,23 +1026,57 @@ impl ProcessManager {
                         .unwrap_or_default()
                         .trim()
                         .to_string();
-
-                    let frozen = FrozenProcess {
+                    self.frozen.insert(pid, FrozenProcess {
                         pid,
                         tgid: pid,
                         comm,
                         event: InterceptEvent::dummy_freeze(pid),
                         checkpoint_path: None,
                         cgroup_path: cgroup_id,
-                    };
-                    self.frozen.insert(pid, frozen);
+                    });
                     frozen_pids.push(pid);
-                    added = true;
                 }
             }
 
-            if !added {
+            let mut all_stopped = true;
+            for pid in &seen {
+                if !wait_thread_group_stopped(*pid, 50) {
+                    all_stopped = false;
+                    break;
+                }
+            }
+            if all_stopped && seen == last_seen {
+                converged = true;
                 break;
+            }
+            last_seen = seen;
+        }
+
+        if !converged {
+            return Err(anyhow::anyhow!(
+                "freeze_by_cgroup {} did not converge after 1000 passes", cgroup_path));
+        }
+
+        // Final fail-closed proof: re-enumerate cgroup.procs after convergence
+        // and prove every live non-baseline thread group is stopped before any
+        // caller can seal logs, flush mmap state, or finalize files.
+        let data = fs::read_to_string(&cgroup_dir)
+            .with_context(|| format!("Failed to reread cgroup.procs: {}", cgroup_dir))?;
+        for line in data.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let pid: u32 = match line.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if self.memory_tracker.is_shadow_pid(pid) {
+                continue;
+            }
+            if !wait_thread_group_stopped(pid, 1000) {
+                return Err(anyhow::anyhow!(
+                    "pid {} in {} is not fully stopped after cgroup freeze", pid, cgroup_path));
             }
         }
 

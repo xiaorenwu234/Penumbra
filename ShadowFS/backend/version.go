@@ -111,6 +111,10 @@ type EpochState struct {
 	// AuthorizedPending -> Finalizing -> Finalized.
 	State       AgentLifecycle
 	FinalizeErr string
+	// PolicyHash is the stable hash of the process-layer policy durably bound
+	// to this epoch when it entered AuthorizedPending. Empty means legacy/no
+	// policy hash and must be treated fail-closed by new orchestrators.
+	PolicyHash string
 	// Versions lists the VersionIDs owned by this epoch in seq order.
 	Versions []VersionID
 	// ReadFrom is the set of foreign versions this epoch actually observed

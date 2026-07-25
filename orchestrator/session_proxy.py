@@ -43,10 +43,12 @@ import itertools
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import stat
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -76,6 +78,8 @@ _libc.mount.argtypes = [
 _libc.mount.restype = ctypes.c_int
 _libc.umount2.argtypes = [ctypes.c_char_p, ctypes.c_int]
 _libc.umount2.restype = ctypes.c_int
+_libc.setns.argtypes = [ctypes.c_int, ctypes.c_int]
+_libc.setns.restype = ctypes.c_int
 
 
 def _mount(source, target, fstype, flags, data=None):
@@ -414,6 +418,7 @@ class _Session:
         self.fifo_wfd = None        # held-open write end (keeps FIFO from EOF)
         self.live_pid = None        # current canonical pid (agent never sees it)
         self.epoch = None           # {"baseline": pid, "candidate": pid} or None
+        self.tmp_snapshot_dir = None # host-side snapshot of namespace tmp state
         # Commit-gated output. `committed_output` is the durable transcript that
         # is safe to release externally (get_output). `epoch_buffer` holds the
         # SPECULATIVE output produced during the current epoch; it is merged
@@ -817,6 +822,88 @@ class SessionProxy:
             raise PendingSignalError(
                 f"cannot verify pending-signal state for baseline pid {pid}: {e}")
 
+    def _setns_mount(self, pid: int) -> None:
+        fd = os.open(f"/proc/{pid}/ns/mnt", os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            if _libc.setns(fd, os.CLONE_NEWNS) != 0:
+                e = ctypes.get_errno()
+                raise OSError(e, os.strerror(e), f"/proc/{pid}/ns/mnt")
+        finally:
+            os.close(fd)
+
+    def _namespace_copy_worker(self, pid: int, snapshot_dir: str,
+                               restore: bool) -> None:
+        parent_root = f"/proc/{os.getppid()}/root"
+        host_snapshot = parent_root + snapshot_dir
+        self._setns_mount(pid)
+        tmp_paths = ("/tmp", "/dev/shm", "/var/tmp", "/run")
+        if restore:
+            for p in tmp_paths:
+                src = os.path.join(host_snapshot, p.lstrip("/"))
+                if not os.path.isdir(src):
+                    continue
+                os.makedirs(p, exist_ok=True)
+                for name in os.listdir(p):
+                    target = os.path.join(p, name)
+                    if os.path.ismount(target):
+                        continue
+                    if os.path.isdir(target) and not os.path.islink(target):
+                        shutil.rmtree(target)
+                    else:
+                        try:
+                            os.unlink(target)
+                        except FileNotFoundError:
+                            pass
+                for name in os.listdir(src):
+                    s = os.path.join(src, name)
+                    d = os.path.join(p, name)
+                    if os.path.isdir(s) and not os.path.islink(s):
+                        shutil.copytree(s, d, symlinks=True)
+                    else:
+                        shutil.copy2(s, d, follow_symlinks=False)
+        else:
+            os.makedirs(host_snapshot, exist_ok=True)
+            for p in tmp_paths:
+                if not os.path.isdir(p):
+                    continue
+                dst = os.path.join(host_snapshot, p.lstrip("/"))
+                if os.path.exists(dst):
+                    shutil.rmtree(dst)
+                shutil.copytree(p, dst, symlinks=True, ignore_dangling_symlinks=True)
+
+    def _run_namespace_copy(self, pid: int, snapshot_dir: str,
+                            restore: bool) -> None:
+        child = os.fork()
+        if child == 0:
+            try:
+                self._namespace_copy_worker(pid, snapshot_dir, restore)
+                os._exit(0)
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(f"[proxy] tmp-state {'restore' if restore else 'snapshot'} failed: {e}\n")
+                os._exit(126)
+        _, status = os.waitpid(child, 0)
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+            raise RuntimeError("epoch tmp-state restore failed" if restore
+                               else "epoch tmp-state snapshot failed")
+
+    def _snapshot_epoch_tmp_state(self, sess) -> str:
+        snap = tempfile.mkdtemp(prefix=f"shadow-tmp-{sess.id}-")
+        try:
+            self._run_namespace_copy(sess.live_pid, snap, restore=False)
+        except Exception:
+            shutil.rmtree(snap, ignore_errors=True)
+            raise
+        return snap
+
+    def _restore_epoch_tmp_state(self, sess, snapshot_dir: str) -> None:
+        self._run_namespace_copy(sess.live_pid, snapshot_dir, restore=True)
+
+    def _discard_epoch_tmp_snapshot(self, sess) -> None:
+        snap = getattr(sess, "tmp_snapshot_dir", None)
+        if snap:
+            shutil.rmtree(snap, ignore_errors=True)
+            sess.tmp_snapshot_dir = None
+
     # ---- session lifecycle -------------------------------------------------
     def open_session(self, cgroup_name=None):
         """Launch a bash session inside a fresh monitored cgroup. Returns sid."""
@@ -952,6 +1039,7 @@ class SessionProxy:
                         self._reap(int(ln))
         except OSError:
             pass
+        self._discard_epoch_tmp_snapshot(sess)
         if sess.fifo_wfd is not None:
             try:
                 os.close(sess.fifo_wfd)
@@ -1054,6 +1142,7 @@ class SessionProxy:
         # it runs once outside the retry loop.
         self._admit_for_versioning(sess.live_pid)
         fd_snapshots = self._snapshot_fds(sess.live_pid)
+        tmp_snapshot = self._snapshot_epoch_tmp_state(sess)
 
         last_err = None
         for attempt in range(1, retries + 1):
@@ -1079,7 +1168,9 @@ class SessionProxy:
                 self.client.call("resume_candidate", pid=candidate)
                 time.sleep(0.3)
                 sess.epoch = {"baseline": baseline, "candidate": candidate,
-                              "fd_snapshots": fd_snapshots}
+                              "fd_snapshots": fd_snapshots,
+                              "tmp_snapshot": tmp_snapshot}
+                sess.tmp_snapshot_dir = tmp_snapshot
                 sess.live_pid = candidate
                 self._log(f"session {sid}: epoch begun — baseline(frozen)={baseline} "
                           f"candidate(live)={candidate}")
@@ -1088,6 +1179,7 @@ class SessionProxy:
                 last_err = e
                 self._log(f"session {sid}: begin_epoch attempt {attempt} failed: {e}")
                 time.sleep(0.3)
+        shutil.rmtree(tmp_snapshot, ignore_errors=True)
         raise RuntimeError(f"begin_epoch failed after {retries} attempts: {last_err}")
 
     def commit(self, sid):
@@ -1139,6 +1231,7 @@ class SessionProxy:
         self.client.call("continue_pid", pid=candidate)
         sess.live_pid = candidate            # unchanged: candidate stays live
         sess.epoch = None
+        self._discard_epoch_tmp_snapshot(sess)
         # Release the speculative transcript: the epoch's output is now canonical.
         sess.committed_output.extend(sess.epoch_buffer)
         sess.epoch_buffer = []
@@ -1162,6 +1255,7 @@ class SessionProxy:
         candidate = sess.epoch["candidate"]
         baseline = sess.epoch["baseline"]
         fd_snapshots = sess.epoch.get("fd_snapshots", [])
+        tmp_snapshot = sess.epoch.get("tmp_snapshot")
         # Quiesce the candidate to a stopped read()-boundary first: this mirrors
         # the proven rollback flow (the candidate is frozen before it is
         # discarded), and avoids killing it while it is actively blocked in the
@@ -1176,6 +1270,8 @@ class SessionProxy:
         # pids[0] is the canonical pid from now on (the resumed baseline).
         pids = resp.get("pids") or [baseline]
         sess.live_pid = pids[0]
+        if tmp_snapshot:
+            self._restore_epoch_tmp_state(sess, tmp_snapshot)
         sess.epoch = None
         # Phase 4: restore fd state and check for pending signals on the
         # resumed baseline.
@@ -1184,6 +1280,7 @@ class SessionProxy:
         # Discard the speculative transcript: from the baseline's point of view
         # the epoch never happened, so its output is never released.
         sess.epoch_buffer = []
+        self._discard_epoch_tmp_snapshot(sess)
         time.sleep(0.2)                      # let the baseline settle back into read()
         self._log(f"session {sid}: REJECT — discarded candidate {candidate}, "
                   f"resumed pristine baseline {sess.live_pid}")

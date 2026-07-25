@@ -50,6 +50,7 @@ type PersistEpoch struct {
 	SessionID   string         `json:"session_id,omitempty"`
 	State       AgentLifecycle `json:"state"`
 	FinalizeErr string         `json:"finalize_err,omitempty"`
+	PolicyHash  string         `json:"policy_hash,omitempty"`
 	ReadFrom    []uint64       `json:"read_from,omitempty"`
 }
 
@@ -144,6 +145,7 @@ func (b *Backend) snapshot() *PersistState {
 			SessionID:   ep.SessionID,
 			State:       ep.State,
 			FinalizeErr: ep.FinalizeErr,
+			PolicyHash:  ep.PolicyHash,
 		}
 		for vid := range ep.ReadFrom {
 			pe.ReadFrom = append(pe.ReadFrom, uint64(vid))
@@ -217,6 +219,7 @@ func (b *Backend) loadState(state *PersistState) error {
 			SessionID:   pe.SessionID,
 			State:       pe.State,
 			FinalizeErr: pe.FinalizeErr,
+			PolicyHash:  pe.PolicyHash,
 			ReadFrom:    make(map[VersionID]struct{}, len(pe.ReadFrom)),
 		}
 		for _, vid := range pe.ReadFrom {
@@ -391,7 +394,8 @@ func fsyncDir(dir string) error {
 // ControlOp marks the record as a state-management op rather than a
 // mutation. Empty means "normal mutation" (Version != nil). Recognised
 // values: "begin_epoch", "commit", "rollback", "read_dep", "release_ack",
-// "group_prepare", "group_delete".
+// "group_prepare", "group_delete". The "commit" record carries PolicyHash
+// when used as an independent authorization record.
 type WALRecord struct {
 	// Format is the WAL record generation (persistFormatVersion). Records
 	// without it are legacy v1 records and abort recovery.
@@ -401,6 +405,7 @@ type WALRecord struct {
 	SessionID string `json:"session_id,omitempty"` // begin_epoch payload
 	SeqNum    int64  `json:"seq"`
 	ControlOp string `json:"control_op,omitempty"`
+	PolicyHash string `json:"policy_hash,omitempty"`
 	// Version carries the mutation payload (nil for control records).
 	Version *PersistVersion `json:"version,omitempty"`
 	// ReadVersion + ObjectPath carry a read_dep record's observed version.

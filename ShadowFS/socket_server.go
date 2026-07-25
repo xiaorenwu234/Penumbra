@@ -34,6 +34,10 @@ type Request struct {
 	CgroupID  string `json:"cgroup_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 
+	// Independent authorization binds each epoch to the exact process-layer
+	// policy approved by the orchestrator.
+	PolicyHash string `json:"policy_hash,omitempty"`
+
 	// Group-level finalization (Phase 3).
 	GroupID         int   `json:"group_id,omitempty"`
 	GraphGeneration int64 `json:"graph_generation,omitempty"`
@@ -65,6 +69,7 @@ type Response struct {
 	// FinalizeErr, when non-empty, explains why an epoch is stuck short of
 	// Finalized (e.g. a promotion I/O error to retry via retry_finalize).
 	FinalizeErr string `json:"finalize_err,omitempty"`
+	PolicyHash  string `json:"policy_hash,omitempty"`
 
 	// Group-level finalization (Phase 3).
 	GroupID         int      `json:"group_id,omitempty"`
@@ -244,14 +249,14 @@ func (s *SocketServer) handleRequest(req Request) Response {
 		if err != nil {
 			return Response{Status: "error", Message: err.Error()}
 		}
-		log.Printf("[socket] authorize epoch=%q", epochID)
-		res, err := shadowBackend.Authorize(epochID)
+		log.Printf("[socket] authorize epoch=%q policy_hash=%q", epochID, req.PolicyHash)
+		res, err := shadowBackend.Authorize(epochID, req.PolicyHash)
 		if err != nil {
 			return Response{Status: "error", Message: err.Error()}
 		}
 		r := res.CanRelease
 		return Response{Status: "ok", EpochID: string(epochID), State: res.State.String(),
-			Releasable: &r, FinalizeErr: firstFailure(res)}
+			Releasable: &r, FinalizeErr: firstFailure(res), PolicyHash: req.PolicyHash}
 
 	case "commit":
 		epochID, err := resolveEpoch(req, true)

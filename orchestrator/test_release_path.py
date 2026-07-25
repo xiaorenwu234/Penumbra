@@ -196,8 +196,8 @@ class TestReleaseProcFailClosed(unittest.TestCase):
         self.assertFalse(resp["released"])
         self.assertTrue(resp.get("deferred"))
         self.assertEqual(resp["stdout"], "")
-        self.assertIn(cg, orch._pending_release,
-                      "cgroup must stay parked for the retry loop")
+        self.assertIn(1, orch._pending_groups,
+                      "group must stay parked for the retry loop")
         self.assertNotIn("ack_release", orch.fs_client.actions(),
                          "release must never be acked while procs stay frozen")
 

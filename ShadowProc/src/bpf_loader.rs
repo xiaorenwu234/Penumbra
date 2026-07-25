@@ -177,6 +177,35 @@ unsafe fn libc_bpf_map_delete_elem(map_fd: i32, key: *const std::ffi::c_void) ->
     )
 }
 
+/// Raw bpf() syscall wrapper for MAP_LOOKUP_ELEM
+unsafe fn libc_bpf_map_lookup_elem(
+    map_fd: i32,
+    key: *const std::ffi::c_void,
+    value: *mut std::ffi::c_void,
+) -> i64 {
+    #[repr(C)]
+    struct BpfAttrMapElem {
+        map_fd: u32,
+        _pad0: u32,
+        key: u64,
+        value: u64,
+        flags: u64,
+    }
+    let attr = BpfAttrMapElem {
+        map_fd: map_fd as u32,
+        _pad0: 0,
+        key: key as u64,
+        value: value as u64,
+        flags: 0,
+    };
+    libc::syscall(
+        321i64, // __NR_bpf
+        1i64,   // BPF_MAP_LOOKUP_ELEM
+        &attr as *const _ as i64,
+        std::mem::size_of::<BpfAttrMapElem>() as i64,
+    )
+}
+
 /// Raw bpf() syscall wrapper for MAP_UPDATE_ELEM
 unsafe fn libc_bpf_map_update_elem(
     map_fd: i32,
@@ -248,6 +277,8 @@ pub struct BpfManager {
     poll_thread: Option<thread::JoinHandle<()>>,
     /// Raw fd of stopped_pids map
     stopped_pids_fd: i32,
+    /// Raw fd of dropped_events map
+    dropped_events_fd: i32,
     /// Raw fd of epoch_mode map (Phase 2)
     epoch_mode_fd: i32,
     /// Raw fd of class_policy map (Phase 2)
@@ -282,6 +313,7 @@ impl BpfManager {
 
         // Get map fds before moving skel into thread
         let stopped_pids_fd = skel.maps().stopped_pids().as_fd().as_raw_fd();
+        let dropped_events_fd = skel.maps().dropped_events().as_fd().as_raw_fd();
         let epoch_mode_fd = skel.maps().epoch_mode().as_fd().as_raw_fd();
         let class_policy_fd = skel.maps().class_policy().as_fd().as_raw_fd();
         let network_policy_fd = skel.maps().network_policy().as_fd().as_raw_fd();
@@ -344,6 +376,7 @@ impl BpfManager {
             running,
             poll_thread: Some(poll_thread),
             stopped_pids_fd,
+            dropped_events_fd,
             epoch_mode_fd,
             class_policy_fd,
             network_policy_fd,
@@ -368,6 +401,28 @@ impl BpfManager {
         }
 
         Ok(manager)
+    }
+
+    /// Return the cumulative number of BPF ring-buffer events dropped because
+    /// userspace could not keep up or the ring buffer was full.
+    pub fn dropped_events(&self) -> Result<u64> {
+        let key: u32 = 0;
+        let mut val: u64 = 0;
+        let ret = unsafe {
+            libc_bpf_map_lookup_elem(
+                self.dropped_events_fd,
+                key.to_ne_bytes().as_ptr() as *const _,
+                &mut val as *mut _ as *mut _,
+            )
+        };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(0);
+            }
+            anyhow::bail!("BPF dropped_events lookup failed: {}", err);
+        }
+        Ok(val)
     }
 
     /// Add a cgroup to the monitored set. Returns the index assigned.
