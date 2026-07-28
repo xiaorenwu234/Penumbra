@@ -398,6 +398,29 @@ class ShadowOrchestrator:
         # Track stdout buffer files: cgroup_id → output_file_path
         # Populated via register_output(); flushed on commit; discarded on rollback.
         self._output_buffers: Dict[str, str] = {}
+        # ── Per-agent serialization ────────────────────────────────────────
+        # Output is now released optimistically (see SessionProxy.run), so the
+        # only ordering left to enforce is: one agent must not start its NEXT
+        # tool call while its PREVIOUS one is still in flight (not yet
+        # committed/rolled back). Otherwise it could act on state that is about
+        # to be unwound, and epochs on one session cannot nest anyway.
+        #
+        # Scoped PER AGENT on purpose: a different agent_id is an independent
+        # causal chain, so it is never made to wait. No agent_id supplied => no
+        # serialization (single-agent callers keep the old behaviour).
+        #   agent_id -> {"session_id": str, "epoch": str}
+        self._agent_inflight: Dict[str, dict] = {}
+        # session_id -> agent_id. An agent may own MANY sessions, so agent
+        # identity cannot be inferred from the session handle -- it is declared
+        # at session_open and looked up here. Guarded by _agent_cv.
+        self._session_agents: Dict[str, str] = {}
+        self._agent_cv = threading.Condition()
+        # How long a same-agent call waits for the previous one to finalize
+        # before giving up. Bounded so a stuck epoch cannot wedge the agent
+        # forever; on timeout the caller gets an explicit error rather than
+        # silently racing.
+        self._agent_wait_timeout = float(
+            os.environ.get("SHADOW_AGENT_WAIT_TIMEOUT", "30"))
         self._epoch_results: Dict[str, Dict[str, Any]] = {}
 
         # Deferred external-operation release.
@@ -2052,7 +2075,8 @@ class ShadowOrchestrator:
             )
         return self._proxy
 
-    def session_open(self, cgroup_name: Optional[str] = None) -> dict:
+    def session_open(self, cgroup_name: Optional[str] = None,
+                     agent_id: Optional[str] = None) -> dict:
         """
         Open a long-lived bash session inside a fresh monitored cgroup.
 
@@ -2061,34 +2085,139 @@ class ShadowOrchestrator:
         only ever sees the session_id. File writes the session makes into the
         ShadowFS mount are attributed to its cgroup_id, so ShadowFS epoch
         commit/rollback lines up with the process-layer epoch.
+
+        `agent_id` binds the session to an AGENT. One agent may own several
+        sessions; the per-agent barrier then serializes that agent's tool calls
+        ACROSS all of its sessions, because they share one reasoning thread and
+        therefore one causal chain. Sessions of different agents never block each
+        other. Omitting agent_id leaves the session unattributed (no barrier).
         """
         proxy = self._get_proxy()
         sid = proxy.open_session(cgroup_name)
         cgroup_id = proxy.sessions[sid].cgroup_id
         with self._sessions_lock:
             self._sessions[sid] = cgroup_id
-        self._journal.append("open", sid=sid, cgroup=cgroup_id)
-        log.info("SESSION_OPEN sid=%s cgroup=%s", sid, cgroup_id)
-        return {"status": "ok", "session_id": sid, "cgroup_id": cgroup_id}
+        if agent_id:
+            with self._agent_cv:
+                self._session_agents[sid] = agent_id
+        self._journal.append("open", sid=sid, cgroup=cgroup_id,
+                             agent_id=agent_id or "")
+        log.info("SESSION_OPEN sid=%s cgroup=%s agent=%s",
+                 sid, cgroup_id, agent_id or "-")
+        return {"status": "ok", "session_id": sid, "cgroup_id": cgroup_id,
+                "agent_id": agent_id or ""}
+
+    # ── Per-agent barrier ───────────────────────────────────────────
+
+    def _agent_barrier(self, agent_id: Optional[str],
+                       session_id: str) -> Optional[dict]:
+        """Wait until `agent_id` has no tool call in flight, then claim the slot.
+
+        Returns None on success, or an error dict if the previous call did not
+        finalize within the timeout.
+
+        This is the ONLY place a caller is made to wait now that output is
+        released optimistically. It blocks only when BOTH hold:
+          - the incoming call carries the same agent_id as an in-flight call, and
+          - that in-flight call has not been committed/rolled back yet.
+        A different agent_id, or no agent_id, never waits.
+        """
+        if not agent_id:
+            return None
+        deadline = time.time() + self._agent_wait_timeout
+        with self._agent_cv:
+            while True:
+                cur = self._agent_inflight.get(agent_id)
+                if cur is None:
+                    self._agent_inflight[agent_id] = {"session_id": session_id,
+                                                      "epoch": None}
+                    return None
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    log.warning(
+                        "AGENT_BARRIER timeout agent=%s: previous call on "
+                        "session=%s epoch=%s still in flight after %.1fs",
+                        agent_id, cur.get("session_id"), cur.get("epoch"),
+                        self._agent_wait_timeout)
+                    return {"status": "error",
+                            "message": (f"agent {agent_id} still has a tool call "
+                                        f"in flight (session "
+                                        f"{cur.get('session_id')}, epoch "
+                                        f"{cur.get('epoch')}); timed out after "
+                                        f"{self._agent_wait_timeout}s"),
+                            "agent_busy": True}
+                log.debug("AGENT_BARRIER agent=%s waiting on epoch=%s",
+                          agent_id, cur.get("epoch"))
+                self._agent_cv.wait(remaining)
+
+    def _agent_note_epoch(self, agent_id: Optional[str], epoch_id: str) -> None:
+        """Record which epoch the agent's claimed slot corresponds to."""
+        if not agent_id:
+            return
+        with self._agent_cv:
+            slot = self._agent_inflight.get(agent_id)
+            if slot is not None:
+                slot["epoch"] = epoch_id
+
+    def _agent_release(self, agent_id: Optional[str]) -> None:
+        """Free the agent's slot and wake anything waiting on it.
+
+        Must be called on EVERY exit path of a tool call (commit, rollback, and
+        failures in between) — a missed release would wedge that agent until the
+        barrier timeout on every subsequent call.
+        """
+        if not agent_id:
+            return
+        with self._agent_cv:
+            self._agent_inflight.pop(agent_id, None)
+            self._agent_cv.notify_all()
+
+    def _agent_for_session(self, session_id: str) -> Optional[str]:
+        """The agent that owns this session, as declared at session_open.
+
+        Authoritative mapping — NOT inferred from what is currently in flight,
+        because an agent owning several sessions may have its slot held by a
+        DIFFERENT session than the one being finalized.
+        """
+        with self._agent_cv:
+            return self._session_agents.get(session_id)
+
+    def _resolve_agent(self, session_id: str,
+                       agent_id: Optional[str] = None) -> Optional[str]:
+        """Resolve the agent for a call, recording a late-supplied agent_id.
+
+        Callers may either bind the agent once at session_open or pass agent_id
+        per call; passing it per call also (re)binds the session so subsequent
+        commit/rollback can find it without the caller repeating itself.
+        """
+        if agent_id:
+            with self._agent_cv:
+                self._session_agents[session_id] = agent_id
+            return agent_id
+        return self._agent_for_session(session_id)
+
+    def _agent_sessions(self, agent_id: str) -> List[str]:
+        """All sessions currently bound to an agent (diagnostics)."""
+        with self._agent_cv:
+            return sorted(sid for sid, aid in self._session_agents.items()
+                          if aid == agent_id)
 
     def session_run(self, session_id: str, command: str) -> dict:
         """Feed one command to the session's current live shell.
 
-        Output is commit-gated. OUTSIDE an epoch the command is canonical and
-        its stdout is returned immediately. INSIDE an active epoch the output is
-        SPECULATIVE: it is held pending (never returned to the caller before
-        finalization, so a non-rollbackable caller can't act on unwound state).
-        The committed transcript is released by session_commit_epoch.
+        Output is released IMMEDIATELY, in or out of an epoch. Speculative
+        in-epoch output is handed straight back to the caller: the agent's
+        context is INTERNAL state and may advance optimistically, while
+        externally-visible effects remain gated by the epoch (external
+        synchrony). Ordering is enforced per agent at begin_epoch instead of by
+        withholding output — see _agent_barrier.
         """
         proxy = self._get_proxy()
         try:
             out = proxy.run(session_id, command)
         except KeyError:
             return {"status": "error", "message": f"unknown session {session_id}"}
-        if out is None:
-            # Speculative epoch active: do not release speculative output.
-            return {"status": "pending", "output": None}
-        return {"status": "ok", "output": out}
+        return {"status": "ok", "output": out if out is not None else ""}
 
     def _session_cgroup(self, session_id: str) -> Optional[str]:
         with self._sessions_lock:
@@ -2098,23 +2227,37 @@ class ShadowOrchestrator:
         with self._sessions_lock:
             return self._session_epochs.get(session_id)
 
-    def session_begin_epoch(self, session_id: str) -> dict:
+    def session_begin_epoch(self, session_id: str,
+                            agent_id: Optional[str] = None) -> dict:
         """
         Open a unified speculative epoch for the session.
 
         Order matters: mark the ShadowFS epoch boundary FIRST (so every file
         write the candidate makes carries a seq past the marker), THEN fork the
         ShadowProc candidate and resume it as the live shell.
+
+        If `agent_id` is given this is also the per-agent barrier: the call waits
+        here while that same agent still has an unfinalized tool call, and
+        returns immediately otherwise. A different agent never waits.
         """
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
             return {"status": "error", "message": f"unknown session {session_id}"}
+        # Resolve the owning agent (declared at session_open, or supplied here).
+        aid = self._resolve_agent(session_id, agent_id)
+        # Barrier BEFORE any state is touched, so a busy/timed-out agent leaves
+        # nothing half-open. Note this serializes the agent across ALL of its
+        # sessions, not just this one.
+        busy = self._agent_barrier(aid, session_id)
+        if busy is not None:
+            return busy
         # The orchestrator (not ShadowFS) mints the EpochID: the epoch -- not
         # the cgroup -- is the ShadowFS unit of versioning/finalization, and
         # every later commit/rollback/can_release call routes by this id.
         epoch_id = f"ep-{uuid.uuid4().hex[:12]}"
-        log.info("SESSION_BEGIN_EPOCH sid=%s cgroup=%s epoch=%s",
-                 session_id, cgroup_id, epoch_id)
+        self._agent_note_epoch(aid, epoch_id)
+        log.info("SESSION_BEGIN_EPOCH sid=%s cgroup=%s epoch=%s agent=%s",
+                 session_id, cgroup_id, epoch_id, aid or "-")
         # Step 1: ShadowFS epoch registration (epoch_id -> cgroup attribution).
         fs_resp = self.fs_client.request({
             "action": "begin_epoch",
@@ -2124,6 +2267,9 @@ class ShadowOrchestrator:
         })
         if fs_resp.get("status") != "ok":
             log.error("  ShadowFS begin_epoch failed: %s", fs_resp.get("message"))
+            # Nothing is in flight after a failed open -- free the agent slot or
+            # every later call from this agent would block until timeout.
+            self._agent_release(aid)
             return fs_resp
         with self._sessions_lock:
             self._session_epochs[session_id] = epoch_id
@@ -2142,6 +2288,7 @@ class ShadowOrchestrator:
                 self._session_epochs.pop(session_id, None)
             log.warning("  begin_epoch not admissible: %s -- degrading to "
                         "non-speculative mode", e)
+            self._agent_release(aid)
             return {"status": "error", "reason": "not_admissible",
                     "message": str(e)}
         except Exception as e:  # noqa: BLE001
@@ -2153,10 +2300,26 @@ class ShadowOrchestrator:
             with self._sessions_lock:
                 self._session_epochs.pop(session_id, None)
             log.error("  begin_epoch (process layer) failed: %s", e)
+            self._agent_release(aid)
             return {"status": "error", "message": str(e)}
         return {"status": "ok", "cgroup_id": cgroup_id, "epoch_id": epoch_id}
 
-    def session_commit_epoch(self, session_id: str) -> dict:
+    def session_commit_epoch(self, session_id: str,
+                             agent_id: Optional[str] = None) -> dict:
+        """Finalize the epoch, then free the agent's barrier slot.
+
+        try/finally on purpose: the implementation below has many early-return
+        failure paths, and a missed release would wedge that agent on every
+        later call until the barrier timeout. If the caller does not resend
+        agent_id we recover it from the session.
+        """
+        aid = self._resolve_agent(session_id, agent_id)
+        try:
+            return self._commit_epoch_impl(session_id)
+        finally:
+            self._agent_release(aid)
+
+    def _commit_epoch_impl(self, session_id: str) -> dict:
         """
         Accept the current epoch: keep the candidate as canonical (ShadowProc)
         AND durably PROMOTE the epoch's file changes (ShadowFS). The session
@@ -2368,7 +2531,19 @@ class ShadowOrchestrator:
         return {"status": "ok", "output": proxy.get_output(session_id),
                 "released": True}
 
-    def session_rollback_epoch(self, session_id: str) -> dict:
+    def session_rollback_epoch(self, session_id: str,
+                               agent_id: Optional[str] = None) -> dict:
+        """Roll back the epoch, then free the agent's barrier slot.
+
+        See session_commit_epoch for why this is a try/finally wrapper.
+        """
+        aid = self._resolve_agent(session_id, agent_id)
+        try:
+            return self._rollback_epoch_impl(session_id)
+        finally:
+            self._agent_release(aid)
+
+    def _rollback_epoch_impl(self, session_id: str) -> dict:
         """
         Roll back the current epoch losslessly: undo the epoch's file changes
         (ShadowFS), then discard the candidate and resume the pristine baseline
@@ -2445,8 +2620,17 @@ class ShadowOrchestrator:
             self._sessions.pop(session_id, None)
             self._session_epochs.pop(session_id, None)
         self._recovered_outputs.pop(session_id, None)
+        # Unbind from its agent. If this session was the one holding the agent's
+        # barrier slot (closed mid-epoch), free the slot too -- otherwise the
+        # agent's OTHER sessions would block until the barrier timeout.
+        with self._agent_cv:
+            aid = self._session_agents.pop(session_id, None)
+            slot = self._agent_inflight.get(aid) if aid else None
+            if slot is not None and slot.get("session_id") == session_id:
+                self._agent_inflight.pop(aid, None)
+                self._agent_cv.notify_all()
         self._journal.append("close", sid=session_id)
-        log.info("SESSION_CLOSE sid=%s", session_id)
+        log.info("SESSION_CLOSE sid=%s agent=%s", session_id, aid or "-")
         return {"status": "ok"}
 
     # ──────────────────────────────────────────────────────────────────────
@@ -3006,7 +3190,10 @@ class OrchestratorServer:
 
             elif action == "session_open":
                 cgroup_name = req.get("cgroup_name") or None
-                return self.orch.session_open(cgroup_name)
+                # agent_id binds the session to an agent; one agent may own
+                # several sessions and is serialized across all of them.
+                return self.orch.session_open(cgroup_name,
+                                              req.get("agent_id") or None)
 
             elif action == "session_run":
                 session_id = req.get("session_id", "")
@@ -3021,19 +3208,25 @@ class OrchestratorServer:
                 session_id = req.get("session_id", "")
                 if not session_id:
                     return {"status": "error", "message": "session_id required"}
-                return self.orch.session_begin_epoch(session_id)
+                # agent_id is optional: when supplied, this call becomes the
+                # per-agent barrier (waits only if the SAME agent still has an
+                # unfinalized tool call). Omitted => never waits.
+                return self.orch.session_begin_epoch(
+                    session_id, req.get("agent_id") or None)
 
             elif action == "session_commit_epoch":
                 session_id = req.get("session_id", "")
                 if not session_id:
                     return {"status": "error", "message": "session_id required"}
-                return self.orch.session_commit_epoch(session_id)
+                return self.orch.session_commit_epoch(
+                    session_id, req.get("agent_id") or None)
 
             elif action == "session_rollback_epoch":
                 session_id = req.get("session_id", "")
                 if not session_id:
                     return {"status": "error", "message": "session_id required"}
-                return self.orch.session_rollback_epoch(session_id)
+                return self.orch.session_rollback_epoch(
+                    session_id, req.get("agent_id") or None)
 
             elif action == "session_get_output":
                 session_id = req.get("session_id", "")

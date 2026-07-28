@@ -291,9 +291,18 @@ class SpeculationDomainLauncher:
                 _mount("tmpfs", p, "tmpfs",
                        _MS_NOSUID | _MS_NODEV, "size=64m")
 
-        # 8. Remount root as read-only — blocks writes to ALL host paths.
-        #    ShadowFS (FUSE) and cgroup2 are separate mounts, unaffected.
-        _mount("", "/", None, _MS_REMOUNT | _MS_RDONLY)
+        # 8. Make root read-only in THIS namespace — blocks writes to ALL host
+        #    paths. ShadowFS (FUSE) and cgroup2 are separate mounts, unaffected.
+        #
+        #    Must go through _remount_ro (MS_REMOUNT|MS_BIND), NOT a plain
+        #    MS_REMOUNT. A plain remount targets the SUPERBLOCK, which "/"
+        #    shares with the host, so it both (a) reaches outside this namespace
+        #    and (b) fails EBUSY on any live system, because
+        #    sb_prepare_remount_readonly() refuses while the root filesystem
+        #    still has files open for writing — which it essentially always
+        #    does. The bind form changes only this mount's flags, which is all
+        #    the domain needs. Same reasoning as steps 9/11 already use.
+        self._remount_ro("/")
 
         # 9. Remount /proc, /sys and cgroupfs as read-only to block procfs,
         #    sysfs and cgroup-controller escape vectors.  Candidate processes
@@ -464,13 +473,26 @@ class _Session:
         self.fifo_wfd = None        # held-open write end (keeps FIFO from EOF)
         self.live_pid = None        # current canonical pid (agent never sees it)
         self.epoch = None           # {"baseline": pid, "candidate": pid} or None
+        # Identity of the in-flight epoch, used to tag transcript entries.
+        # Proxy-local and monotonic: it only has to distinguish this session's
+        # epochs from each other, so it does not need the orchestrator's EpochID.
+        self.epoch_id = None
+        self._epoch_seq = 0
         self.tmp_snapshot_dir = None # host-side snapshot of namespace tmp state
-        # Commit-gated output. `committed_output` is the durable transcript that
-        # is safe to release externally (get_output). `epoch_buffer` holds the
-        # SPECULATIVE output produced during the current epoch; it is merged
-        # into committed_output on commit and dropped on reject.
-        self.committed_output = []
-        self.epoch_buffer = []
+        # Output is released to the caller IMMEDIATELY, including inside an
+        # epoch (optimistic release). There is no held-back speculative buffer.
+        #
+        # `transcript` is an append-only list of (epoch_id, text) entries, where
+        # epoch_id is None for canonical output produced outside any epoch. The
+        # tag — not a separate buffer, and not an external index — is what lets
+        # the two duties the old epoch_buffer served still be met:
+        #   - reject drops exactly the entries tagged with the rejected epoch;
+        #   - peek_epoch_output() still returns "committed + in-flight", so the
+        #     orchestrator can journal a deterministic committed result at the
+        #     file-layer decision point (crash recovery depends on it).
+        # Tagging beats an index because it survives any other mutation of the
+        # list and cannot silently truncate the wrong range.
+        self.transcript = []
 
 
 # ──────────────────────────── The proxy ────────────────────────────────────
@@ -969,6 +991,27 @@ class SessionProxy:
         finally:
             os.close(snap_fd)
         tmp_paths = ("/tmp", "/dev/shm", "/var/tmp", "/run")
+
+        def _skip_entry(dirpath, name):
+            """True if `name` under `dirpath` must not be copied or removed.
+
+            Covers two cases with one check:
+              - a real mount point (st_dev differs from its parent), and
+              - an entry that cannot even be stat'd, which is exactly what a
+                fail-closed FUSE mount looks like (EIO).
+
+            os.path.ismount() is unusable here: it catches the lstat error and
+            returns False, so a fail-closed ShadowFS mount would be mistaken for
+            an ordinary directory -- snapshot would recurse into it (EIO) and
+            restore would try to unlink it (EISDIR). Both directions must use
+            THIS check, or the two get out of sync.
+            """
+            full = os.path.join(dirpath, name)
+            try:
+                return os.lstat(full).st_dev != os.lstat(dirpath).st_dev
+            except OSError:
+                return True
+
         if restore:
             for p in tmp_paths:
                 src = p.lstrip("/")          # relative -> host snapshot
@@ -977,7 +1020,7 @@ class SessionProxy:
                 os.makedirs(p, exist_ok=True)
                 for name in os.listdir(p):
                     target = os.path.join(p, name)
-                    if os.path.ismount(target):
+                    if _skip_entry(p, name):
                         continue
                     if os.path.isdir(target) and not os.path.islink(target):
                         shutil.rmtree(target)
@@ -994,13 +1037,25 @@ class SessionProxy:
                     else:
                         shutil.copy2(s, d, follow_symlinks=False)
         else:
+            # Skip nested mount points at any depth. Critical for the ShadowFS
+            # FUSE mount when it lives under /tmp: ShadowFS is fail-closed and
+            # attributes access by cgroup, and this worker runs in the
+            # ORCHESTRATOR's cgroup, which has no active epoch -- so recursing
+            # into it returns EIO and the whole snapshot (hence begin_epoch)
+            # fails. Snapshotting it would be wrong anyway: ShadowFS versions
+            # its own content per epoch, so copying it here would be duplicate,
+            # conflicting bookkeeping.
+            def _skip_mounts(dirpath, names):
+                return {n for n in names if _skip_entry(dirpath, n)}
+
             for p in tmp_paths:
                 if not os.path.isdir(p):
                     continue
                 dst = p.lstrip("/")          # relative -> host snapshot
                 if os.path.exists(dst):
                     shutil.rmtree(dst)
-                shutil.copytree(p, dst, symlinks=True, ignore_dangling_symlinks=True)
+                shutil.copytree(p, dst, symlinks=True, ignore=_skip_mounts,
+                                ignore_dangling_symlinks=True)
 
     def _run_namespace_copy(self, pid: int, snapshot_dir: str,
                             restore: bool) -> None:
@@ -1264,13 +1319,13 @@ class SessionProxy:
         Works both between epochs (on the committed shell) and inside an epoch
         (on the speculative candidate) — the caller doesn't need to care which.
 
-        Output is commit-gated. Output produced OUTSIDE an epoch is canonical
-        and returned immediately. Output produced INSIDE an epoch is SPECULATIVE
-        and is NOT returned to the caller (the paper keeps the tool call
-        pending: the agent must not read speculative output before
-        finalization). It is buffered and released to the committed transcript
-        on commit / discarded on reject. In-epoch calls therefore return None.
-        See get_output().
+        Output is released IMMEDIATELY in both cases, including for speculative
+        in-epoch commands. The agent may therefore act on speculative output
+        before the epoch is finalized; that is deliberate (external synchrony):
+        the agent's context is INTERNAL state and may advance optimistically,
+        while externally-visible effects stay gated by the epoch. If the epoch
+        is later rejected, reject() drops the segment from the canonical
+        transcript and the agent's turn is wasted — the misspeculation cost.
         """
         sess = self.sessions[sid]
         sentinel = f"__SHADOW_DONE_{next(self._sentinel_ids)}__"
@@ -1283,40 +1338,42 @@ class SessionProxy:
             if sentinel in lines[n0:]:
                 idx = lines.index(sentinel, n0)
                 out = "\n".join(lines[n0:idx])
-                if sess.epoch is not None:
-                    # Speculative: hold pending commit and DO NOT release it to
-                    # the caller before finalization.
-                    sess.epoch_buffer.append(out)
-                    return None
-                sess.committed_output.append(out)  # canonical: release now
+                # Same path in and out of an epoch: record the output tagged with
+                # the epoch that produced it (None outside an epoch) and hand it
+                # straight back to the caller.
+                sess.transcript.append((sess.epoch_id, out))
                 return out
             time.sleep(0.05)
         self._recover_from_timeout(sess)
         raise TimeoutError(f"command timed out: {command!r}")
 
     def get_output(self, sid):
-        """Return the session's COMMITTED transcript (commit-gated).
+        """Return the session's transcript.
 
-        This is the only output safe to release externally: it contains output
-        from committed epochs and non-speculative commands, but NEVER output
-        from an epoch that is still in flight or was rejected. It mirrors the
-        orchestrator's commit-gated output buffer, applied per speculative epoch.
+        With optimistic release this is the running transcript: output from
+        committed epochs, non-speculative commands, and any epoch currently in
+        flight. Entries of a REJECTED epoch are removed by reject(), so a
+        rejected epoch never remains in the transcript.
         """
         sess = self.sessions[sid]
-        return "\n".join(sess.committed_output)
+        return "\n".join(text for _epoch, text in sess.transcript)
 
     def peek_epoch_output(self, sid):
         """Return the transcript that WOULD become committed for the currently
-        active epoch: the durable committed transcript PLUS the in-flight
-        epoch_buffer, joined as text. Used by the orchestrator to snapshot the
-        committed result durably at the file-layer commit decision point (so a
-        crash before finalize_commit still yields a deterministic result on
-        recovery). Returns "" for an unknown session.
+        active epoch: everything recorded so far, including the in-flight
+        epoch's entries. Used by the orchestrator to snapshot the committed
+        result durably at the file-layer commit decision point (so a crash
+        before finalize_commit still yields a deterministic result on recovery).
+        Returns "" for an unknown session.
+
+        Value-identical to the pre-optimistic-release version, which computed
+        committed_output + epoch_buffer: the in-flight epoch's output is now
+        recorded in place and tagged instead of held in a side buffer.
         """
         sess = self.sessions.get(sid)
         if sess is None:
             return ""
-        return "\n".join(sess.committed_output + sess.epoch_buffer)
+        return "\n".join(text for _epoch, text in sess.transcript)
 
     # ---- speculative epoch -------------------------------------------------
     def begin_epoch(self, sid, retries=3):
@@ -1339,48 +1396,79 @@ class SessionProxy:
         # same stopped epoch boundary.
         self._admit_for_versioning(sess.live_pid)
         self.client.call("freeze_by_cgroup", cgroup_id=sess.cgroup_id)
-        if not self._wait_state_T(sess.live_pid):
-            raise RuntimeError("live shell never reached stopped state")
-        # State T confirmed — a brief settle delay suffices (was 150ms).
-        time.sleep(0.02)
-        self._reject_tmp_regular_fds(sess.live_pid)
-        fd_snapshots = self._snapshot_fds(sess.live_pid)
-        tmp_snapshot = self._snapshot_epoch_tmp_state(sess)
+        # From here until the epoch is actually established, EVERY failure exit
+        # must thaw: the freeze above stopped the whole cgroup, so bailing out
+        # frozen wedges the session permanently (all later session_run calls
+        # would just time out). The success path returns from inside the try and
+        # deliberately leaves the BASELINE frozen -- that is the epoch invariant.
+        try:
+            if not self._wait_state_T(sess.live_pid):
+                raise RuntimeError("live shell never reached stopped state")
+            # State T confirmed — a brief settle delay suffices (was 150ms).
+            time.sleep(0.02)
+            self._reject_tmp_regular_fds(sess.live_pid)
+            fd_snapshots = self._snapshot_fds(sess.live_pid)
+            tmp_snapshot = self._snapshot_epoch_tmp_state(sess)
 
-        last_err = None
-        for attempt in range(1, retries + 1):
-            try:
-                # Frozen original is the baseline; fork the speculative candidate.
-                resp = self.client.call("begin_speculative", pid=sess.live_pid)
-                pids = resp.get("pids") or []
-                if not pids:
-                    raise RuntimeError("begin_speculative returned no candidate pid")
-                candidate = pids[0]
-                baseline = sess.live_pid
-                # Resume the candidate ARMED (no allow-map pass): it becomes the
-                # live shell but its first external effect is intercepted and
-                # frozen. Using resume_candidate (plain SIGCONT) instead of
-                # resume_pid is what stops the candidate from silently bypassing
-                # the fence for the whole epoch. Authorized effects are released
-                # only after finalization (commit -> full release).
-                self.client.call("resume_candidate", pid=candidate)
-                # Wait for the candidate to land back in its read() boundary
-                # (was a blind time.sleep(0.3); now event-driven via wchan).
-                self._wait_wchan_read(candidate, timeout=1.0)
-                sess.epoch = {"baseline": baseline, "candidate": candidate,
-                              "fd_snapshots": fd_snapshots,
-                              "tmp_snapshot": tmp_snapshot}
-                sess.tmp_snapshot_dir = tmp_snapshot
-                sess.live_pid = candidate
-                self._log(f"session {sid}: epoch begun — baseline(frozen)={baseline} "
-                          f"candidate(live)={candidate}")
-                return
-            except (RuntimeError, TimeoutError) as e:
-                last_err = e
-                self._log(f"session {sid}: begin_epoch attempt {attempt} failed: {e}")
-                time.sleep(0.1)
-        shutil.rmtree(tmp_snapshot, ignore_errors=True)
-        raise RuntimeError(f"begin_epoch failed after {retries} attempts: {last_err}")
+            last_err = None
+            for attempt in range(1, retries + 1):
+                try:
+                    # Frozen original is the baseline; fork the speculative candidate.
+                    resp = self.client.call("begin_speculative", pid=sess.live_pid)
+                    pids = resp.get("pids") or []
+                    if not pids:
+                        raise RuntimeError("begin_speculative returned no candidate pid")
+                    candidate = pids[0]
+                    baseline = sess.live_pid
+                    # Resume the candidate ARMED (no allow-map pass): it becomes the
+                    # live shell but its first external effect is intercepted and
+                    # frozen. Using resume_candidate (plain SIGCONT) instead of
+                    # resume_pid is what stops the candidate from silently bypassing
+                    # the fence for the whole epoch. Authorized effects are released
+                    # only after finalization (commit -> full release).
+                    self.client.call("resume_candidate", pid=candidate)
+                    # Wait for the candidate to land back in its read() boundary
+                    # (was a blind time.sleep(0.3); now event-driven via wchan).
+                    self._wait_wchan_read(candidate, timeout=1.0)
+                    sess.epoch = {"baseline": baseline, "candidate": candidate,
+                                  "fd_snapshots": fd_snapshots,
+                                  "tmp_snapshot": tmp_snapshot}
+                    sess.tmp_snapshot_dir = tmp_snapshot
+                    sess.live_pid = candidate
+                    # Tag subsequent output with this epoch so reject() can drop
+                    # exactly its entries. Output itself is released to the caller
+                    # immediately (see run()).
+                    sess._epoch_seq += 1
+                    sess.epoch_id = f"e{sess._epoch_seq}"
+                    self._log(f"session {sid}: epoch begun — baseline(frozen)={baseline} "
+                              f"candidate(live)={candidate}")
+                    return
+                except (RuntimeError, TimeoutError) as e:
+                    last_err = e
+                    self._log(f"session {sid}: begin_epoch attempt {attempt} failed: {e}")
+                    time.sleep(0.1)
+            shutil.rmtree(tmp_snapshot, ignore_errors=True)
+            raise RuntimeError(f"begin_epoch failed after {retries} attempts: {last_err}")
+        except BaseException:
+            self._thaw_after_failed_begin(sess)
+            raise
+
+    def _thaw_after_failed_begin(self, sess) -> None:
+        """Undo the begin_epoch freeze when the epoch could not be established.
+
+        freeze_by_cgroup stops the WHOLE session cgroup. If begin_epoch then
+        bails out without thawing, the session's shell stays frozen forever and
+        every later session_run just times out -- one transient failure kills the
+        session. Best-effort: a thaw failure is logged, never masks the original
+        error.
+        """
+        try:
+            self.client.call("continue_by_cgroup", cgroup_id=sess.cgroup_id)
+            self._log(f"session {sess.id}: begin_epoch failed — thawed cgroup "
+                      f"{sess.cgroup_id} so the session stays usable")
+        except Exception as e:  # noqa: BLE001
+            self._log(f"session {sess.id}: WARNING — could not thaw after failed "
+                      f"begin_epoch: {e} (session may be stuck frozen)")
 
     def commit(self, sid):
         """Accept the candidate as canonical; discard the frozen baseline.
@@ -1432,9 +1520,13 @@ class SessionProxy:
         sess.live_pid = candidate            # unchanged: candidate stays live
         sess.epoch = None
         self._discard_epoch_tmp_snapshot(sess)
-        # Release the speculative transcript: the epoch's output is now canonical.
-        sess.committed_output.extend(sess.epoch_buffer)
-        sess.epoch_buffer = []
+        # The epoch's output was already released to the caller as it was
+        # produced; commit just makes it canonical. Retag its entries as
+        # canonical (epoch None) so a later epoch's reject can never mistake
+        # them for speculative.
+        sess.transcript = [(None, text) if epoch == sess.epoch_id else (epoch, text)
+                           for epoch, text in sess.transcript]
+        sess.epoch_id = None
         # Wait for the candidate to settle back into read() (was 200ms blind).
         self._wait_wchan_read(candidate, timeout=1.0)
         self._log(f"session {sid}: COMMIT — candidate {candidate} is now canonical "
@@ -1483,13 +1575,30 @@ class SessionProxy:
         # Phase 4: restore fd state and tmp state while the baseline is stopped.
         self._restore_fds(sess.live_pid, fd_snapshots)
         if tmp_snapshot:
-            self._restore_epoch_tmp_state(sess, tmp_snapshot)
+            try:
+                self._restore_epoch_tmp_state(sess, tmp_snapshot)
+            except Exception as e:  # noqa: BLE001
+                # Option C: tmp restore is idempotent and retriable, so on
+                # failure we thaw and proceed rather than leaving the session
+                # frozen forever. The baseline's /tmp may be stale, but that is
+                # recoverable (the session is still usable and a subsequent
+                # epoch can still succeed). Compare _clear_pending_signals: THAT
+                # failure is NOT idempotent and must stay fail-closed (frozen).
+                self._log(f"session {sid}: WARNING — tmp-state restore failed "
+                          f"({e}), proceeding with stale /tmp (session still "
+                          f"usable, next epoch will re-snapshot)")
         sess.epoch = None
         self._clear_pending_signals(sess.live_pid)
         self.client.call("continue_pid", pid=sess.live_pid)
-        # Discard the speculative transcript: from the baseline's point of view
-        # the epoch never happened, so its output is never released.
-        sess.epoch_buffer = []
+        # Drop this epoch's entries from the transcript: from the baseline's
+        # point of view the epoch never happened. The caller already received
+        # that output (optimistic release), so the agent's turn that consumed it
+        # is wasted — that is the misspeculation cost. What matters is that the
+        # transcript no longer claims it as canonical.
+        if sess.epoch_id is not None:
+            sess.transcript = [(epoch, text) for epoch, text in sess.transcript
+                               if epoch != sess.epoch_id]
+            sess.epoch_id = None
         self._discard_epoch_tmp_snapshot(sess)
         # Wait for the baseline to settle back into read() (was 200ms blind).
         self._wait_wchan_read(sess.live_pid, timeout=1.0)

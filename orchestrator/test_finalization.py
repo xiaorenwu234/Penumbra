@@ -9,8 +9,9 @@ Unit tests for the Phase 1 fence / finalization hardening:
     can_release gate, and only THEN the destructive process commit
     (finalize_commit) + marker close + release ack. On FS failure or a
     not-yet-Finalized agent the baseline is preserved.
-  * session_run holds SPECULATIVE output pending during an epoch (never returns
-    it to the caller before finalization).
+  * session_run releases output IMMEDIATELY, in or out of an epoch (optimistic
+    release); ordering is enforced per agent by the begin_epoch barrier instead
+    of by withholding speculative output.
   * An unknown policy event_type fails CLOSED (ValueError) instead of being
     widened to a match-everything wildcard.
 
@@ -22,6 +23,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -178,6 +180,12 @@ def _session_orch(proxy, fs_handler):
     orch._pending_lock = threading.Lock()
     orch._pending_ack = set()
     orch._pending_ack_lock = threading.Lock()
+    # Per-agent barrier state: session_commit_epoch releases the agent slot on
+    # every exit path, so these must exist even when no agent_id is used.
+    orch._agent_inflight = {}
+    orch._session_agents = {}
+    orch._agent_cv = threading.Condition()
+    orch._agent_wait_timeout = 5.0
     return orch
 
 
@@ -275,18 +283,34 @@ class RunProxy:
         return self._value
 
 
-class TestSessionRunPending(unittest.TestCase):
+class TestSessionRunOptimisticRelease(unittest.TestCase):
+    """Output is released immediately, in or out of an epoch.
+
+    The old contract held speculative in-epoch output back (status=pending,
+    output=None). It no longer does: the agent's context is internal state and
+    may advance optimistically, while externally-visible effects stay gated by
+    the epoch. Ordering is enforced per agent at begin_epoch instead — see
+    TestAgentBarrier.
+    """
+
     def _orch(self, proxy):
         orch = ShadowOrchestrator.__new__(ShadowOrchestrator)
         orch._proxy = proxy
         return orch
 
-    def test_in_epoch_output_is_pending(self):
-        """proxy.run returns None (speculative) => status pending, no output."""
+    def test_in_epoch_output_is_released_immediately(self):
+        """Speculative in-epoch output is returned, not withheld."""
+        orch = self._orch(RunProxy("spec out"))
+        resp = orch.session_run("sid1", "echo hi")
+        self.assertEqual(resp["status"], "ok")
+        self.assertEqual(resp["output"], "spec out")
+
+    def test_never_returns_pending(self):
+        """Even a None from the proxy must not resurrect the pending path."""
         orch = self._orch(RunProxy(None))
         resp = orch.session_run("sid1", "echo hi")
-        self.assertEqual(resp["status"], "pending")
-        self.assertIsNone(resp["output"])
+        self.assertEqual(resp["status"], "ok")
+        self.assertEqual(resp["output"], "")
 
     def test_out_of_epoch_output_returned(self):
         """Canonical output (a string, even empty) is returned immediately."""
@@ -299,6 +323,103 @@ class TestSessionRunPending(unittest.TestCase):
         resp2 = orch_empty.session_run("sid1", ":")
         self.assertEqual(resp2["status"], "ok")
         self.assertEqual(resp2["output"], "")
+
+
+class TestAgentBarrier(unittest.TestCase):
+    """Per-agent serialization: same agent waits, different agent does not."""
+
+    def _orch(self):
+        orch = ShadowOrchestrator.__new__(ShadowOrchestrator)
+        orch._agent_inflight = {}
+        orch._session_agents = {}
+        orch._agent_cv = threading.Condition()
+        orch._agent_wait_timeout = 0.3
+        return orch
+
+    def test_no_agent_id_never_blocks(self):
+        orch = self._orch()
+        self.assertIsNone(orch._agent_barrier(None, "sid1"))
+        self.assertIsNone(orch._agent_barrier(None, "sid1"))
+
+    def test_first_call_claims_slot(self):
+        orch = self._orch()
+        self.assertIsNone(orch._agent_barrier("a1", "sid1"))
+        self.assertIn("a1", orch._agent_inflight)
+
+    def test_different_agent_does_not_wait(self):
+        orch = self._orch()
+        orch._agent_barrier("a1", "sid1")
+        t0 = time.time()
+        self.assertIsNone(orch._agent_barrier("a2", "sid2"))
+        self.assertLess(time.time() - t0, 0.1,
+                        "a different agent must not be made to wait")
+
+    def test_same_agent_times_out_while_in_flight(self):
+        orch = self._orch()
+        orch._agent_barrier("a1", "sid1")
+        busy = orch._agent_barrier("a1", "sid1")
+        self.assertIsNotNone(busy)
+        self.assertEqual(busy["status"], "error")
+        self.assertTrue(busy.get("agent_busy"))
+
+    def test_same_agent_proceeds_after_release(self):
+        """Releasing the slot must wake a waiter rather than let it time out."""
+        orch = self._orch()
+        orch._agent_wait_timeout = 5.0
+        orch._agent_barrier("a1", "sid1")
+
+        def _finish():
+            time.sleep(0.1)
+            orch._agent_release("a1")
+
+        threading.Thread(target=_finish, daemon=True).start()
+        t0 = time.time()
+        self.assertIsNone(orch._agent_barrier("a1", "sid1"))
+        elapsed = time.time() - t0
+        self.assertGreater(elapsed, 0.05, "should actually have waited")
+        self.assertLess(elapsed, 2.0, "should wake on release, not time out")
+
+    def test_agent_for_session_reverse_lookup(self):
+        orch = self._orch()
+        orch._session_agents["sid-x"] = "a1"
+        self.assertEqual(orch._agent_for_session("sid-x"), "a1")
+        self.assertIsNone(orch._agent_for_session("sid-unknown"))
+
+    def test_resolve_agent_binds_late_agent_id(self):
+        """Passing agent_id per call also binds it, so commit/rollback can find
+        it without the caller repeating itself."""
+        orch = self._orch()
+        self.assertEqual(orch._resolve_agent("sid1", "a1"), "a1")
+        self.assertEqual(orch._agent_for_session("sid1"), "a1")
+        # Later calls need not resend it.
+        self.assertEqual(orch._resolve_agent("sid1", None), "a1")
+
+    def test_one_agent_many_sessions_serializes_across_them(self):
+        """The barrier is per AGENT, not per session: an agent's second session
+        must wait while its first session's call is still in flight."""
+        orch = self._orch()
+        orch._session_agents = {"sidA": "a1", "sidB": "a1"}
+        # a1's call on sidA is in flight.
+        self.assertIsNone(orch._agent_barrier("a1", "sidA"))
+        # a1 now tries a DIFFERENT session -- same causal chain, must block.
+        busy = orch._agent_barrier("a1", "sidB")
+        self.assertIsNotNone(busy)
+        self.assertTrue(busy.get("agent_busy"))
+
+    def test_sessions_of_different_agents_do_not_block(self):
+        orch = self._orch()
+        orch._session_agents = {"sidA": "a1", "sidB": "a2"}
+        self.assertIsNone(orch._agent_barrier("a1", "sidA"))
+        t0 = time.time()
+        self.assertIsNone(orch._agent_barrier("a2", "sidB"))
+        self.assertLess(time.time() - t0, 0.1)
+
+    def test_agent_sessions_listing(self):
+        orch = self._orch()
+        orch._session_agents = {"s1": "a1", "s2": "a2", "s3": "a1"}
+        self.assertEqual(orch._agent_sessions("a1"), ["s1", "s3"])
+        self.assertEqual(orch._agent_sessions("a2"), ["s2"])
+        self.assertEqual(orch._agent_sessions("nobody"), [])
 
 
 class TestPolicyFailClosed(unittest.TestCase):

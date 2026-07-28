@@ -56,6 +56,36 @@ orch()  { python3 "$ORCH_CLIENT" "$ORCH_SOCK" "$@"; }
 jf()    { python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$1',''))"; }
 
 # ──────────────────────────── Cleanup ──────────────────────────────────────
+# Count the mounts stacked at a path, WITHOUT touching the filesystem.
+# `mountpoint -q` is unusable for ShadowFS: it needs a successful stat(), but a
+# fail-closed ShadowFS mount returns EIO to any cgroup with no active epoch --
+# including this shell. The probe then fails, cleanup skips the unmount, and the
+# stale mount survives into the next run, where it makes the whole setup die with
+# EIO. /proc/self/mountinfo is pure kernel bookkeeping and always readable.
+# mountinfo field 5 is the mount point.
+_mount_layers() { awk -v t="$1" '$5 == t { n++ } END { print n+0 }' /proc/self/mountinfo; }
+
+# Unmount EVERY layer stacked at a path. Layers accumulate because the FUSE
+# mount over $ORIG_DIR is shared, so it propagates onto the $LOWER_DIR bind --
+# one extra layer per run if cleanup only ever removes one.
+_force_unmount() {
+    local path="$1" label="$2" n
+    n=$(_mount_layers "$path")
+    [[ "$n" -eq 0 ]] && return 0
+    step "Unmounting $label ($n layer(s) at $path)"
+    while [[ "$n" -gt 0 ]]; do
+        fusermount3 -u "$path" 2>/dev/null \
+            || umount "$path" 2>/dev/null \
+            || umount -l "$path" 2>/dev/null \
+            || break
+        local left; left=$(_mount_layers "$path")
+        [[ "$left" -ge "$n" ]] && break   # no progress: stop rather than spin
+        n="$left"
+    done
+    n=$(_mount_layers "$path")
+    [[ "$n" -eq 0 ]] || info "WARNING: $n mount layer(s) still at $path"
+}
+
 cleanup() {
     banner
     section "Cleaning up..."
@@ -73,18 +103,17 @@ cleanup() {
             wait "$pid" 2>/dev/null || true
         fi
     done
+    # Also reap a ShadowFS left over from an EARLIER run: its mount is what makes
+    # this run's setup fail, and $SHADOWFS_PID is empty when we did not start it.
+    pkill -f "shadowfs .*$ORIG_DIR" 2>/dev/null || true
 
-    if mountpoint -q "$ORIG_DIR" 2>/dev/null; then
-        step "Unmounting $ORIG_DIR"
-        fusermount3 -u "$ORIG_DIR" 2>/dev/null || umount "$ORIG_DIR" 2>/dev/null || true
-    fi
-    if mountpoint -q "$LOWER_DIR" 2>/dev/null; then
-        step "Unmounting backing bind $LOWER_DIR"
-        umount "$LOWER_DIR" 2>/dev/null || umount -l "$LOWER_DIR" 2>/dev/null || true
-    fi
+    # FUSE first (it sits on top), then every layer at the backing bind.
+    _force_unmount "$ORIG_DIR"  "ShadowFS mount"
+    _force_unmount "$LOWER_DIR" "backing bind"
+
     [[ -n "$SESSION_CG" && -d "$SESSION_CG" ]] && rmdir "$SESSION_CG" 2>/dev/null || true
 
-    rm -rf "$LOWER_DIR" "$ORIG_DIR" "$STAGING_DIR"
+    rm -rf "$LOWER_DIR" "$ORIG_DIR" "$STAGING_DIR" 2>/dev/null || true
     rm -f "$SHADOWFS_SOCK" "$SHADOWPROC_SOCK" "$ORCH_SOCK"
     info "Cleanup complete."
 }
@@ -153,6 +182,13 @@ build() {
 setup_stack() {
     section "Setting up environment"
 
+    # A previous run may have left a stale ShadowFS mount here. It is fail-closed,
+    # so every access from this shell returns EIO -- rm/mkdir/redirect all fail and
+    # the setup below dies. Clear it BEFORE touching the paths.
+    pkill -f "shadowfs .*$ORIG_DIR" 2>/dev/null || true
+    _force_unmount "$ORIG_DIR"  "stale ShadowFS mount"
+    _force_unmount "$LOWER_DIR" "stale backing bind"
+
     rm -rf "$ORIG_DIR" "$STAGING_DIR"
     mkdir -p "$ORIG_DIR" "$STAGING_DIR" "$LOWER_DIR"
 
@@ -160,7 +196,17 @@ setup_stack() {
     info "Seeded production data at $ORIG_DIR (original.txt)"
 
     mount --bind "$ORIG_DIR" "$LOWER_DIR"
-    mount --make-private "$LOWER_DIR" 2>/dev/null || true
+    # Stop mount propagation between the two. Without this the FUSE mount that
+    # ShadowFS puts over $ORIG_DIR (which inherits `shared` from /tmp) propagates
+    # onto this bind, so $LOWER_DIR ends up with a stacked fuse.rawBridge layer --
+    # one more on every run. Make BOTH sides private, and do not swallow the
+    # error: if propagation is not cut, the backing store silently becomes the
+    # FUSE mount instead of the real directory, which invalidates every
+    # host-side check in this demo.
+    mount --make-private "$LOWER_DIR" \
+        || { fail "cannot make $LOWER_DIR private (mount propagation would \
+ corrupt the backing store)"; exit 1; }
+    mount --make-private "$ORIG_DIR" 2>/dev/null || true
     info "Exposed same data to ShadowFS lower layer via private bind (no copy)"
 
     step "Starting ShadowFS (mounted over $ORIG_DIR)..."
@@ -179,7 +225,10 @@ setup_stack() {
     info "ShadowProc running (PID $SHADOWPROC_PID)"
 
     step "Starting Orchestrator..."
-    python3 "$ORCH_SCRIPT" --shadowfs-sock "$SHADOWFS_SOCK" \
+    # SHADOW_AGENT_WAIT_TIMEOUT is read by the orchestrator at startup, NOT by the
+    # client, so it has to be set here. Kept short so the agent-barrier section's
+    # "blocked" case fails fast instead of sitting on the 30s default.
+    SHADOW_AGENT_WAIT_TIMEOUT=2 python3 "$ORCH_SCRIPT" --shadowfs-sock "$SHADOWFS_SOCK" \
         --shadowproc-sock "$SHADOWPROC_SOCK" --listen "$ORCH_SOCK" \
         --shadowfs-mount "$ORIG_DIR" \
         --backing-dir "$STAGING_DIR:$LOWER_DIR" &
@@ -214,14 +263,28 @@ scenario() {
     SESSION_CG="/sys/fs/cgroup${CG}"
     info "session_id=$SID  cgroup_id=$CG"
 
-    # ── Baseline state (outside any epoch) ──
+    # ── Baseline state ──
+    # ShadowFS is fail-closed: it attributes every access by cgroup and denies
+    # anything coming from a cgroup with no ACTIVE epoch. Two consequences the
+    # checks below must respect:
+    #   1. A write to the mount from OUTSIDE an epoch never lands. So keep.txt is
+    #      seeded inside a committed setup epoch -- the same thing the replay
+    #      harness does via its dedicated setup epoch.
+    #   2. THIS SHELL cannot read the mount either: the demo runs in the user's
+    #      login cgroup, which never has an epoch, so `[ -f $ORIG_DIR/x ]` always
+    #      reports absent regardless of the real state. Host-side verification
+    #      therefore reads $LOWER_DIR (a plain bind of the backing store, no
+    #      FUSE in the way) -- which is exactly where ShadowFS promotes on commit.
     step "Seeding baseline: SHADOW_VAR=ORIGINAL + a persistent file keep.txt"
     orch session_run session_id="$SID" 'command=export SHADOW_VAR=ORIGINAL' >/dev/null
+    orch session_begin_epoch session_id="$SID" >/dev/null
     orch session_run session_id="$SID" "command=echo baseline > $ORIG_DIR/keep.txt" >/dev/null
     sleep 0.3
+    orch session_commit_epoch session_id="$SID" >/dev/null
+    sleep 0.4
     local base
     base=$(orch session_run session_id="$SID" 'command=echo VAL=$SHADOW_VAR' | jf output)
-    info "baseline env: $base ; keep.txt present: $([[ -f $ORIG_DIR/keep.txt ]] && echo yes || echo no)"
+    info "baseline env: $base ; keep.txt in backing store: $([[ -f $LOWER_DIR/keep.txt ]] && echo yes || echo no)"
 
     # ── Epoch 1: mutate speculatively, then ROLLBACK (expect lossless undo) ──
     banner
@@ -230,21 +293,34 @@ scenario() {
     orch session_run session_id="$SID" 'command=export SHADOW_VAR=MODIFIED_BY_AGENT' >/dev/null
     orch session_run session_id="$SID" "command=echo speculative > $ORIG_DIR/epoch1.txt" >/dev/null
     sleep 0.3
-    # In-epoch output is SPECULATIVE: it is held pending and NOT released to the
-    # caller before finalization (session_run returns status=pending, output=null).
-    # The file-layer write, by contrast, is visible in the mount immediately.
-    local e1_env e1_file
-    e1_env=$(orch session_run session_id="$SID" 'command=echo VAL=$SHADOW_VAR' | jf status)
-    e1_file=$([[ -f "$ORIG_DIR/epoch1.txt" ]] && echo present || echo absent)
-    check "in-epoch output pending" "$e1_env"  "pending"
-    check "in-epoch file"  "$e1_file" "present"
+    # In-epoch output is SPECULATIVE but is released to the caller IMMEDIATELY
+    # (optimistic release): the agent's context is internal state and may advance
+    # before finalization, while externally-visible effects stay gated by the
+    # epoch. So session_run returns status=ok with the speculative value, and the
+    # rollback below is what makes that value non-canonical again.
+    # The file-layer write is likewise visible in the mount immediately.
+    local e1_status e1_env e1_file
+    e1_status=$(orch session_run session_id="$SID" 'command=echo VAL=$SHADOW_VAR' | jf status)
+    e1_env=$(orch session_run session_id="$SID" 'command=echo VAL=$SHADOW_VAR' | jf output)
+    # Ask the SESSION whether it sees its own speculative write: an uncommitted
+    # write lives in the staging layer, so it is visible through the mount (to a
+    # cgroup that has an epoch) but NOT yet in the backing store.
+    e1_file=$(orch session_run session_id="$SID" \
+        "command=test -f $ORIG_DIR/epoch1.txt && echo present || echo absent" | jf output)
+    check "in-epoch output released" "$e1_status" "ok"
+    check "in-epoch speculative value" "$e1_env" "VAL=MODIFIED_BY_AGENT"
+    check "in-epoch file (session view)"  "$e1_file" "present"
+    # Not yet promoted: the backing store must still be clean pre-commit.
+    check "in-epoch file not yet in backing store" \
+        "$([[ -f $LOWER_DIR/epoch1.txt ]] && echo present || echo absent)" "absent"
 
     step ">>> ROLLBACK epoch 1 (discard candidate + undo file writes)..."
     orch session_rollback_epoch session_id="$SID" >/dev/null
     sleep 0.4
     local r1_env r1_file
     r1_env=$(orch session_run session_id="$SID" 'command=echo VAL=$SHADOW_VAR' | jf output)
-    r1_file=$([[ -f "$ORIG_DIR/epoch1.txt" ]] && echo present || echo absent)
+    # Backing store must be clean: the speculative write was never promoted.
+    r1_file=$([[ -f "$LOWER_DIR/epoch1.txt" ]] && echo present || echo absent)
     check "after-rollback env"  "$r1_env"  "VAL=ORIGINAL"
     check "after-rollback file" "$r1_file" "absent"
 
@@ -260,18 +336,74 @@ scenario() {
     sleep 0.4
     local c2_env c2_file
     c2_env=$(orch session_run session_id="$SID" 'command=echo VAL=$SHADOW_VAR' | jf output)
-    c2_file=$([[ -f "$ORIG_DIR/epoch2.txt" ]] && echo present || echo absent)
+    # Commit promotes into the backing store, so the host can now see it.
+    c2_file=$([[ -f "$LOWER_DIR/epoch2.txt" ]] && echo present || echo absent)
     check "after-commit env"  "$c2_env"  "VAL=COMMITTED_VALUE"
     check "after-commit file" "$c2_file" "present"
 
     # ── Baseline file untouched throughout ──
     local keep
-    keep=$([[ -f "$ORIG_DIR/keep.txt" ]] && echo present || echo absent)
+    keep=$([[ -f "$LOWER_DIR/keep.txt" ]] && echo present || echo absent)
     check "baseline keep.txt intact" "$keep" "present"
 
     step "Closing session..."
     orch session_close session_id="$SID" >/dev/null
     SESSION_CG=""
+
+    # ════════════════════════════════════════════════════════════
+    # Per-agent barrier: same agent serialized across sessions,
+    # different agent never blocks.
+    # ════════════════════════════════════════════════════════════
+    banner
+    section "Agent barrier — same agent serialized, different agent free"
+
+    # Open two sessions owned by the SAME agent.
+    local resp_a1 resp_a2 SID_A1 SID_A2
+    resp_a1=$(orch session_open agent_id=agent-alpha)
+    SID_A1=$(echo "$resp_a1" | jf session_id)
+    resp_a2=$(orch session_open agent_id=agent-alpha)
+    SID_A2=$(echo "$resp_a2" | jf session_id)
+    info "agent-alpha owns sessions $SID_A1 and $SID_A2"
+
+    # Open one session owned by a DIFFERENT agent.
+    local resp_b SID_B
+    resp_b=$(orch session_open agent_id=agent-beta)
+    SID_B=$(echo "$resp_b" | jf session_id)
+    info "agent-beta owns session $SID_B"
+
+    # Start an epoch on session A1. This claims agent-alpha's barrier slot.
+    local begin_a1
+    begin_a1=$(orch session_begin_epoch session_id="$SID_A1" agent_id=agent-alpha)
+    check "epoch on A1 opens" "$(echo "$begin_a1" | jf status)" "ok"
+
+    # Same agent's OTHER session (A2) should be BLOCKED: the barrier waits out
+    # its timeout and then reports agent_busy. Note `jf` prints the PYTHON repr
+    # of the parsed JSON value, so a JSON `true` comes back as `True`.
+    local begin_a2
+    begin_a2=$(orch session_begin_epoch session_id="$SID_A2" agent_id=agent-alpha 2>/dev/null)
+    check "same-agent second session blocked" "$(echo "$begin_a2" | jf agent_busy)" "True"
+
+    # Different agent (beta) must NOT be blocked.
+    local begin_b
+    begin_b=$(orch session_begin_epoch session_id="$SID_B" agent_id=agent-beta)
+    check "different agent not blocked" "$(echo "$begin_b" | jf status)" "ok"
+
+    # Commit A1's epoch -> frees agent-alpha's slot.
+    orch session_commit_epoch session_id="$SID_A1" agent_id=agent-alpha >/dev/null
+    sleep 0.3
+
+    # Now A2 should succeed (slot freed).
+    local begin_a2_retry
+    begin_a2_retry=$(orch session_begin_epoch session_id="$SID_A2" agent_id=agent-alpha)
+    check "same-agent proceeds after commit" "$(echo "$begin_a2_retry" | jf status)" "ok"
+
+    # Cleanup: rollback/close all three.
+    orch session_rollback_epoch session_id="$SID_A2" agent_id=agent-alpha >/dev/null 2>&1 || true
+    orch session_rollback_epoch session_id="$SID_B" agent_id=agent-beta >/dev/null 2>&1 || true
+    orch session_close session_id="$SID_A1" >/dev/null 2>&1 || true
+    orch session_close session_id="$SID_A2" >/dev/null 2>&1 || true
+    orch session_close session_id="$SID_B" >/dev/null 2>&1 || true
+    info "agent barrier tests complete"
 
     banner
     if $PASS; then

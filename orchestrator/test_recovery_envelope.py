@@ -73,7 +73,10 @@ class TestRecoveryEnvelope(unittest.TestCase):
         sess = _Session("sid", "cg", "/tmp")
         sess.live_pid = 100
         sess.epoch = {"baseline": 100, "candidate": 200, "fd_snapshots": []}
-        sess.epoch_buffer = ["speculative output"]
+        # Output is released optimistically now, so the epoch's output already
+        # sits in the transcript, tagged with the epoch that produced it.
+        sess.epoch_id = "e1"
+        sess.transcript = [(None, "canonical output"), ("e1", "speculative output")]
         proxy.sessions["sid"] = sess
 
         with mock.patch.object(proxy, "_quiesce_epoch"), \
@@ -86,7 +89,50 @@ class TestRecoveryEnvelope(unittest.TestCase):
 
         self.assertEqual(sess.live_pid, 100)
         self.assertIsNone(sess.epoch)
-        self.assertEqual(sess.epoch_buffer, ["speculative output"])
+        # Fail closed: a reject that aborted mid-way must NOT have dropped the
+        # epoch's entries, and must keep epoch_id so a retry can still drop
+        # exactly that epoch's output.
+        self.assertEqual(sess.transcript,
+                         [(None, "canonical output"), ("e1", "speculative output")])
+        self.assertEqual(sess.epoch_id, "e1")
+
+    def test_reject_tmp_restore_failure_is_retriable_not_fail_closed(self):
+        """Option C: tmp-state restore is idempotent/retriable, so its failure must
+        NOT wedge the session — reject still resumes the baseline and completes.
+
+        Contrast test_reject_fails_closed_when_pending_signal_remains: a pending
+        signal is NOT recoverable, so that path deliberately stays frozen.
+        """
+        proxy = self._proxy()
+        sess = _Session("sid", "cg", "/tmp")
+        sess.live_pid = 100
+        sess.epoch = {"baseline": 100, "candidate": 200, "fd_snapshots": [],
+                      "tmp_snapshot": "/nonexistent-snapshot"}
+        sess.epoch_id = "e1"
+        sess.transcript = [(None, "canonical"), ("e1", "speculative")]
+        proxy.sessions["sid"] = sess
+
+        with mock.patch.object(proxy, "_quiesce_epoch"), \
+             mock.patch.object(proxy, "_kill_descendants"), \
+             mock.patch.object(proxy, "_reap"), \
+             mock.patch.object(proxy, "_restore_fds"), \
+             mock.patch.object(proxy, "_wait_state_T", return_value=True), \
+             mock.patch.object(proxy, "_wait_wchan_read"), \
+             mock.patch.object(proxy, "_clear_pending_signals"), \
+             mock.patch.object(proxy, "_discard_epoch_tmp_snapshot"), \
+             mock.patch.object(
+                 proxy, "_restore_epoch_tmp_state",
+                 side_effect=RuntimeError("epoch tmp-state restore failed")):
+            # Must NOT raise: the failure is swallowed (logged) and reject finishes.
+            proxy.reject("sid")
+
+        # Baseline resumed -> the session stays usable.
+        self.assertIn("continue_pid", [action for action, _ in proxy.client.calls])
+        # Epoch fully torn down.
+        self.assertIsNone(sess.epoch)
+        self.assertIsNone(sess.epoch_id)
+        # Rejected epoch's output dropped from the transcript.
+        self.assertEqual(sess.transcript, [(None, "canonical")])
 
     def test_clear_pending_signals_fails_closed_on_pending_bits(self):
         proxy = self._proxy()
