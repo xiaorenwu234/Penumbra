@@ -213,18 +213,19 @@ void ObserveDaemon::serve(const std::string &sock_path) {
         return;
     }
 
-    /* Lock the socket down to owner rw only (0600) and restrict its containing
-     * directory to 0700. A co-located sandboxed agent must not be able to reach
-     * the control socket; peer identity is additionally checked on every
-     * accept (SO_PEERCRED). */
-    {
-        std::string dir = sock_path;
-        auto slash = dir.find_last_of('/');
-        if (slash != std::string::npos && slash != 0) {
-            dir.resize(slash);
-            chmod(dir.c_str(), 0700);
-        }
-    }
+    /* Lock the socket down to owner rw only (0600). Peer identity is
+     * additionally checked on every accept (SO_PEERCRED), which is what
+     * actually keeps a co-located sandboxed agent out.
+     *
+     * We deliberately do NOT chmod the socket's containing directory. This used
+     * to do chmod(dirname(sock_path), 0700), which for the normal socket path
+     * /tmp/<name>.sock means chmod("/tmp", 0700) -- as root that strips
+     * world access and the sticky bit from a SHARED system directory, breaking
+     * /tmp for every other process on the machine (and it is not undone on
+     * exit). Hardening our own socket must never mutate a directory we do not
+     * own. 0600 on the socket plus the SO_PEERCRED check already gives the
+     * intended protection; if stronger isolation is wanted, the caller should
+     * pass a socket path inside a directory the daemon created itself. */
     chmod(sock_path.c_str(), 0600);
 
     if (listen(listen_fd_, 16) < 0) {

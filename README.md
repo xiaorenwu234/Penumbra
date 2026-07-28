@@ -137,14 +137,14 @@ speculative_shadow/
 │
 ├── orchestrator/                  # Python - 统一编排器
 │   ├── shadow_orchestrator.py     # 编排器核心 + Unix socket API 服务
-│   ├── session_proxy.py           # Session Proxy：baseline/candidate 管理 + commit-gated 输出
+│   ├── session_proxy.py           # Session Proxy：baseline/candidate 管理 + 乐观输出释放
 │   ├── test_finalization.py       # finalization 路径单元测试
 │   ├── test_journal.py            # 持久化日志单元测试
 │   ├── test_log_integrity.py      # 日志完整性测试
 │   └── test_release_path.py       # 释放路径测试
 │
 ├── demo/                          # 端到端演示
-│   ├── run_demo.sh                # 主 demo（12 个场景：ShadowFS + ShadowProc）
+│   ├── run_demo.sh                # 【已禁用】依赖已删除的 cgroup 级 API，待重设计
 │   ├── run_demo_full.sh           # 完整 demo（三组件协同：审计通过/失败）
 │   ├── session_demo.sh            # Session Proxy demo（commit/reject 证明）
 │   ├── session_integrated_demo.sh # 统一 epoch demo（进程状态 + 文件系统原子 commit/rollback）
@@ -306,10 +306,6 @@ echo '{"action":"submit_policy","cgroup_id":"/shadow","allowed_ops":[
 #### 其他操作
 
 ```bash
-# 动态添加 cgroup
-echo '{"action":"add_cgroup","cgroup_path":"/sys/fs/cgroup/shadow-agent2"}' \
-  | socat - UNIX-CONNECT:/tmp/shadow-orch.sock
-
 # 查看活跃 agent
 echo '{"action":"list_agents"}' | socat - UNIX-CONNECT:/tmp/shadow-orch.sock
 
@@ -330,8 +326,8 @@ echo '{"action":"stop_observe","cgroup_id":"/shadow"}' \
 ### 4. 运行 Demo
 
 ```bash
-# 主 demo（12 个场景，ShadowFS + ShadowProc）
-sudo bash demo/run_demo.sh
+# 统一 epoch demo（推荐：session 模型的主 demo）
+sudo bash demo/session_integrated_demo.sh
 
 # 三组件协同 demo（审计通过/失败）
 sudo bash demo/run_demo_full.sh
@@ -347,18 +343,13 @@ sudo bash demo/session_integrated_demo.sh
 
 | Action | 参数 | 说明 |
 |--------|------|------|
-| `session_open` | `cgroup_name`（可选） | 打开 session，启动 bash 到监控 cgroup |
-| `session_run` | `session_id`, `command` | 在 session 中执行命令（epoch 内输出为 speculative） |
-| `session_begin_epoch` | `session_id` | 开始推测 epoch（冻结 baseline，fork candidate） |
-| `session_commit_epoch` | `session_id` | 提交 epoch（FS commit → 门控 → 进程 commit → 释放） |
-| `session_rollback_epoch` | `session_id` | 回滚 epoch（FS rollback → 进程 reject → 恢复 baseline） |
-| `session_get_output` | `session_id` | 获取 commit-gated 输出（仅已提交的 epoch） |
-| `session_close` | `session_id` | 关闭 session，清理资源 |
-| `commit` | `cgroup_id` | 提交文件变更 + 恢复进程（fail-closed 多步） |
-| `rollback` | `cgroup_id` | 级联回滚文件变更，杀死受影响进程 |
-| `add_cgroup` | `cgroup_path` | 动态添加 cgroup 到 ShadowProc 监控 |
-| `register_output` | `cgroup_id`, `output_file` | 注册 stdout 缓冲文件 |
-| `get_output` | `cgroup_id` | 获取已缓冲的输出 |
+| `session_open` | `agent_id`, `cgroup_name`（可选） | 打开 session，启动 bash 到监控 cgroup；`agent_id` 绑定所属 agent |
+| `session_run` | `session_id`, `command` | 在 session 中执行命令（输出乐观释放，按 epoch 标记写入 transcript） |
+| `session_begin_epoch` | `session_id`, `agent_id`（可选） | 开始推测 epoch（冻结 baseline，fork candidate）；同一 agent 串行化 |
+| `session_commit_epoch` | `session_id`, `agent_id`（可选） | 提交 epoch（FS commit → 门控 → 进程 commit → 释放） |
+| `session_rollback_epoch` | `session_id`, `agent_id`（可选） | 回滚 epoch（FS rollback → 进程 reject → 恢复 baseline） |
+| `session_get_output` | `session_id` | 获取 canonical 输出（已提交的 epoch；被回滚的段已从 transcript 中剔除） |
+| `session_close` | `session_id` | 关闭 session，释放 agent 槽位和资源 |
 | `list_agents` | - | 列出 ShadowFS 中所有活跃的 agent |
 | `list_frozen` | `cgroup_id`（可选） | 列出冻结进程，可按 cgroup 过滤 |
 | `list_completed` | `cgroup_id`（可选） | 列出已完成执行并被挂起的进程 |
@@ -468,17 +459,14 @@ sudo bash demo/session_integrated_demo.sh
 # 集成测试（需要 root 权限）
 sudo python3 tests/integration_test.py
 
-# 主 demo（12 个场景）
-sudo bash demo/run_demo.sh
+# 统一 epoch demo（进程 + 文件原子 commit/rollback，含 agent 屏障）
+sudo bash demo/session_integrated_demo.sh
 
 # 三组件协同 demo
 sudo bash demo/run_demo_full.sh
 
 # Session Proxy demo
 sudo bash demo/session_demo.sh
-
-# 统一 epoch demo（进程 + 文件原子 commit/rollback）
-sudo bash demo/session_integrated_demo.sh
 
 # 编排器单元测试
 python3 -m pytest orchestrator/test_finalization.py
@@ -489,26 +477,40 @@ python3 -m pytest orchestrator/test_release_path.py
 
 ## Demo 场景一览
 
-`demo/run_demo.sh` 演示 12 个场景：
+### 当前主 demo：`demo/session_integrated_demo.sh`
 
-| # | 场景 | 说明 |
-|---|------|------|
-| 1 | Commit | 文件写入 + IPC 冻结 → 提交文件并恢复进程 |
-| 2 | Rollback | 文件写入 + IPC 冻结 → 回滚文件并杀死进程 |
-| 3 | Cascade | Agent-A 写入 → Agent-B 读取 → 回滚 A 级联到 B |
-| 5 | Exit Hold | agent 完成执行 → 透明挂起 → commit 释放进程 |
-| 6 | Priv Escalation | 进程尝试 setuid(0) → eBPF 拦截 → 回滚 |
-| 7 | Deferred Release | 提交下游 B → 保持冻结直到上游 A 提交 → 释放 |
-| 8 | Bash Env Rollback | bash fork 子进程 → 修改环境变量 + connect() → 冻结 → COW 回滚 |
-| 9 | Modify Existing | 覆写已有文件 → rollback 恢复原始内容 / commit 持久化 |
-| 10 | Delete/Rename | 删除 + 重命名已有文件 → rollback 恢复 |
-| 11 | SysV IPC | shmat() 隐蔽通道 → 拦截 → 冻结 → 杀死 |
-| 12 | COW Commit | 修改全局变量 → COW 快照 → COMMIT 保留推测内存 |
+| 场景 | 说明 |
+|------|------|
+| Epoch 回滚 | 同一 epoch 内修改环境变量 + 写文件 → rollback 同时撤销两者，session 存活 |
+| Epoch 提交 | 同一 epoch 内修改两者 → commit 同时持久化，baseline 从未被扰动 |
+| 乐观输出释放 | epoch 内命令的输出立即可见，不等 commit |
+| 提交前不落盘 | epoch 内已写的文件尚未出现在后备存储 |
+| agent 屏障 | 同一 agent 的两个 session 串行化；不同 agent 不互相阻塞 |
 
-`demo/session_integrated_demo.sh` 演示统一 epoch：
+### 已禁用：`demo/run_demo.sh`
 
-- **Epoch 1 → ROLLBACK**：修改环境变量 + 写文件 → 两者均无损撤销
-- **Epoch 2 → COMMIT**：修改环境变量 + 写文件 → 两者均持久化
+该脚本依赖已删除的 cgroup 级 API（`add_cgroup` / `register_output` /
+`commit(cgroup_id)` / `rollback(cgroup_id)`），目前会直接报错退出。
+
+它无法机械式迁移：其 11 个场景都建立在“启动一个一次性程序 → eBPF 在执行中途
+将其冻结 → 按 cgroup 解决”这个形状上。而 `session_run` 等待完成哨兵，被冻结的
+程序永不返回，只会超时。session 模型中围栏作用于 candidate shell 自身的首次外部
+效应，由整个 epoch 的 commit/rollback 解决，调用方不会观察到第三方的冻结进程。
+
+因此以下能力目前**没有可运行的 demo**（能力本身仍在，仅缺演示）：
+
+| 能力 | 原场景 |
+|------|--------|
+| 执行中途围栏 + 先检查后解决 | Commit / Rollback |
+| 跳 agent 级联回滚 | Cascade |
+| 延迟释放 / 上游门控 | Deferred Release |
+| agent 退出处透明挂起 | Exit Hold |
+| 提权拦截 | Priv Escalation |
+| POSIX shm 拦截 | Shm Intercept |
+| 进程内存 COW commit/reject | Cow Commit / Bash Env Rollback |
+
+重新启用任一场景需要设计 session 模型下的等价表达（例如一个“不等命令完成即可
+检查/解决被围栏效应”的 API），而不是修改那个脚本。
 
 ## License
 

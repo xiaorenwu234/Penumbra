@@ -64,13 +64,17 @@ static __always_inline int enforcing(__u64 *cgroup_id_out)
     return bpf_map_lookup_elem(&enforce_enabled, &cgroup_id) != NULL;
 }
 
-/* Build the canonical path of `dentry`, then apply the shared prefix match. */
+/* Build the canonical path of `dentry`, then apply the shared prefix match.
+ * The path build also hands back the component-boundary prefix lengths, so the
+ * matcher probes only those candidates instead of rescanning the whole buffer. */
 static __always_inline int enforce_dentry(__u64 cgroup_id, __u16 event_type,
                                           struct dentry *dentry)
 {
     char path[CRI_MAX_PATH] = {};
-    int len = cri_build_path(dentry, path);
-    return cri_check_whitelist(&whitelist_rules, cgroup_id, event_type, path, len);
+    __u8 cand[CRI_MAX_DEPTH];
+    int len = cri_build_path_bounds(dentry, path, cand);
+    return cri_check_whitelist(&whitelist_rules, cgroup_id, event_type,
+                               path, len, cand);
 }
 
 /* ---- LSM hooks -------------------------------------------------------- */

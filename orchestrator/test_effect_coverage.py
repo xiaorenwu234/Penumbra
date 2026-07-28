@@ -58,7 +58,6 @@ def _bare_orch(proc_handler, fs_handler):
     orch = ShadowOrchestrator.__new__(ShadowOrchestrator)
     orch.proc_client = FakeClient(proc_handler)
     orch.fs_client = FakeClient(fs_handler)
-    orch._output_buffers = {}
     orch._pending_release = set()
     orch._pending_lock = threading.Lock()
     orch._pending_ack = set()
@@ -72,14 +71,6 @@ class _NullJournal:
 
     def append(self, *args, **kwargs):
         pass
-
-
-def _make_buffer(orch, cg, content="hello"):
-    fd, path = tempfile.mkstemp(prefix="shadow-out-")
-    os.write(fd, content.encode())
-    os.close(fd)
-    orch._output_buffers[cg] = path
-    return path
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -497,7 +488,6 @@ class TestThreePhaseEffectDecisions(unittest.TestCase):
         """SPECULATIVE/AUTHORIZED_PENDING: release without proc_policy ->
         continue_by_cgroup has no 'policy' key (allow-all semantics)."""
         orch = _bare_orch(self._proc_ok(), self._fs_ok)
-        _make_buffer(orch, "/cg-spec", content="spec-out\n")
         ok, out = orch._release_proc("/cg-spec")
         self.assertTrue(ok)
         resume = [c for c in orch.proc_client.calls
@@ -513,7 +503,6 @@ class TestThreePhaseEffectDecisions(unittest.TestCase):
             "endpoint": {"family": 2, "addr": 0, "port": 443},
         }]).to_proc_policy()
         orch = _bare_orch(self._proc_ok(), self._fs_ok)
-        _make_buffer(orch, "/cg-enf", content="enf-out\n")
         ok, out = orch._release_proc("/cg-enf", proc_policy=pp)
         self.assertTrue(ok)
         resume = [c for c in orch.proc_client.calls
@@ -698,7 +687,6 @@ class TestEffectCoverageMatrix(unittest.TestCase):
             with self.subTest(effect=label, phase="speculative"):
                 orch = _bare_orch(TestThreePhaseEffectDecisions()._proc_ok(),
                                   TestThreePhaseEffectDecisions()._fs_ok)
-                _make_buffer(orch, "/cg-spec", content="spec\n")
                 ok, _out = orch._release_proc("/cg-spec")
                 self.assertTrue(ok)
                 resume = [c for c in orch.proc_client.calls
@@ -708,7 +696,6 @@ class TestEffectCoverageMatrix(unittest.TestCase):
             with self.subTest(effect=label, phase="authorized_pending"):
                 orch = _bare_orch(TestThreePhaseEffectDecisions()._proc_ok(),
                                   TestThreePhaseEffectDecisions()._fs_ok)
-                _make_buffer(orch, "/cg-auth", content="auth\n")
                 ok, _out = orch._release_proc("/cg-auth")
                 self.assertTrue(ok)
                 resume = [c for c in orch.proc_client.calls
@@ -719,7 +706,6 @@ class TestEffectCoverageMatrix(unittest.TestCase):
                 pp = self._pp(event_name, endpoint=endpoint)
                 orch = _bare_orch(TestThreePhaseEffectDecisions()._proc_ok(),
                                   TestThreePhaseEffectDecisions()._fs_ok)
-                _make_buffer(orch, "/cg-enf", content="enf\n")
                 ok, _out = orch._release_proc("/cg-enf", proc_policy=pp)
                 self.assertTrue(ok)
                 resume = [c for c in orch.proc_client.calls

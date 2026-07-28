@@ -41,9 +41,13 @@ int main(int argc, char *argv[]) {
     close(fd);
 
     /* Now we're in the cgroup.
-     * If SHADOW_OUTPUT_FILE is set, redirect stdout/stderr to that file
-     * so the output is buffered (not visible until orchestrator commits).
-     * If not set, behavior is unchanged (backward compatible). */
+     * SHADOW_OUTPUT_FILE is DEPRECATED and normally unset. It used to pair with
+     * the orchestrator's register_output action, which withheld this output until
+     * commit and discarded it on rollback. That cgroup-level API is gone: output
+     * is now released optimistically and only externally-visible effects are
+     * gated, so nothing sets this variable any more. The redirect is kept only so
+     * an old caller that still sets it does not change behaviour unexpectedly.
+     * If not set, output goes to the inherited fd 1/2 as usual. */
     const char *output_file = getenv("SHADOW_OUTPUT_FILE");
     if (output_file) {
         int out_fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);

@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
-Unit tests for the orchestrator release path (_release_proc / _flush_output).
+Unit tests for the orchestrator release path (_release_proc).
 
-These exercise the fail-closed guarantee: a ShadowProc query/resume failure or
-an output-read failure must NOT ack the release, NOT consume the output buffer,
-and NOT drop pending state -- otherwise processes could stay frozen while
-ShadowFS has already dropped the Finalized terminal record.
+These exercise the fail-closed guarantee: a ShadowProc query/resume failure must
+NOT ack the release and NOT drop pending state -- otherwise processes could stay
+frozen while ShadowFS has already dropped the Finalized terminal record.
+
+Scope note: _release_proc no longer touches any cgroup-level stdout buffer. Under
+the session model tool output is released optimistically by SessionProxy.run and
+recorded in the session transcript, so there is nothing to pre-read or consume
+here; the second element of the returned tuple is always "". The tests that used
+to cover that buffer (pre-read failure, flush failure, buffer consumption) were
+removed together with the mechanism. The process-layer fail-closed ordering they
+shared is still covered below.
 
 No live services are needed: the orchestrator instance is built without its
 __init__ (which would open sockets and start the retry thread) and fed fake
@@ -14,7 +21,6 @@ socket clients with programmable responses.
 
 import os
 import sys
-import tempfile
 import threading
 import unittest
 
@@ -43,7 +49,6 @@ def _bare_orch(proc_handler, fs_handler):
     orch = ShadowOrchestrator.__new__(ShadowOrchestrator)
     orch.proc_client = FakeClient(proc_handler)
     orch.fs_client = FakeClient(fs_handler)
-    orch._output_buffers = {}
     orch._pending_release = set()
     orch._pending_lock = threading.Lock()
     orch._pending_ack = set()
@@ -62,16 +67,8 @@ def _fs_ok(req):
 
 
 class TestReleaseProcFailClosed(unittest.TestCase):
-    def _make_buffer(self, orch, cg, content="hello-stdout"):
-        fd, path = tempfile.mkstemp(prefix="shadow-out-")
-        os.write(fd, content.encode())
-        os.close(fd)
-        orch._output_buffers[cg] = path
-        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
-        return path
-
     def test_continue_by_cgroup_failure_no_ack(self):
-        """continue_by_cgroup error => (False,''), no ack, buffer preserved."""
+        """continue_by_cgroup error => (False,''), no ack."""
         cg = "cg-resume-fail"
 
         def proc(req):
@@ -82,7 +79,6 @@ class TestReleaseProcFailClosed(unittest.TestCase):
             return {"status": "ok"}
 
         orch = _bare_orch(proc, _fs_ok)
-        path = self._make_buffer(orch, cg)
 
         ok, out = orch._release_proc(cg)
 
@@ -90,13 +86,9 @@ class TestReleaseProcFailClosed(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertNotIn("ack_release", orch.fs_client.actions(),
                          "must NOT ack when processes are still frozen")
-        self.assertIn(cg, orch._output_buffers,
-                      "output buffer record must be preserved for retry")
-        self.assertTrue(os.path.exists(path),
-                        "buffered stdout file must not be consumed")
 
     def test_list_frozen_failure_no_ack(self):
-        """list_frozen error => (False,''), no resume, no ack, buffer kept."""
+        """list_frozen error => (False,''), no resume, no ack."""
         cg = "cg-query-fail"
 
         def proc(req):
@@ -105,7 +97,6 @@ class TestReleaseProcFailClosed(unittest.TestCase):
             raise AssertionError("continue_by_cgroup must not be attempted")
 
         orch = _bare_orch(proc, _fs_ok)
-        path = self._make_buffer(orch, cg)
 
         ok, out = orch._release_proc(cg)
 
@@ -113,36 +104,37 @@ class TestReleaseProcFailClosed(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertNotIn("continue_by_cgroup", orch.proc_client.actions())
         self.assertNotIn("ack_release", orch.fs_client.actions())
-        self.assertIn(cg, orch._output_buffers)
-        self.assertTrue(os.path.exists(path))
 
-    def test_flush_read_failure_preserves_buffer_no_ack(self):
-        """Output read failure => (False,''), no ack, record preserved."""
-        cg = "cg-flush-fail"
+    def test_baseline_discard_failure_before_resume(self):
+        """commit_by_cgroup (baseline discard) fails => must NOT resume, no ack.
+
+        The baseline discard runs BEFORE the resume precisely so that a failure
+        here leaves every process frozen and no external effect escapes.
+        """
+        cg = "cg-discard-fail"
 
         def proc(req):
-            # No frozen procs, so resume is skipped; only the flush can fail.
             if req["action"] == "list_frozen":
-                return {"status": "ok", "frozen": []}
+                return {"status": "ok", "frozen": [5, 6]}
+            if req["action"] == "commit_by_cgroup":
+                return {"status": "error", "message": "discard boom"}
+            if req["action"] == "continue_by_cgroup":
+                raise AssertionError(
+                    "must NOT resume when the baseline discard failed")
             return {"status": "ok"}
 
         orch = _bare_orch(proc, _fs_ok)
-        # Point the buffer at a directory: open() for read raises OSError
-        # (IsADirectoryError), which is a genuine read failure, not "missing".
-        bad = tempfile.mkdtemp(prefix="shadow-out-dir-")
-        self.addCleanup(lambda: os.path.isdir(bad) and os.rmdir(bad))
-        orch._output_buffers[cg] = bad
 
         ok, out = orch._release_proc(cg)
 
         self.assertFalse(ok)
         self.assertEqual(out, "")
+        self.assertNotIn("continue_by_cgroup", orch.proc_client.actions(),
+                         "processes must NOT be resumed after a discard failure")
         self.assertNotIn("ack_release", orch.fs_client.actions())
-        self.assertIn(cg, orch._output_buffers,
-                      "buffer record must survive a read failure")
 
-    def test_successful_release_acks_and_flushes(self):
-        """Happy path => (True, content), ack once, buffer consumed."""
+    def test_successful_release_acks(self):
+        """Happy path => (True, ''), ack exactly once."""
         cg = "cg-ok"
 
         def proc(req):
@@ -153,87 +145,17 @@ class TestReleaseProcFailClosed(unittest.TestCase):
             return {"status": "ok"}
 
         orch = _bare_orch(proc, _fs_ok)
-        path = self._make_buffer(orch, cg, content="done\n")
 
         ok, out = orch._release_proc(cg)
 
         self.assertTrue(ok)
-        self.assertEqual(out, "done\n")
+        self.assertEqual(out, "", "output now lives in the session transcript")
         self.assertEqual(orch.fs_client.actions().count("ack_release"), 1)
-        self.assertNotIn(cg, orch._output_buffers)
-        self.assertFalse(os.path.exists(path), "buffer file unlinked on success")
-
-    def test_commit_defers_when_release_fails(self):
-        """commit() keeps the cgroup fenced+pending when resume fails."""
-        cg = "cg-commit-defer"
-
-        def proc(req):
-            if req["action"] == "list_frozen":
-                return {"status": "ok", "frozen": [9]}
-            if req["action"] == "continue_by_cgroup":
-                return {"status": "error", "message": "resume boom"}
-            return {"status": "ok"}
-
-        def fs(req):
-            a = req["action"]
-            if a == "prepare_resolution":
-                return {"status": "ok", "group_id": 1,
-                        "members": ["epoch-1"], "graph_generation": 1}
-            if a == "begin_finalize":
-                return {"status": "ok", "state": "finalized"}
-            if a == "can_release":
-                return {"status": "ok", "releasable": True}
-            if a == "ack_release_group":
-                return {"status": "ok"}
-            return {"status": "ok"}
-
-        orch = _bare_orch(proc, fs)
-        self._make_buffer(orch, cg)
-
-        resp = orch.commit(cg)
-
-        self.assertEqual(resp["decision"], "authorized_pending")
-        self.assertFalse(resp["released"])
-        self.assertTrue(resp.get("deferred"))
-        self.assertEqual(resp["stdout"], "")
-        self.assertIn(1, orch._pending_groups,
-                      "group must stay parked for the retry loop")
-        self.assertNotIn("ack_release", orch.fs_client.actions(),
-                         "release must never be acked while procs stay frozen")
-
-    def test_output_preread_failure_before_resume(self):
-        """frozen != [] but output pre-read fails => must NOT resume, no ack,
-        buffer preserved. This is the ordering fix: the read failure fails
-        closed BEFORE any process is resumed, so no external effect escapes."""
-        cg = "cg-preread-fail"
-
-        def proc(req):
-            if req["action"] == "list_frozen":
-                return {"status": "ok", "frozen": [5, 6]}
-            if req["action"] == "continue_by_cgroup":
-                raise AssertionError("must NOT resume when output pre-read failed")
-            return {"status": "ok"}
-
-        orch = _bare_orch(proc, _fs_ok)
-        # Unreadable buffer (a directory): open() for read raises OSError.
-        bad = tempfile.mkdtemp(prefix="shadow-out-dir-")
-        self.addCleanup(lambda: os.path.isdir(bad) and os.rmdir(bad))
-        orch._output_buffers[cg] = bad
-
-        ok, out = orch._release_proc(cg)
-
-        self.assertFalse(ok)
-        self.assertEqual(out, "")
-        self.assertNotIn("continue_by_cgroup", orch.proc_client.actions(),
-                         "processes must NOT be resumed after a pre-read failure")
-        self.assertNotIn("ack_release", orch.fs_client.actions())
-        self.assertIn(cg, orch._output_buffers,
-                      "buffer record must survive a pre-read failure")
 
     def test_ack_failure_retries_ack_only(self):
-        """Resume + output succeed but ack fails => (True, content) with the
-        cgroup parked in _pending_ack; the ack-only retry then succeeds WITHOUT
-        re-resuming processes or re-flushing output."""
+        """Resume succeeds but ack fails => (True,'') with the cgroup parked in
+        _pending_ack; the ack-only retry then succeeds WITHOUT re-resuming or
+        re-querying processes."""
         cg = "cg-ack-fail"
 
         def proc(req):
@@ -255,16 +177,13 @@ class TestReleaseProcFailClosed(unittest.TestCase):
             return _fs_ok(req)
 
         orch = _bare_orch(proc, fs)
-        path = self._make_buffer(orch, cg, content="out\n")
 
         ok, out = orch._release_proc(cg)
 
         self.assertTrue(ok, "external effects released even though ack failed")
-        self.assertEqual(out, "out\n")
-        self.assertIn((cg, ""), orch._pending_ack, "failed ack must be parked for retry")
-        # Output was consumed (processes were resumed), so the file is gone.
-        self.assertNotIn(cg, orch._output_buffers)
-        self.assertFalse(os.path.exists(path))
+        self.assertEqual(out, "")
+        self.assertIn((cg, ""), orch._pending_ack,
+                      "failed ack must be parked for retry")
 
         # Ack-only retry: succeeds and must NOT resume or re-query processes.
         orch._retry_pending_acks()

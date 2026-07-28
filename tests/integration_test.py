@@ -152,34 +152,37 @@ def test_socket_connectivity():
 
 
 def test_orchestrator_commit(env: TestEnvironment):
-    """Test commit flow through orchestrator."""
-    print("\n=== Test: Orchestrator Commit ===")
+    """Commit flow through the session API.
+
+    Writes go through a SESSION inside an epoch, not directly from this process:
+    ShadowFS attributes every access by cgroup and is fail-closed, so a write
+    from the test process (whose cgroup has no active epoch) would be denied.
+    """
+    print("\n=== Test: Orchestrator Commit (session API) ===")
 
     orch = ShadowOrchestrator(SHADOWFS_SOCK, SHADOWPROC_SOCK)
-
-    # Create a test file and modify it through the mount
     env.create_test_file("test_commit.txt", "original content")
 
-    # Read the file through mount to register the agent
-    content = env.read_mounted_file("test_commit.txt")
-    assert content == "original content"
+    resp = orch.session_open(agent_id="itest-commit")
+    assert resp["status"] == "ok", f"session_open failed: {resp}"
+    sid = resp["session_id"]
+    print(f"  session_id={sid}")
 
-    # Commit (should be a no-op for read-only agent)
-    agents = orch.list_agents()
-    print(f"  Agents before commit: {agents}")
+    try:
+        begun = orch.session_begin_epoch(sid, "itest-commit")
+        assert begun["status"] == "ok", f"begin_epoch failed: {begun}"
 
-    # Write through the mount to create a real agent
-    env.write_mounted_file("test_commit.txt", "modified content")
+        target = os.path.join(env.mnt_dir, "test_commit.txt")
+        run = orch.session_run(sid, f"printf 'modified content' > {target}")
+        assert run["status"] == "ok", f"session_run failed: {run}"
 
-    agents = orch.list_agents()
-    print(f"  Agents after write: {agents}")
-
-    if agents:
-        result = orch.commit(agents[0])
+        result = orch.session_commit_epoch(sid, "itest-commit")
         print(f"  Commit result: {result}")
-        assert result["status"] == "ok"
+        assert result["status"] == "ok", f"commit failed: {result}"
+    finally:
+        orch.session_close(sid)
 
-    # Verify the orig file was updated
+    # Commit promotes into the backing store, so the host can read it directly.
     with open(os.path.join(env.orig_dir, "test_commit.txt"), "r") as f:
         final = f.read()
     print(f"  Final orig content: {repr(final)}")
@@ -190,25 +193,32 @@ def test_orchestrator_commit(env: TestEnvironment):
 
 
 def test_orchestrator_rollback(env: TestEnvironment):
-    """Test rollback flow through orchestrator."""
-    print("\n=== Test: Orchestrator Rollback ===")
+    """Rollback flow through the session API: the epoch's write must not land."""
+    print("\n=== Test: Orchestrator Rollback (session API) ===")
 
     orch = ShadowOrchestrator(SHADOWFS_SOCK, SHADOWPROC_SOCK)
-
-    # Create and modify a file
     env.create_test_file("test_rollback.txt", "original")
-    env.write_mounted_file("test_rollback.txt", "modified")
 
-    agents = orch.list_agents()
-    print(f"  Agents: {agents}")
-    assert len(agents) > 0, "Expected at least one agent"
+    resp = orch.session_open(agent_id="itest-rollback")
+    assert resp["status"] == "ok", f"session_open failed: {resp}"
+    sid = resp["session_id"]
+    print(f"  session_id={sid}")
 
-    # Rollback
-    result = orch.rollback(agents[0])
-    print(f"  Rollback result: {result}")
-    assert result["status"] == "ok"
+    try:
+        begun = orch.session_begin_epoch(sid, "itest-rollback")
+        assert begun["status"] == "ok", f"begin_epoch failed: {begun}"
 
-    # Verify orig is unchanged
+        target = os.path.join(env.mnt_dir, "test_rollback.txt")
+        run = orch.session_run(sid, f"printf 'modified' > {target}")
+        assert run["status"] == "ok", f"session_run failed: {run}"
+
+        result = orch.session_rollback_epoch(sid, "itest-rollback")
+        print(f"  Rollback result: {result}")
+        assert result["status"] == "ok", f"rollback failed: {result}"
+    finally:
+        orch.session_close(sid)
+
+    # Never promoted -> the backing store still holds the original.
     with open(os.path.join(env.orig_dir, "test_rollback.txt"), "r") as f:
         content = f.read()
     assert content == "original", f"Expected 'original', got {repr(content)}"

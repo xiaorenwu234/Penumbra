@@ -11,6 +11,14 @@
 #   2. Process runs: performs file operations in the cgroup
 #   3. submit_policy: Orchestrator freezes → audits → commit/rollback
 #
+# NOTE: this demo drives start_observe + submit_policy -- the audit/enforcement
+# path, which is unaffected by the move to the session model (submit_policy
+# resolves the epoch itself, via _rollback_proc, not via the removed
+# cgroup-level commit/rollback actions). The only thing that had to change is
+# the per-cgroup stdout buffer it used to register; see run_in_cgroup below.
+# Contrast demo/run_demo.sh, which IS disabled because its scenarios depend on
+# resolving an eBPF-fenced program by cgroup.
+#
 # Requirements:
 #   - Root privileges
 #   - Linux kernel >= 5.15 with BPF LSM enabled
@@ -94,6 +102,32 @@ info()    { echo -e "  ${GREEN}✓${NC} $1"; }
 warn()    { echo -e "  ${YELLOW}⚠${NC} $1"; }
 step()    { echo -e "  ${CYAN}→${NC} $1"; }
 fail()    { echo -e "  ${RED}✗${NC} $1"; }
+
+# Wait until a daemon's control socket actually exists.
+#
+# A blind `sleep N` plus a `kill -0 $PID` liveness check is NOT enough. Each
+# daemon prints its startup banner and only THEN does its slow initialization:
+# ShadowObserve's ObserveDaemon constructor loads eBPF (Enforcer) BEFORE
+# ObserveDaemon::serve() ever binds the socket. So the banner is on screen, the
+# PID is alive, and the socket still does not exist. The orchestrator's
+# SocketClient.connect() is fail-closed and aborts startup with
+# FileNotFoundError if it wins that race -- which is exactly what happened.
+wait_for_socket() {
+    local sock=$1 name=$2 pid=${3:-} tenths=${4:-300} n=0
+    while [[ ! -S "$sock" ]]; do
+        if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+            fail "$name exited before creating $sock"
+            return 1
+        fi
+        if (( n >= tenths )); then
+            fail "$name did not create $sock within $((tenths / 10))s"
+            return 1
+        fi
+        n=$((n + 1))
+        sleep 0.1
+    done
+    return 0
+}
 show_json() { echo "$1" | python3 -m json.tool 2>/dev/null || echo "$1"; }
 
 # ──────────────────────────── Cleanup ──────────────────────────────────────────
@@ -183,7 +217,7 @@ setup_env() {
         -allow-other \
         "$MNT_DIR" "$ORIG_DIR" &
     SHADOWFS_PID=$!
-    sleep 1
+    wait_for_socket "$SHADOWFS_SOCK" "ShadowFS" "$SHADOWFS_PID" || exit 1
     info "ShadowFS running (PID $SHADOWFS_PID)"
 
     # Start ShadowProc
@@ -192,14 +226,15 @@ setup_env() {
         --cgroup-path "$CGROUP_PATH" \
         --sock "$SHADOWPROC_SOCK" </dev/null &
     SHADOWPROC_PID=$!
-    sleep 2
+    wait_for_socket "$SHADOWPROC_SOCK" "ShadowProc" "$SHADOWPROC_PID" || exit 1
     info "ShadowProc running (PID $SHADOWPROC_PID)"
 
     # Start ShadowObserve
     step "Starting ShadowObserve daemon..."
     "$SHADOWOBSERVE_BIN" --sock "$SHADOWOBSERVE_SOCK" &
     SHADOWOBSERVE_PID=$!
-    sleep 1
+    # Its constructor loads eBPF before it binds, so this is the slow one.
+    wait_for_socket "$SHADOWOBSERVE_SOCK" "ShadowObserve" "$SHADOWOBSERVE_PID" || exit 1
     info "ShadowObserve running (PID $SHADOWOBSERVE_PID)"
 
     # Start Orchestrator (with ShadowObserve)
@@ -212,24 +247,57 @@ setup_env() {
         --shadowfs-mount "$ORIG_DIR" \
         --backing-dir "$STAGING_DIR" &
     ORCH_PID=$!
-    sleep 1
+    wait_for_socket "$ORCH_SOCK" "Orchestrator" "$ORCH_PID" || exit 1
     info "Orchestrator running (PID $ORCH_PID), socket=$ORCH_SOCK"
 
-    # Verify connectivity
+    # Verify connectivity. Gate on it: the orchestrator can die during __init__
+    # (its client connects are fail-closed), and continuing past that produced a
+    # misleading "running" line followed by every scenario failing for an
+    # unrelated-looking reason.
     step "Verifying connectivity..."
-    show_json "$(python3 "$ORCH_CLIENT" "$ORCH_SOCK" list_agents 2>&1)"
+    local conn
+    conn=$(python3 "$ORCH_CLIENT" "$ORCH_SOCK" list_agents 2>&1)
+    show_json "$conn"
+    if ! grep -q '"status": *"ok"' <<<"$conn"; then
+        fail "Orchestrator is not answering -- aborting (see its traceback above)"
+        exit 1
+    fi
 }
 
 # ──────────────────────────── Helpers ──────────────────────────────────────────
-SHADOW_OUTPUT_DIR="${SHADOW_OUTPUT_DIR:-/tmp/shadow-demo-full-outputs}"
 run_in_cgroup() {
-    mkdir -p "$SHADOW_OUTPUT_DIR"
-    local output_file="$SHADOW_OUTPUT_DIR/stdout-$$-$RANDOM"
-    : > "$output_file"
-    local cg_id="${SHADOW_CGROUP_ID_OVERRIDE:-/$CGROUP_NAME}"
-    python3 "$ORCH_CLIENT" "$ORCH_SOCK" register_output \
-        "cgroup_id=$cg_id" "output_file=$output_file" >/dev/null 2>&1 || true
-    SHADOW_OUTPUT_FILE="$output_file" "$CGROUP_EXEC" "$CGROUP_PATH/cgroup.procs" "$@"
+    # Launch a program inside the monitored cgroup. cgroup_exec writes nothing
+    # itself: it moves into the cgroup via cgroup.procs, then exec()s the target.
+    #
+    # Output is NOT buffered. This used to redirect fd 1/2 into a per-cgroup file
+    # registered via register_output, which the orchestrator released on commit and
+    # discarded on rollback. That mechanism went away with the cgroup-level API:
+    # output is now released optimistically (the caller sees it as soon as it is
+    # produced) and only externally-visible EFFECTS are gated. So the program's
+    # stdout/stderr go straight to this terminal.
+    "$CGROUP_EXEC" "$CGROUP_PATH/cgroup.procs" "$@"
+}
+
+# Register a speculative epoch in ShadowFS bound to the monitored cgroup.
+#
+# ShadowFS is fail-closed: EVERY FUSE operation is attributed to the calling
+# cgroup's active epoch, and a cgroup with NO active epoch gets EIO. The
+# observe/policy flow (start_observe + submit_policy) audits and finalizes an
+# epoch but never CREATES one -- the caller must. In the session model the
+# session does this via session_begin_epoch; here, driving the low-level
+# three-component path directly, we register the epoch on the ShadowFS socket
+# ourselves so the agent's writes land in a real epoch that submit_policy can
+# then commit (promote to orig) or roll back (discard).
+begin_epoch_for_cgroup() {
+    local cg_id=$1 epoch_id=$2 resp
+    resp=$(python3 "$ORCH_CLIENT" "$SHADOWFS_SOCK" begin_epoch \
+        "cgroup_id=$cg_id" "epoch_id=$epoch_id" 2>&1) || true
+    if ! grep -q '"status": *"ok"' <<<"$resp"; then
+        fail "ShadowFS begin_epoch failed:"
+        show_json "$resp"
+        return 1
+    fi
+    info "ShadowFS epoch '$epoch_id' bound to cgroup $cg_id"
 }
 
 get_cgroup_id() {
@@ -271,20 +339,33 @@ scenario_audit_pass() {
         "cgroup_id=$CGROUP_ID" "cgroup_inode=$CGROUP_INODE" 2>&1)
     show_json "$observe_resp"
 
+    local log_path
+    log_path=$(echo "$observe_resp" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('log_path',''))" 2>/dev/null || echo "")
+
+    # Step 1b: Register a speculative epoch in ShadowFS. Fail-closed attribution
+    # means the agent's write would EIO without an active epoch on its cgroup.
+    step "Step 1b: Registering a speculative epoch in ShadowFS..."
+    begin_epoch_for_cgroup "$CGROUP_ID" "demo-epoch-pass" || exit 1
+
     # Step 2: Agent performs file operations (writes to mount)
     step "Step 2: Agent writing file in cgroup..."
     run_in_cgroup "$AGENT_WORKER" "$MNT_DIR" "allowed_file.txt" "hello-allowed" &
     local AGENT_PID=$!
     sleep 2
 
-    # Verify file exists in mount
-    if [[ -f "$MNT_DIR/allowed_file.txt" ]]; then
-        info "allowed_file.txt in mount: $(cat "$MNT_DIR/allowed_file.txt")"
+    # The host shell sits in a different cgroup with no epoch, so it CANNOT read
+    # the speculative mount (ShadowFS returns EIO -- fail-closed). Prove the write
+    # happened via the observation log instead: ShadowObserve recorded the agent's
+    # file operations from inside the monitored cgroup.
+    if [[ -n "$log_path" ]] && grep -q "allowed_file.txt" "$log_path" 2>/dev/null; then
+        info "ShadowObserve recorded the agent's write to allowed_file.txt"
+    else
+        warn "observation log not yet flushed (it is sealed at submit_policy)"
     fi
 
     # Step 3: Submit policy (allows the operations that were performed)
     echo ""
-    step "Step 3: Submitting policy (ALLOW CREATE+OPEN on $MNT_DIR/)..."
+    step "Step 3: Submitting policy (ALLOW all observed effects)..."
     local policy_resp
     policy_resp=$(python3 -c "
 import json, socket, sys
@@ -295,11 +376,7 @@ req = {
     'action': 'submit_policy',
     'cgroup_id': '$CGROUP_ID',
     'allowed_ops': [
-        {'event_type': '*', 'action': 'allow', 'path_pattern': '$MNT_DIR/'},
-        {'event_type': '*', 'action': 'allow', 'path_pattern': '/tmp/'},
-        {'event_type': 'FORK', 'action': 'allow', 'path_pattern': ''},
-        {'event_type': 'EXEC', 'action': 'allow', 'path_pattern': ''},
-        {'event_type': 'EXIT', 'action': 'allow', 'path_pattern': ''}
+        {'event_type': '*', 'action': 'allow', 'path_pattern': ''}
     ]
 }
 f.write(json.dumps(req) + '\n')
@@ -351,19 +428,38 @@ scenario_audit_fail() {
         "cgroup_id=$CGROUP_ID" "cgroup_inode=$CGROUP_INODE" 2>&1)
     show_json "$observe_resp"
 
+    local log_path
+    log_path=$(echo "$observe_resp" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('log_path',''))" 2>/dev/null || echo "")
+
+    # Step 1b: Register a fresh speculative epoch for this scenario (scenario A's
+    # epoch was finalized by its commit). Same fail-closed rationale as above.
+    step "Step 1b: Registering a speculative epoch in ShadowFS..."
+    begin_epoch_for_cgroup "$CGROUP_ID" "demo-epoch-fail" || exit 1
+
     # Step 2: Agent writes to a restricted path
     step "Step 2: Agent writing file (will be denied by policy)..."
     run_in_cgroup "$AGENT_WORKER" "$MNT_DIR" "forbidden_file.txt" "should-be-rolled-back" &
     local AGENT_PID=$!
     sleep 2
 
-    if [[ -f "$MNT_DIR/forbidden_file.txt" ]]; then
-        info "forbidden_file.txt in mount (before audit): $(cat "$MNT_DIR/forbidden_file.txt")"
+    # Host cannot read the speculative mount (no epoch in its cgroup -> EIO);
+    # confirm the agent's write via the observation log instead.
+    if [[ -n "$log_path" ]] && grep -q "forbidden_file.txt" "$log_path" 2>/dev/null; then
+        info "ShadowObserve recorded the agent's write to forbidden_file.txt"
+    else
+        warn "observation log not yet flushed (it is sealed at submit_policy)"
     fi
 
-    # Step 3: Submit policy that DENIES the operation
+    # Step 3: Submit policy that DENIES the operation.
+    #
+    # PATH NAMESPACE: observed paths are canonicalized relative to the root of
+    # the filesystem the object lives on (see cri_build_path in bpf/cri.bpf.h),
+    # NOT to the global mount namespace. A file the agent creates inside the
+    # ShadowFS mount is therefore recorded as "/forbidden_file.txt", not as
+    # "$MNT_DIR/forbidden_file.txt". The deny rule must use that same namespace
+    # or it will never match (the audit would pass and nothing would roll back).
     echo ""
-    step "Step 3: Submitting policy (DENY all writes to $MNT_DIR/)..."
+    step "Step 3: Submitting policy (DENY CREATE of /forbidden_file.txt, allow everything else)..."
     local policy_resp
     policy_resp=$(python3 -c "
 import json, socket, sys
@@ -374,9 +470,8 @@ req = {
     'action': 'submit_policy',
     'cgroup_id': '$CGROUP_ID',
     'allowed_ops': [
-        {'event_type': 'CREATE', 'action': 'deny', 'path_pattern': '$MNT_DIR/'},
-        {'event_type': 'FORK', 'action': 'allow', 'path_pattern': ''},
-        {'event_type': 'EXIT', 'action': 'allow', 'path_pattern': ''}
+        {'event_type': '*', 'action': 'allow', 'path_pattern': ''},
+        {'event_type': 'CREATE', 'action': 'deny', 'path_pattern': '/forbidden_file.txt'}
     ]
 }
 f.write(json.dumps(req) + '\n')
@@ -395,15 +490,13 @@ print(resp.strip())
 
     if [[ "$decision" == "rolled_back" ]]; then
         info "Decision: ROLLED BACK (audit failed!)"
-        if [[ -f "$MNT_DIR/forbidden_file.txt" ]]; then
-            warn "forbidden_file.txt still in mount (rollback may have failed)"
-        else
-            info "forbidden_file.txt REMOVED from mount (rollback successful)"
-        fi
+        # The host cannot read the speculative mount (no epoch in its cgroup),
+        # so verify against the backing store: a rolled-back write must NEVER
+        # have been promoted into orig.
         if [[ -f "$ORIG_DIR/forbidden_file.txt" ]]; then
-            warn "forbidden_file.txt in orig (should not be)"
+            warn "forbidden_file.txt in orig (rollback FAILED to contain it)"
         else
-            info "forbidden_file.txt NOT in orig (correct)"
+            info "forbidden_file.txt NOT promoted to orig (rollback contained it)"
         fi
     else
         warn "Unexpected decision: $decision"

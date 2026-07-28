@@ -82,9 +82,20 @@ struct whitelist_key {
 };
 
 /*
- * cri_build_path - build the canonical absolute path of `dentry` into `buf`.
+ * cri_build_path_bounds - build the canonical absolute path of `dentry` into
+ * `buf`, and optionally record its component-boundary prefix lengths.
  *
  * `buf` MUST be at least CRI_MAX_PATH bytes.
+ *
+ * `cand`, if non-NULL, MUST be at least CRI_MAX_DEPTH bytes and receives the
+ * candidate prefix lengths for whitelist matching: after each component is
+ * appended, the running length is exactly one of the path's ancestor prefixes
+ * (the last one being the full path). Unused slots are left 0, which is never
+ * a valid length, so 0 reliably means "empty slot". Collecting them HERE is
+ * free -- this loop already knows every boundary, and it is unrolled, so the
+ * stores use compile-time indices. The alternative (rescanning all
+ * CRI_MAX_PATH byte offsets for '/' in the matcher) is what made the enforcer
+ * unverifiable; see cri_check_whitelist().
  *
  * Returns the string length (>=1) on success. The result is a normalized
  * absolute path: leading '/', single-'/' separators, no trailing '/' (root
@@ -103,11 +114,15 @@ struct whitelist_key {
  * negative return. cri_check_whitelist() already denies path_len <= 0, so
  * the enforce side fails closed automatically.
  */
-static __always_inline int cri_build_path(struct dentry *dentry, char *buf)
+static __always_inline int cri_build_path_bounds(struct dentry *dentry, char *buf,
+                                                 __u8 *cand)
 {
     struct dentry *dents[CRI_MAX_DEPTH] = {};
     int n = 0;
     int hit_root = 0;
+
+    if (cand)
+        __builtin_memset(cand, 0, CRI_MAX_DEPTH);
 
     /* Collect dentries from the leaf up toward the filesystem root. */
     #pragma unroll
@@ -151,17 +166,27 @@ static __always_inline int cri_build_path(struct dentry *dentry, char *buf)
         if (l >= CRI_NAME_MAX)
             return -3;          /* component truncated */
         pos += (int)l - 1;      /* exclude the NUL terminator */
+        if (cand)
+            cand[i] = (__u8)pos;  /* constant index: this loop is unrolled */
     }
 
     if (pos <= 0) {
         buf[0] = '/';           /* root, or nothing walked */
         buf[1] = '\0';
+        if (cand)
+            cand[0] = 1;        /* the only candidate prefix is "/" itself */
         return 1;
     }
     if (pos > CRI_MAX_PATH - 1)
         pos = CRI_MAX_PATH - 1;
     buf[pos] = '\0';
     return pos;
+}
+
+/* Path only, for callers that do not match against the whitelist (observer). */
+static __always_inline int cri_build_path(struct dentry *dentry, char *buf)
+{
+    return cri_build_path_bounds(dentry, buf, NULL);
 }
 
 /*
@@ -182,14 +207,25 @@ static __always_inline __u16 cri_setattr_event(unsigned int ia_valid)
 }
 
 /* Fill key->path_prefix with path[0..plen) followed by zeros, so the key byte-
- * matches a userspace-installed prefix (which is memcpy'd into a zeroed key). */
+ * matches a userspace-installed prefix (which is memcpy'd into a zeroed key).
+ *
+ * `plen` MUST be in [0, CRI_MAX_PATH-1]; callers guarantee this by rejecting
+ * longer paths outright (fail-closed).
+ *
+ * VERIFIER COST: this runs once per candidate prefix, so it must be cheap to
+ * VERIFY, not just to execute. A per-byte copy loop is the trap: CRI_MAX_PATH
+ * iterations of a handful of instructions each, re-verified for every candidate
+ * length, costs O(CRI_MAX_PATH^2) processed instructions and (with the branch
+ * states it forks) pushes prog load past the verifier's 1M ceiling -> -E2BIG.
+ * A constant-size memset plus one variable-length helper read compiles to a
+ * dozen wide stores and a single call, with no loop for the verifier to walk. */
 static __always_inline void cri_set_prefix(struct whitelist_key *key,
                                            const char *path, int plen)
 {
-    for (int j = 0; j < CRI_MAX_PATH; j++) {
-        char c = (j < plen) ? path[j] : '\0';
-        key->path_prefix[j] = c;
-    }
+    __builtin_memset(key->path_prefix, 0, CRI_MAX_PATH);
+    if (plen > 0)
+        bpf_probe_read_kernel(key->path_prefix,
+                              plen & (CRI_MAX_PATH - 1), path);
 }
 
 /*
@@ -198,15 +234,26 @@ static __always_inline void cri_set_prefix(struct whitelist_key *key,
  *
  * A rule prefix P matches `path` iff P is empty, or path == P, or path starts
  * with P followed by '/'. Equivalently, P is one of path's ancestor prefixes at
- * a '/' boundary (or path itself). We enumerate those candidate prefixes and
- * probe the map for both the exact event_type and the 0xFFFF wildcard. The
- * empty-prefix probe covers "allow this event on any path" / "allow everything".
+ * a '/' boundary (or path itself). `cand` carries exactly that set of lengths,
+ * recorded by cri_build_path_bounds(); we probe each for both the exact
+ * event_type and the 0xFFFF wildcard. The empty-prefix probe (done first, and
+ * not part of `cand`) covers "allow this event on any path" / "allow everything".
+ *
+ * VERIFIER COMPLEXITY: the trip count here is the binding constraint on whether
+ * the enforcer loads at all. Deriving the candidates by scanning every byte
+ * offset for '/' means CRI_MAX_PATH iterations, and because the body forks
+ * several branch states per iteration (two map lookups plus the boundary test)
+ * the verifier's work grows superlinearly with the trip count -- 128 offsets
+ * exhausted the 1M processed-instruction budget and prog load failed with
+ * -E2BIG. Iterating the CRI_MAX_DEPTH precomputed boundaries instead probes the
+ * IDENTICAL set of keys with an 8x smaller trip count.
  *
  * Returns 0 if allowed, -1 if denied.
  */
 static __always_inline int cri_check_whitelist(void *map, __u64 cgroup_id,
                                                __u16 event_type,
-                                               const char *path, int path_len)
+                                               const char *path, int path_len,
+                                               const __u8 *cand)
 {
     struct whitelist_key key = {};
     key.cgroup_id = cgroup_id;
@@ -226,17 +273,10 @@ static __always_inline int cri_check_whitelist(void *map, __u64 cgroup_id,
                        * NOT match a short truncated prefix that could widen */
 
     /* Candidates: every ancestor dir boundary, plus the full path itself. */
-    for (int L = 1; L <= CRI_MAX_PATH - 1; L++) {
-        if (L > path_len)
-            break;
-        int is_end = (L == path_len);
-        int is_boundary = 0;
-        if (!is_end) {
-            char c = path[L];
-            is_boundary = (c == '/');
-        }
-        if (!is_boundary && !is_end)
-            continue;
+    for (int i = 0; i < CRI_MAX_DEPTH; i++) {
+        int L = cand[i];
+        if (L <= 0 || L > path_len)
+            continue;           /* empty slot, or beyond this path */
 
         cri_set_prefix(&key, path, L);
         key.event_type = event_type;

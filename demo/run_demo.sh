@@ -2,15 +2,52 @@
 #
 # run_demo.sh — End-to-end demo for ShadowFS + ShadowProc integrated system.
 #
-# This script:
+# ============================================================================
+# STATUS: DISABLED — needs a redesign, not a mechanical port.
+#
+# This demo drives the cgroup-level orchestrator API that was removed when the
+# project unified on the session model:
+#     add_cgroup / register_output / commit(cgroup_id) / rollback(cgroup_id)
+#
+# It cannot be ported by swapping in session_* calls. Every one of its 11
+# scenarios is built on this shape:
+#
+#     run_in_cgroup <program> &        # launch a one-shot program in the cgroup
+#     wait_for_frozen $PID            # eBPF fences it MID-EXECUTION on connect()
+#     ...inspect the frozen state...
+#     commit|rollback cgroup_id=...    # resolve the fence by cgroup
+#
+# The session model cannot express that: session_run() waits for a completion
+# sentinel, so a program the fence froze mid-execution never returns and the
+# call just times out. In the session model the fence applies to the candidate
+# shell at ITS first external effect and is resolved by committing/rolling back
+# the whole epoch -- the caller never observes a third-party frozen process.
+#
+# So this is a genuine loss of demo coverage, recorded here rather than papered
+# over. The capabilities that no longer have a runnable demo:
+#   - fence-mid-execution + inspect-then-resolve (scenarios 1, 2)
+#   - cross-agent cascade rollback           (scenario_cascade)
+#   - deferred release / upstream gating     (scenario_deferred_release)
+#   - transparent hold at agent exit         (scenario_exit_hold)
+#   - priv-escalation fence                  (scenario_priv_escalation)
+#   - POSIX shm interception                 (scenario_shm_intercept)
+#   - process-memory COW commit/reject       (scenario_cow_commit,
+#                                             scenario_bash_env_rollback)
+#
+# For the current, supported end-to-end demo see:
+#     demo/session_integrated_demo.sh
+# which covers session epochs, file+process commit/rollback, optimistic output
+# release, and the per-agent barrier.
+#
+# Re-enabling any scenario above means designing a session-model equivalent
+# (e.g. an API to inspect/resolve a fenced effect without waiting for the
+# command to complete), not editing this file.
+# ============================================================================
+#
+# Original description:
 #   1. Builds ShadowFS (Go), ShadowProc (Rust), and test programs (C)
 #   2. Sets up cgroup v2, directories, and starts all components
-#   3. Runs three scenarios through the orchestrator:
-#      - Scenario 1: Commit  (file write + IPC freeze → commit)
-#      - Scenario 2: Rollback (file write + IPC freeze → rollback)
-#      - Scenario 3: Cascade rollback (A writes → B reads A → rollback A → B also rolled back)
-#      - Scenario 7: Deferred release (commit downstream B → held frozen until
-#                    upstream A commits → then released)
+#   3. Runs the scenarios listed above through the orchestrator
 #   4. Cleans up everything
 #
 # Requirements:
@@ -19,11 +56,28 @@
 #   - cgroup v2 mounted at /sys/fs/cgroup
 #   - Go, Rust (cargo), gcc installed
 #
-# Usage:
-#   sudo bash demo/run_demo.sh
-#
 
 set -euo pipefail
+
+cat >&2 <<'DISABLED'
+
+  run_demo.sh is DISABLED.
+
+  It drives the cgroup-level orchestrator API (add_cgroup / register_output /
+  commit / rollback), which was removed when the project unified on the session
+  model. Its scenarios rely on launching a one-shot program that the eBPF fence
+  freezes MID-EXECUTION, then resolving that by cgroup -- a shape session_run()
+  cannot express (it waits for a completion sentinel, so a frozen program just
+  times out).
+
+  Use the supported demo instead:
+      sudo bash demo/session_integrated_demo.sh
+
+  See the comment block at the top of this file for the exact list of
+  capabilities that currently have no runnable demo.
+
+DISABLED
+exit 1
 
 # ──────────────────── Fix PATH for sudo ─────────────────────────────────────────
 # When running via sudo, ~/.cargo/bin and /usr/local/go/bin may not be in PATH.

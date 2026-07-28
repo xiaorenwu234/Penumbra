@@ -61,7 +61,6 @@ def _bare_orch(observe_handler, proc_handler=_proc_ok, fs_handler=_fs_ok):
     orch.proc_client = FakeClient(proc_handler)
     orch.fs_client = FakeClient(fs_handler)
     orch._observe_state = {CG: {"log_path": LOG, "cgroup_inode": INODE}}
-    orch._output_buffers = {}
     orch._pending_release = set()
     orch._pending_lock = threading.Lock()
     return orch

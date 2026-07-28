@@ -57,7 +57,6 @@ def _bare_orch(proc_handler, fs_handler):
     orch = ShadowOrchestrator.__new__(ShadowOrchestrator)
     orch.proc_client = FakeClient(proc_handler)
     orch.fs_client = FakeClient(fs_handler)
-    orch._output_buffers = {}
     orch._pending_release = set()
     orch._pending_lock = threading.Lock()
     orch._pending_ack = set()
@@ -69,14 +68,6 @@ def _bare_orch(proc_handler, fs_handler):
 class TestReleaseProcDiscardsBaseline(unittest.TestCase):
     """_release_proc must commit_by_cgroup (discard baselines) before the full
     release, and fail closed if that discard fails."""
-
-    def _make_buffer(self, orch, cg, content="hello"):
-        fd, path = tempfile.mkstemp(prefix="shadow-out-")
-        os.write(fd, content.encode())
-        os.close(fd)
-        orch._output_buffers[cg] = path
-        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
-        return path
 
     def test_commit_by_cgroup_precedes_continue(self):
         """Happy path: commit_by_cgroup is issued BEFORE continue_by_cgroup."""
@@ -93,12 +84,11 @@ class TestReleaseProcDiscardsBaseline(unittest.TestCase):
             return {"status": "ok"}
 
         orch = _bare_orch(proc, _fs_ok)
-        self._make_buffer(orch, cg, content="done\n")
 
         ok, out = orch._release_proc(cg)
 
         self.assertTrue(ok)
-        self.assertEqual(out, "done\n")
+        self.assertEqual(out, "", "output now lives in the session transcript")
         acts = orch.proc_client.actions()
         self.assertIn("commit_by_cgroup", acts)
         self.assertIn("continue_by_cgroup", acts)
@@ -108,7 +98,7 @@ class TestReleaseProcDiscardsBaseline(unittest.TestCase):
         self.assertEqual(orch.fs_client.actions().count("ack_release"), 1)
 
     def test_commit_by_cgroup_failure_fails_closed(self):
-        """commit_by_cgroup error => (False,''): NO resume, NO ack, buffer kept."""
+        """commit_by_cgroup error => (False,''): NO resume, NO ack."""
         cg = "cg-commit-fail"
 
         def proc(req):
@@ -122,7 +112,6 @@ class TestReleaseProcDiscardsBaseline(unittest.TestCase):
             return {"status": "ok"}
 
         orch = _bare_orch(proc, _fs_ok)
-        path = self._make_buffer(orch, cg)
 
         ok, out = orch._release_proc(cg)
 
@@ -130,8 +119,6 @@ class TestReleaseProcDiscardsBaseline(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertNotIn("continue_by_cgroup", orch.proc_client.actions())
         self.assertNotIn("ack_release", orch.fs_client.actions())
-        self.assertIn(cg, orch._output_buffers, "buffer preserved for retry")
-        self.assertTrue(os.path.exists(path))
 
 
 class FakeProxy:

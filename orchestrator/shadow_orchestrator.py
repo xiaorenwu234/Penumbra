@@ -6,6 +6,27 @@ Manages the lifecycle of all three components and coordinates commit/rollback
 operations across the filesystem layer (ShadowFS), the process layer
 (ShadowProc), and the observation/enforcement layer (ShadowObserve).
 
+Execution model -- SESSIONS ONLY.
+An agent opens a long-lived SESSION (a persistent shell in a monitored cgroup)
+and performs each tool call as a speculative EPOCH inside it:
+
+    session_open(agent_id) -> session_begin_epoch -> session_run* ->
+    session_commit_epoch | session_rollback_epoch -> ... -> session_close
+
+There is exactly one epoch lifecycle. The older cgroup-level entry points
+(add_cgroup / register_output / commit / rollback, driven by the cgroup_exec
+launcher) were removed: they were a second, parallel lifecycle with its own
+file-based commit-gated stdout buffer, and none of the session model's
+guarantees applied to them -- optimistic output release, the per-agent barrier,
+and the thaw-on-failure / retriable-reject semantics all live on the session
+path. Group-level (multi-cgroup) finalization is unaffected: it is keyed by
+ShadowFS epoch IDs and resolved via list_agents, so it spans sessions.
+
+Tool output is NOT buffered here. SessionProxy releases it to the caller as soon
+as the command completes (optimistic release / external synchrony) and records
+it in the session transcript, tagged with the epoch that produced it so a reject
+can drop exactly that segment.
+
 Usage:
     # As a library
     from shadow_orchestrator import ShadowOrchestrator
@@ -395,9 +416,7 @@ class ShadowOrchestrator:
         self._pending_groups: Dict[int, Dict[str, Any]] = {}
         self._pending_group_lock = threading.Lock()
 
-        # Track stdout buffer files: cgroup_id → output_file_path
-        # Populated via register_output(); flushed on commit; discarded on rollback.
-        self._output_buffers: Dict[str, str] = {}
+
         # ── Per-agent serialization ────────────────────────────────────────
         # Output is now released optimistically (see SessionProxy.run), so the
         # only ordering left to enforce is: one agent must not start its NEXT
@@ -635,95 +654,6 @@ class ShadowOrchestrator:
         self._prune_epoch_results()
         log.info("Journal recovery: %d session(s), %d committed-pending, %d undecided",
                  len(state["sessions"]), len(state["committed"]), len(state["undecided"]))
-
-    def add_cgroup(self, cgroup_path: str) -> dict:
-        """
-        Register a new cgroup for monitoring by ShadowProc.
-
-        Args:
-            cgroup_path: Filesystem path to the cgroup
-                         (e.g., /sys/fs/cgroup/user.slice/shadow)
-        """
-        resp = self.proc_client.request({
-            "action": "add_cgroup",
-            "cgroup_path": cgroup_path,
-        })
-        if resp["status"] != "ok":
-            log.error("add_cgroup failed: %s", resp.get("message"))
-        else:
-            log.info("Registered cgroup: %s", cgroup_path)
-        return resp
-
-    def register_output(self, cgroup_id: str, output_file: str) -> dict:
-        """
-        Register a stdout/stderr buffer file for a cgroup.
-
-        Launchers (e.g. cgroup_exec via SHADOW_OUTPUT_FILE env) redirect the
-        agent's stdout/stderr into this file. The buffered output is only
-        released to the caller on commit; on rollback it is discarded.
-        """
-        self._output_buffers[cgroup_id] = output_file
-        log.info("Registered stdout buffer for cgroup=%s → %s",
-                 cgroup_id, output_file)
-        return {"status": "ok", "output_file": output_file}
-
-    def _peek_output(self, cgroup_id: str) -> Tuple[bool, str]:
-        """Read the buffered stdout for a cgroup WITHOUT removing the record or
-        deleting the file.
-
-        Returns (ok, content). A missing buffer (never registered or file
-        already gone) is success with empty content. A genuine read error
-        (OSError) returns (False, "") and leaves the buffer intact, so the
-        caller can fail closed BEFORE resuming any process.
-        """
-        output_file = self._output_buffers.get(cgroup_id)
-        if not output_file:
-            return True, ""
-        try:
-            with open(output_file, "r", errors="replace") as f:
-                return True, f.read()
-        except FileNotFoundError:
-            return True, ""
-        except OSError as e:
-            log.warning("Failed to read buffered stdout %s: %s -- preserving "
-                        "buffer for retry", output_file, e)
-            return False, ""
-
-    def _consume_output(self, cgroup_id: str) -> None:
-        """Remove the buffer record and unlink its file. Called ONLY after the
-        output has been successfully pre-read (see _peek_output) AND the
-        processes have been resumed, so a failure earlier cannot lose output.
-        """
-        output_file = self._output_buffers.pop(cgroup_id, None)
-        if output_file:
-            try:
-                os.unlink(output_file)
-            except OSError:
-                pass
-
-    def _discard_output(self, cgroup_id: str) -> None:
-        """Discard the buffered stdout for a cgroup (used on rollback)."""
-        output_file = self._output_buffers.pop(cgroup_id, None)
-        if output_file:
-            try:
-                os.unlink(output_file)
-            except OSError:
-                pass
-
-    def get_buffered_output(self, cgroup_id: str) -> dict:
-        """Return the current buffered stdout for a cgroup without flushing it."""
-        output_file = self._output_buffers.get(cgroup_id)
-        if not output_file:
-            return {"status": "ok", "output": "", "buffered": False}
-        try:
-            with open(output_file, "r", errors="replace") as f:
-                content = f.read()
-            return {"status": "ok", "output": content, "buffered": True,
-                    "output_file": output_file}
-        except FileNotFoundError:
-            return {"status": "ok", "output": "", "buffered": False}
-        except OSError as e:
-            return {"status": "error", "message": str(e)}
 
     def _fs_can_release(self, cgroup_id: str, epoch_id: Optional[str] = None) -> bool:
         """Ask ShadowFS whether a cgroup's external side effects are safe to
@@ -1598,9 +1528,12 @@ class ShadowOrchestrator:
                       proc_policy: Optional[Dict] = None) -> Tuple[bool, str]:
         """
         Resume ShadowProc's frozen processes for a cgroup (letting their
-        held IPC / network / exit operations proceed), flush the cgroup's
-        buffered stdout to the caller, and finally ACK the release to ShadowFS
-        so it can drop the finalized agent's terminal record.
+        held IPC / network / exit operations proceed), and ACK the release to
+        ShadowFS so it can drop the finalized agent's terminal record.
+
+        Tool output is NOT handled here: under the session model it is released
+        optimistically by SessionProxy.run and recorded in the session
+        transcript, so there is no cgroup-level output buffer to flush.
 
         ``proc_policy`` (P0-5): an optional fine-grained process-layer policy
         dict (see PolicyIR.to_proc_policy) forwarded to ShadowProc's
@@ -1613,24 +1546,22 @@ class ShadowOrchestrator:
         MUST only be called for a cgroup ShadowFS has confirmed Finalized
         (see _fs_can_release).
 
-        Ordering is chosen so an output-read failure fails CLOSED before any
-        process is resumed:
+        Ordering:
           1. query frozen processes
-          2. PRE-READ the buffered output (without deleting it)
-          3. discard baselines (commit_by_cgroup) -- FS is already finalized
-          4. resume the processes (continue_by_cgroup, full release)
-          5. consume (delete) the output buffer
-          6. ack the release to ShadowFS
+          2. discard baselines (commit_by_cgroup) -- FS is already finalized
+          3. resume the processes (continue_by_cgroup, full release)
+          4. ack the release to ShadowFS
 
-        Returns (ok, stdout). If the process query/resume, the output PRE-READ,
-        or the baseline discard (commit_by_cgroup) fails, returns (False, "")
-        WITHOUT resuming, WITHOUT consuming the output buffer, and WITHOUT
-        acking -- the caller keeps the cgroup fenced and parked for retry.
+        Returns (ok, ""). If the process query/resume or the baseline discard
+        (commit_by_cgroup) fails, returns (False, "") WITHOUT resuming and
+        WITHOUT acking -- the caller keeps the cgroup fenced and parked for
+        retry. The second tuple element is retained for call-site compatibility
+        and is always empty now that output lives in the session transcript.
 
-        Once processes are resumed AND the output consumed, the external
-        effects are OUT: this returns (True, stdout) even if the final
-        ack_release fails. A failed ack does NOT re-fence -- the cgroup is
-        parked in _pending_ack for an ACK-ONLY retry (never re-resumed).
+        Once processes are resumed the external effects are OUT: this returns
+        (True, "") even if the final ack_release fails. A failed ack does NOT
+        re-fence -- the cgroup is parked in _pending_ack for an ACK-ONLY retry
+        (never re-resumed).
         """
         # Step 1: query frozen processes. A failed/unreachable query means we
         # cannot know the process state -- do not proceed.
@@ -1648,19 +1579,10 @@ class ShadowOrchestrator:
                       cgroup_id, frozen_resp)
             return False, ""
 
-        # Step 2: PRE-READ the buffered output WITHOUT consuming it. Doing this
-        # BEFORE resuming means a read failure fails closed with the processes
-        # still frozen -- no external effect has escaped.
-        read_ok, buffered = self._peek_output(cgroup_id)
-        if not read_ok:
-            log.error("  Output pre-read failed for cgroup=%s -- NOT resuming/"
-                      "acking (fail closed; buffer preserved)", cgroup_id)
-            return False, ""
-
-        # Step 3: discard baselines (commit_by_cgroup) BEFORE full-releasing. FS
+        # Step 2: discard baselines (commit_by_cgroup) BEFORE full-releasing. FS
         # is already finalized so the file epoch is canonical; this discards the
         # frozen process baselines so they can't linger. Failure is fail-closed:
-        # do NOT resume / consume / ack.
+        # do NOT resume / ack.
         try:
             commit_resp = self.proc_client.request({
                 "action": "commit_by_cgroup",
@@ -1675,8 +1597,8 @@ class ShadowOrchestrator:
                       "(processes stay frozen; will retry)", cgroup_id, commit_resp)
             return False, ""
 
-        # Step 4: resume the frozen processes (if any). A resume failure leaves
-        # them frozen, so we must NOT consume the output or ack.
+        # Step 3: resume the frozen processes (if any). A resume failure leaves
+        # them frozen, so we must NOT ack.
         frozen = frozen_resp.get("frozen") or []
         if frozen:
             log.info("  Releasing %d frozen process(es) for cgroup=%s",
@@ -1702,26 +1624,19 @@ class ShadowOrchestrator:
                 return False, ""
             log.info("  Resumed PIDs: %s", resume_resp.get("pids", []))
 
-        # Step 5: processes are resumed -- now it is safe to consume (delete)
-        # the buffered stdout we already read.
-        self._consume_output(cgroup_id)
-        if buffered:
-            log.info("  Releasing %d bytes of buffered stdout for cgroup=%s",
-                     len(buffered), cgroup_id)
-
-        # Step 6: external effects are OUT -- ack so ShadowFS drops the record.
+        # Step 4: external effects are OUT -- ack so ShadowFS drops the record.
         # A failed ack does NOT re-fence (effects already released); park it
         # for an ack-only retry instead. When skip_ack is set (group-level
         # release), the caller performs a single group ack_release_group after
         # all members are released.
         if skip_ack:
-            return True, buffered
+            return True, ""
         if not self._fs_ack_release(cgroup_id):
             with self._pending_ack_lock:
                 self._pending_ack.add((cgroup_id, ""))
             log.warning("  ack_release(%s) failed -- external effects already "
                         "released; parked for ack-only retry", cgroup_id)
-        return True, buffered
+        return True, ""
 
     def _try_release_pending(self) -> None:
         """
@@ -1750,96 +1665,6 @@ class ShadowOrchestrator:
             # Also finish group-level retries and ack-only retries.
             self._retry_pending_groups()
             self._retry_pending_acks()
-
-    def commit(self, cgroup_id: str) -> dict:
-        """
-        Commit (authorize) a cgroup's session and release it iff it finalizes.
-
-        Result semantics (fs_resp["decision"]):
-          - "finalized":         ShadowFS promoted all file state and every
-                                 upstream is finalized. Processes resumed,
-                                 network un-fenced, stdout flushed, release
-                                 acked. fs_resp["released"]=True.
-          - "authorized_pending": policy approved but promotion and/or upstream
-                                 finalization is not complete (or a promotion
-                                 failed). The cgroup stays FENCED: processes
-                                 frozen, network fenced, stdout buffered. It is
-                                 parked for the background finalize-retry loop.
-                                 fs_resp["released"]=False, "deferred"=True.
-
-        NOTE: this NEVER runs a rollback. A commit whose promotion partially
-        failed must not be rolled back (some paths may already be promoted);
-        the safe action is to stay fenced and retry finalization.
-        """
-        log.info("COMMIT cgroup=%s", cgroup_id)
-
-        with self._release_lock:
-            # Step 1: GROUP-LEVEL file finalization (Phase 3).
-            fs_result = self._fs_group_finalize(None, cgroup_id,
-                                                proc_policy=self._allow_all_proc_policy())
-            if fs_result.get("status") != "ok":
-                log.error("  ShadowFS group finalize failed: %s",
-                          fs_result.get("message"))
-                with self._pending_lock:
-                    self._pending_release.add(cgroup_id)
-                return {"status": "error", "decision": "authorized_pending",
-                        "released": False, "deferred": True,
-                        "message": fs_result.get("message", ""), "stdout": ""}
-            if fs_result.get("state") != "finalized":
-                self._park_pending_group(fs_result.get("group_id", 0),
-                                         fs_result.get("members", []),
-                                         fs_result.get("graph_generation", 0),
-                                         fs_result.get("member_cgroups", []),
-                                         fs_result.get("member_policies", {}),
-                                         released_cgroups=set(),
-                                         ack_pending=False,
-                                         primary_cgroup=cgroup_id,
-                                         epoch_id="",
-                                         phase=GROUP_FINALIZING)
-                log.info("  cgroup=%s authorized but NOT finalized -- keeping "
-                         "processes frozen, network fenced, stdout buffered "
-                         "(background retry will finalize)", cgroup_id)
-                return {"status": "ok", "decision": "authorized_pending",
-                        "released": False, "deferred": True,
-                        "message": fs_result.get("finalize_err", ""),
-                        "stdout": ""}
-            log.info("  ShadowFS group %d finalized: %d members",
-                     fs_result["group_id"], len(fs_result["members"]))
-
-            # Step 2: Release ALL group members + group ack (P0-7). The group
-            # finalization already confirmed Finalized; _release_group_members
-            # resumes every SCC member (not just the primary cgroup), issues
-            # the group ack, and re-evaluates deferred downstream cgroups.
-            all_output, released_ok = self._release_group_members(
-                fs_result["group_id"], fs_result["members"],
-                fs_result["graph_generation"], cgroup_id,
-                journal_release_intent=False)
-            stdout = all_output.get(cgroup_id, "")
-            if released_ok:
-                with self._pending_lock:
-                    self._pending_release.discard(cgroup_id)
-                result = {"status": "ok", "decision": "finalized",
-                          "released": True, "stdout": stdout,
-                          "group_id": fs_result["group_id"],
-                          "members": fs_result["members"]}
-            else:
-                self._park_pending_group(fs_result.get("group_id", 0),
-                                         fs_result.get("members", []),
-                                         fs_result.get("graph_generation", 0),
-                                         fs_result.get("member_cgroups", []),
-                                         fs_result.get("member_policies", {}),
-                                         released_cgroups=set(),
-                                         ack_pending=False,
-                                         primary_cgroup=cgroup_id,
-                                         epoch_id="",
-                                         phase=GROUP_RELEASING)
-                log.warning("  cgroup=%s finalized but process/output release "
-                            "failed -- keeping fenced, deferred for retry",
-                            cgroup_id)
-                result = {"status": "ok", "decision": "authorized_pending",
-                          "released": False, "deferred": True, "stdout": ""}
-
-        return result
 
     def _rollback_proc(self, cgroup_id: str) -> dict:
         """
@@ -1953,9 +1778,7 @@ class ShadowOrchestrator:
             total_resumed.extend(res["resumed"])
             total_killed.extend(res["killed"])
 
-        # Discard buffered stdout + drop deferred releases for the undone cgroups.
-        for cg in kill_cgroups:
-            self._discard_output(cg)
+        # Drop deferred releases for the undone cgroups.
         self._cleanup_after_rollback(kill_cgroups, affected_epochs)
 
         # Cleanup observation state.
@@ -1969,59 +1792,6 @@ class ShadowOrchestrator:
             "killed_pids": total_killed,
             "resumed_pids": total_resumed,
         }
-
-    def rollback(self, cgroup_id: str) -> dict:
-        """
-        Rollback changes for a cgroup (with cascade).
-
-        Flow:
-        1. Tell ShadowFS to rollback (returns affected cgroup list).
-        2. For each affected cgroup, kill any frozen processes in ShadowProc.
-
-        Args:
-            cgroup_id: The cgroup identifier (path from /proc/<pid>/cgroup)
-        """
-        log.info("ROLLBACK cgroup=%s", cgroup_id)
-
-        # Step 1: Rollback in ShadowFS (cascade)
-        fs_resp = self.fs_client.request({
-            "action": "rollback",
-            "cgroup_id": cgroup_id,
-        })
-        if fs_resp["status"] != "ok":
-            log.error("  ShadowFS rollback failed: %s", fs_resp.get("message"))
-            return fs_resp
-
-        affected = fs_resp.get("affected", [])
-        affected_epochs = fs_resp.get("affected_epochs", [])
-        log.info("  ShadowFS rollback successful, affected cgroups: %s", affected)
-
-        # Step 2: Roll back the process layer for all affected cgroups. Each
-        # long-lived speculative session is restored to its pristine baseline
-        # (lossless); only non-versioned frozen processes are killed.
-        total_killed = []
-        total_resumed = []
-        for affected_cgroup in affected:
-            res = self._rollback_proc(affected_cgroup)
-            total_resumed.extend(res["resumed"])
-            total_killed.extend(res["killed"])
-
-        if total_resumed:
-            log.info("  Total baselines restored: %d", len(total_resumed))
-        if total_killed:
-            log.info("  Total killed processes: %d", len(total_killed))
-
-        # Discard buffered stdout for all affected cgroups.
-        for affected_cgroup in affected:
-            self._discard_output(affected_cgroup)
-        self._discard_output(cgroup_id)
-
-        # Drop any deferred releases for cgroups/epochs undone by this cascade:
-        # their processes were rolled back, so there is nothing to release.
-        self._cleanup_after_rollback(affected + [cgroup_id], affected_epochs)
-
-        return {"status": "ok", "affected": affected,
-                "killed_pids": total_killed, "resumed_pids": total_resumed}
 
     def list_agents(self) -> List[str]:
         """List all active ShadowFS agents."""
@@ -3011,9 +2781,6 @@ class ShadowOrchestrator:
             if total_killed:
                 log.info("  Killed PIDs: %s", total_killed)
 
-            # Discard buffered stdout for all affected cgroups
-            for cg in kill_cgroups:
-                self._discard_output(cg)
             self._cleanup_after_rollback(kill_cgroups, affected_epochs)
 
             # Cleanup observation state
@@ -3041,10 +2808,16 @@ class OrchestratorServer:
     Protocol: JSON-line request/response (same pattern as ShadowFS/ShadowProc).
 
     Supported actions:
-        commit, rollback, add_cgroup, list_agents, list_frozen, get_affected,
-        start_observe, stop_observe, submit_policy,
         session_open, session_run, session_begin_epoch, session_commit_epoch,
         session_rollback_epoch, session_get_output, session_close
+        list_agents, list_frozen, list_completed, get_affected,
+        get_epoch_result, start_observe, stop_observe, drain_violations,
+        submit_policy
+
+    The session_* actions are the ONLY execution path; the rest are
+    audit/observability. The former cgroup-level actions (commit, rollback,
+    add_cgroup, register_output, get_output) were removed -- see the module
+    docstring.
     """
 
     def __init__(self, orchestrator: ShadowOrchestrator, listen_path: str):
@@ -3110,35 +2883,7 @@ class OrchestratorServer:
         cgroup_path = req.get("cgroup_path", "")
 
         try:
-            if action == "commit":
-                if not cgroup_id:
-                    return {"status": "error", "message": "cgroup_id required"}
-                return self.orch.commit(cgroup_id)
-
-            elif action == "rollback":
-                if not cgroup_id:
-                    return {"status": "error", "message": "cgroup_id required"}
-                return self.orch.rollback(cgroup_id)
-
-            elif action == "add_cgroup":
-                if not cgroup_path:
-                    return {"status": "error", "message": "cgroup_path required"}
-                return self.orch.add_cgroup(cgroup_path)
-
-            elif action == "register_output":
-                if not cgroup_id:
-                    return {"status": "error", "message": "cgroup_id required"}
-                output_file = req.get("output_file", "")
-                if not output_file:
-                    return {"status": "error", "message": "output_file required"}
-                return self.orch.register_output(cgroup_id, output_file)
-
-            elif action == "get_output":
-                if not cgroup_id:
-                    return {"status": "error", "message": "cgroup_id required"}
-                return self.orch.get_buffered_output(cgroup_id)
-
-            elif action == "list_agents":
+            if action == "list_agents":
                 agents = self.orch.list_agents()
                 return {"status": "ok", "agents": agents}
 
