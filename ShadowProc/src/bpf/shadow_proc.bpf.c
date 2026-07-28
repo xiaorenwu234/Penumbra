@@ -1461,7 +1461,8 @@ int BPF_PROG(shadow_sys_mount, struct pt_regs *regs)
     return system_guard(165, EVENT_SYSTEM_MOUNT);
 }
 
-SEC("fmod_ret/__x64_sys_umount2")
+/* umount2(2) 的内核实现是 SYSCALL_DEFINE2(umount, ...)，符号名无 "2" 后缀 */
+SEC("fmod_ret/__x64_sys_umount")
 int BPF_PROG(shadow_sys_umount2, struct pt_regs *regs)
 {
     return system_guard(166, EVENT_SYSTEM_MOUNT);
@@ -1537,15 +1538,23 @@ int BPF_PROG(shadow_sys_ioctl, struct pt_regs *regs)
     if (!fdt)
         goto block;
     unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
+    // An fd outside the fd table cannot name an open file: the syscall is
+    // guaranteed to fail with EBADF before touching anything, so it has no
+    // external effect to fence.  This case is not exotic -- bash probes job
+    // control with ioctl(-1, TIOCSPGRP) on every startup, and fencing that
+    // froze the shell before it could run a single command.  Note the
+    // difference from the goto block cases: there we could not *read* the fd
+    // table and stay fail-closed; here we positively established the fd is
+    // not open.
     if (fd >= max_fds || fd > 1023)
-        goto block;
+        return 0;
     struct file **fd_array = BPF_CORE_READ(fdt, fd);
     if (!fd_array)
         goto block;
     struct file *f = NULL;
     bpf_probe_read_kernel(&f, sizeof(f), &fd_array[fd]);
     if (!f)
-        goto block;
+        return 0;  // closed slot -> EBADF, same reasoning as above
     struct inode *inode = BPF_CORE_READ(f, f_inode);
     if (!inode)
         goto block;

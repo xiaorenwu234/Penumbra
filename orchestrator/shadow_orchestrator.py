@@ -950,14 +950,14 @@ class ShadowOrchestrator:
         poll_count = 0
         while state == "pending":
             poll_count += 1
-            if poll_count > 300:  # 30s timeout
+            if poll_count > 1500:  # 30s timeout (at 20ms interval)
                 log.warning("  finalize poll timeout (30s) for group %d", group_id)
                 return {"status": "ok", "group_id": group_id, "members": members,
                         "graph_generation": graph_gen, "state": "pending",
                         "finalize_err": "poll timeout",
                         "member_cgroups": member_cgroups,
                         "member_policies": policies}
-            time.sleep(0.1)
+            time.sleep(0.02)
             try:
                 status = self.fs_client.request({
                     "action": "get_finalize_status",

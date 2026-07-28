@@ -43,6 +43,7 @@ import itertools
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -302,7 +303,7 @@ class SpeculationDomainLauncher:
         #    silently skipped remount would leave those vectors writable.
         for p in ("/proc", "/sys", "/sys/fs/cgroup"):
             if os.path.ismount(p):
-                _mount("", p, None, _MS_REMOUNT | _MS_RDONLY)
+                self._remount_ro(p)
 
         # 10. Block access to ShadowFS backing directories (staging, lower).
         #     Mount a read-only tmpfs over each to prevent direct access.
@@ -318,6 +319,37 @@ class SpeculationDomainLauncher:
         for p in self._MASKED_PATHS:
             if os.path.exists(p):
                 self._mask_path(p)
+
+    @staticmethod
+    def _remount_ro(path):
+        """Make `path` read-only in THIS mount namespace.
+
+        MS_REMOUNT|MS_BIND changes only this mount's flags, which is what we
+        actually want: a private namespace must not alter what other namespaces
+        see, and a plain MS_REMOUNT targets the SUPERBLOCK -- shared with every
+        other mount of it, including ones outside this namespace.  Plain
+        MS_REMOUNT is kept as a fallback for filesystems that reject the bind
+        form.
+
+        A mount that is already read-only satisfies the requirement; anything
+        else propagates the original error rather than being skipped, since a
+        silently writable /proc or cgroupfs is an escape vector.
+        """
+        try:
+            _mount("", path, None, _MS_REMOUNT | _MS_BIND | _MS_RDONLY)
+            return
+        except OSError as bind_err:
+            try:
+                _mount("", path, None, _MS_REMOUNT | _MS_RDONLY)
+                return
+            except OSError:
+                pass
+            try:
+                already_ro = bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+            except OSError:
+                already_ro = False
+            if not already_ro:
+                raise bind_err
 
     @staticmethod
     def _mask_path(path):
@@ -407,14 +439,28 @@ class ShadowProcClient:
 
 
 # ──────────────────────────── Session state ────────────────────────────────
+# Where a session's control files (stdin FIFO + transcript log) live.
+#
+# Deliberately NOT under the ephemeral tmp roots (/tmp, /var/tmp, /run,
+# /dev/shm) that the speculation domain replaces per candidate.  These files are
+# proxy-owned infrastructure, not workload state; with them under /tmp every
+# session held a regular fd into a rollback-unsafe tmp path, which
+# _reject_tmp_regular_fds correctly refused -- so no session could ever enter a
+# speculative epoch at all.  Overridable for unprivileged test runs.
+_SESSION_DIR = os.environ.get("SHADOW_SESSION_DIR",
+                              "/var/lib/shadow-proxy/sessions")
+
+
 class _Session:
     def __init__(self, session_id, cgroup_name, cgroup_root):
         self.id = session_id
         self.cgroup_name = cgroup_name
         self.cgroup_id = "/" + cgroup_name                     # ShadowProc form
         self.cgroup_path = os.path.join(cgroup_root, cgroup_name)
-        self.fifo_path = f"/tmp/shadow-session-{session_id}.fifo"
-        self.log_path = f"/tmp/shadow-session-{session_id}.log"
+        self.fifo_path = os.path.join(
+            _SESSION_DIR, f"shadow-session-{session_id}.fifo")
+        self.log_path = os.path.join(
+            _SESSION_DIR, f"shadow-session-{session_id}.log")
         self.fifo_wfd = None        # held-open write end (keeps FIFO from EOF)
         self.live_pid = None        # current canonical pid (agent never sees it)
         self.epoch = None           # {"baseline": pid, "candidate": pid} or None
@@ -475,6 +521,57 @@ class SessionProxy:
             if self._proc_state(pid) == "T":
                 return True
             time.sleep(0.05)
+        return False
+
+    @staticmethod
+    def _read_wchan(pid):
+        """Read the kernel wait-channel name for a process.
+
+        Returns the wchan string (e.g. 'pipe_read', 'do_wait') or '' if
+        unreadable.  A process blocked in its stdin read() shows 'pipe_read'
+        (or 'pipe_wait' on some kernels).
+        """
+        try:
+            with open(f"/proc/{pid}/wchan") as fh:
+                return fh.read().strip()
+        except OSError:
+            return ""
+
+    def _wait_wchan_read(self, pid, timeout=1.0, poll_interval=0.005):
+        """Wait until *pid* is blocked in a pipe/read wait-channel.
+
+        Replaces the legacy time.sleep(0.3) that blindly waited for the
+        process to settle back into its read() boundary.  Polls
+        /proc/<pid>/wchan every *poll_interval* seconds; returns True as
+        soon as the wchan indicates a read/pipe/poll block, False on timeout.
+
+        The fallback sleep on timeout is a short 20ms (not the original
+        300ms) — if wchan is unreadable the process is almost certainly
+        already at its boundary (the only case where wchan is '0' or
+        empty is when the process is in userspace between syscalls, which
+        for bash lasts < 1ms before it re-enters read()).
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            wc = self._read_wchan(pid)
+            # 'pipe_read' (≥5.10), 'pipe_wait' (some kernels), 'poll_schedule_timeout'
+            # (if stdin is a pty), 'do_select' — all mean the process is blocked
+            # waiting for input, which is exactly the boundary we need.
+            if wc and ("pipe" in wc or "read" in wc or "poll" in wc
+                       or "select" in wc or "wait" in wc):
+                return True
+            # wchan == '0' or '' means the process is in userspace (between
+            # syscalls).  For bash this transient window is < 1ms; if we see
+            # it, the process is alive and about to re-enter read().
+            if wc == "0" or wc == "":
+                # Give it one more poll cycle to land in read().
+                time.sleep(poll_interval)
+                wc2 = self._read_wchan(pid)
+                if wc2 and wc2 != "0":
+                    return True
+            time.sleep(poll_interval)
+        # Timeout: fall back to a short conservative sleep (20ms, not 300ms).
+        time.sleep(0.02)
         return False
 
     @staticmethod
@@ -855,13 +952,26 @@ class SessionProxy:
 
     def _namespace_copy_worker(self, pid: int, snapshot_dir: str,
                                restore: bool) -> None:
-        parent_root = f"/proc/{os.getppid()}/root"
-        host_snapshot = parent_root + snapshot_dir
+        # The snapshot lives in the HOST mount namespace while the tmp state to
+        # copy lives in the session's.  Pin the snapshot directory as an fd
+        # BEFORE setns (the fd keeps its mount alive), then fchdir back onto it
+        # afterwards: setns(CLONE_NEWNS) resets both root and cwd to the new
+        # namespace's root, so after the fchdir absolute paths resolve in the
+        # session's namespace and relative paths in the host snapshot -- exactly
+        # the split this copy needs.  Addressing the snapshot through
+        # /proc/<ppid>/root instead would depend on /proc still being the host's
+        # procfs and on ppid still being the proxy; the pinned fd depends on
+        # neither.
+        snap_fd = os.open(snapshot_dir, os.O_RDONLY | os.O_DIRECTORY)
         self._setns_mount(pid)
+        try:
+            os.fchdir(snap_fd)
+        finally:
+            os.close(snap_fd)
         tmp_paths = ("/tmp", "/dev/shm", "/var/tmp", "/run")
         if restore:
             for p in tmp_paths:
-                src = os.path.join(host_snapshot, p.lstrip("/"))
+                src = p.lstrip("/")          # relative -> host snapshot
                 if not os.path.isdir(src):
                     continue
                 os.makedirs(p, exist_ok=True)
@@ -884,11 +994,10 @@ class SessionProxy:
                     else:
                         shutil.copy2(s, d, follow_symlinks=False)
         else:
-            os.makedirs(host_snapshot, exist_ok=True)
             for p in tmp_paths:
                 if not os.path.isdir(p):
                     continue
-                dst = os.path.join(host_snapshot, p.lstrip("/"))
+                dst = p.lstrip("/")          # relative -> host snapshot
                 if os.path.exists(dst):
                     shutil.rmtree(dst)
                 shutil.copytree(p, dst, symlinks=True, ignore_dangling_symlinks=True)
@@ -947,6 +1056,7 @@ class SessionProxy:
 
         # Fresh FIFO + log. Hold the FIFO open O_RDWR so the shell never sees
         # EOF and our writes never block.
+        os.makedirs(os.path.dirname(sess.fifo_path), exist_ok=True)
         for p in (sess.fifo_path, sess.log_path):
             try:
                 os.remove(p)
@@ -956,25 +1066,27 @@ class SessionProxy:
         # O_CLOEXEC so the held write end does not leak into bash across exec().
         sess.fifo_wfd = os.open(sess.fifo_path, os.O_RDWR | os.O_CLOEXEC)
 
-        # Launch bash after the trusted parent has placed the child pid into
-        # the monitored cgroup. The child waits on a pipe before creating its
-        # read-only mount namespace; this avoids the old cgroup_exec ordering
-        # where /sys/fs/cgroup was remounted read-only before cgroup.procs was
-        # written, causing EROFS/EPERM and a failed shell launch.
+        # Launch order is load-bearing.  Everything privileged the child needs
+        # to build its speculation domain -- unshare(CLONE_NEWNS), the tmpfs/bind
+        # covers, the read-only remounts -- happens BEFORE the parent moves it
+        # into the monitored cgroup.  ShadowProc treats a monitored cgroup as
+        # MODE_SPECULATIVE by default, i.e. every hooked operation is fenced
+        # (SIGSTOP + notify), and `unshare` IS hooked, so a child that set up its
+        # domain from inside the cgroup would be frozen mid-setup and never reach
+        # exec -- the guard deadlocking its own setup.  The child therefore
+        # reports "domain ready" over a reverse pipe, the parent enrolls it in the
+        # cgroup, and only then does the child exec the shell -- from that instant
+        # on every effect the workload attempts is genuinely fenced.
         stdin_fd = os.open(sess.fifo_path, os.O_RDONLY | os.O_CLOEXEC)   # won't block: writer open
         log_fd = os.open(sess.log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o644)
         ready_r, ready_w = os.pipe2(os.O_CLOEXEC)
+        # Reverse channel: child -> parent, "speculation domain is built".
+        domain_r, domain_w = os.pipe2(os.O_CLOEXEC)
         pid = os.fork()
         if pid == 0:  # child
             os.close(ready_w)
+            os.close(domain_r)
             try:
-                # Wait until the trusted parent has written this child PID into
-                # cgroup.procs. Only then may the child remount cgroupfs
-                # read-only inside its private namespace.
-                token = os.read(ready_r, 1)
-                os.close(ready_r)
-                if token != b"1":
-                    os._exit(126)
                 # Become a session leader with no controlling terminal BEFORE
                 # anything else: the speculation domain must not inherit the
                 # orchestrator's ctty.  Terminal state is not rollback-safe,
@@ -998,9 +1110,34 @@ class SessionProxy:
                         sys.stderr.write(
                             f"[proxy] WARNING: domain isolation failed: {e}"
                             " — continuing without isolation\n")
+                # Domain is built; it is now safe to be enrolled in the
+                # monitored cgroup.
+                os.write(domain_w, b"1")
+                os.close(domain_w)
+                token = os.read(ready_r, 1)
+                os.close(ready_r)
+                if token != b"1":
+                    os._exit(126)
                 os.dup2(stdin_fd, 0)
                 os.dup2(log_fd, 1)
                 os.dup2(log_fd, 2)
+                # Close every other inherited fd before exec.  When the proxy is
+                # driven in-process there is nothing to leak, but when it runs
+                # inside the Orchestrator the fork() inherits the accepted
+                # control-connection socket (and possibly the listening socket).
+                # A live socket fd on the baseline is not snapshot-safe, so
+                # admission control would reject every epoch with "socket fd N".
+                # closerange is used rather than scanning /proc/self/fd so this
+                # stays correct in a mount namespace whose /proc is not ours; the
+                # leaked fds are always low, and the range is capped so a huge
+                # RLIMIT_NOFILE can't make this slow.
+                try:
+                    _maxfd = os.sysconf("SC_OPEN_MAX")
+                    if _maxfd < 0 or _maxfd > 65536:
+                        _maxfd = 65536
+                except (ValueError, OSError):
+                    _maxfd = 4096
+                os.closerange(3, _maxfd)
                 os.execvp("bash", ["bash", "--norc"])
             except OSError as e:
                 # Domain setup failure (unshare, mount, etc.).
@@ -1009,7 +1146,19 @@ class SessionProxy:
             except Exception:  # noqa: BLE001 — child must not return
                 os._exit(127)
         os.close(ready_r)
+        os.close(domain_w)
         try:
+            # The child must have finished building its speculation domain
+            # before we move it into the monitored cgroup; otherwise the fence
+            # stops it mid-setup.  A bounded wait keeps a wedged child from
+            # hanging the caller forever; EOF means the child died reporting
+            # failure.
+            r, _, _ = select.select([domain_r], [], [], 15.0)
+            token = os.read(domain_r, 1) if r else b""
+            if token != b"1":
+                raise RuntimeError(
+                    "session shell failed to build its speculation domain"
+                    + (" (timed out)" if not r else ""))
             with open(os.path.join(sess.cgroup_path, "cgroup.procs"), "w") as f:
                 f.write(str(pid))
             os.write(ready_w, b"1")
@@ -1021,6 +1170,7 @@ class SessionProxy:
             raise
         finally:
             os.close(ready_w)
+            os.close(domain_r)
             os.close(stdin_fd)
             os.close(log_fd)
 
@@ -1085,6 +1235,29 @@ class SessionProxy:
         self._log(f"session {sid}: closed")
 
     # ---- command execution -------------------------------------------------
+    def _recover_from_timeout(self, sess) -> None:
+        """Restore the session shell to a clean read() boundary after a
+        command timeout.
+
+        Without this, the timed-out command keeps running inside the shell:
+        every subsequent command queues behind it and also times out
+        (cascading failure), and the lingering child makes the session
+        permanently not-admissible for speculative epochs.
+
+        Recovery: SIGKILL the entire descendant tree of the live shell
+        (the timed-out command and anything it spawned), then wait for
+        bash to reap it, execute the queued sentinel echo, and settle
+        back into pipe_read.
+        """
+        live = sess.live_pid
+        self._kill_descendants(live)
+        # bash reaps the killed child, runs the queued `echo sentinel`,
+        # and returns to read().  Wait for that boundary so the next
+        # command starts from a clean state.
+        if not self._wait_wchan_read(live, timeout=2.0):
+            self._log(f"session {sess.id}: WARNING — shell did not settle "
+                      f"after timeout recovery (pid {live})")
+
     def run(self, sid, command, timeout=10.0):
         """Feed one command to the current live shell and return its stdout.
 
@@ -1118,6 +1291,7 @@ class SessionProxy:
                 sess.committed_output.append(out)  # canonical: release now
                 return out
             time.sleep(0.05)
+        self._recover_from_timeout(sess)
         raise TimeoutError(f"command timed out: {command!r}")
 
     def get_output(self, sid):
@@ -1167,7 +1341,8 @@ class SessionProxy:
         self.client.call("freeze_by_cgroup", cgroup_id=sess.cgroup_id)
         if not self._wait_state_T(sess.live_pid):
             raise RuntimeError("live shell never reached stopped state")
-        time.sleep(0.15)
+        # State T confirmed — a brief settle delay suffices (was 150ms).
+        time.sleep(0.02)
         self._reject_tmp_regular_fds(sess.live_pid)
         fd_snapshots = self._snapshot_fds(sess.live_pid)
         tmp_snapshot = self._snapshot_epoch_tmp_state(sess)
@@ -1189,7 +1364,9 @@ class SessionProxy:
                 # the fence for the whole epoch. Authorized effects are released
                 # only after finalization (commit -> full release).
                 self.client.call("resume_candidate", pid=candidate)
-                time.sleep(0.3)
+                # Wait for the candidate to land back in its read() boundary
+                # (was a blind time.sleep(0.3); now event-driven via wchan).
+                self._wait_wchan_read(candidate, timeout=1.0)
                 sess.epoch = {"baseline": baseline, "candidate": candidate,
                               "fd_snapshots": fd_snapshots,
                               "tmp_snapshot": tmp_snapshot}
@@ -1201,7 +1378,7 @@ class SessionProxy:
             except (RuntimeError, TimeoutError) as e:
                 last_err = e
                 self._log(f"session {sid}: begin_epoch attempt {attempt} failed: {e}")
-                time.sleep(0.3)
+                time.sleep(0.1)
         shutil.rmtree(tmp_snapshot, ignore_errors=True)
         raise RuntimeError(f"begin_epoch failed after {retries} attempts: {last_err}")
 
@@ -1258,7 +1435,8 @@ class SessionProxy:
         # Release the speculative transcript: the epoch's output is now canonical.
         sess.committed_output.extend(sess.epoch_buffer)
         sess.epoch_buffer = []
-        time.sleep(0.2)                      # let it settle back into read()
+        # Wait for the candidate to settle back into read() (was 200ms blind).
+        self._wait_wchan_read(candidate, timeout=1.0)
         self._log(f"session {sid}: COMMIT — candidate {candidate} is now canonical "
                   f"(baseline {baseline} discarded)")
 
@@ -1313,7 +1491,8 @@ class SessionProxy:
         # the epoch never happened, so its output is never released.
         sess.epoch_buffer = []
         self._discard_epoch_tmp_snapshot(sess)
-        time.sleep(0.2)                      # let the baseline settle back into read()
+        # Wait for the baseline to settle back into read() (was 200ms blind).
+        self._wait_wchan_read(sess.live_pid, timeout=1.0)
         self._log(f"session {sid}: REJECT — discarded candidate {candidate}, "
                   f"resumed pristine baseline {sess.live_pid}")
 
@@ -1337,7 +1516,8 @@ class SessionProxy:
             except OSError:
                 pass
             self._wait_state_T(candidate, timeout=1.0)
-        time.sleep(0.1)
+        # State T confirmed; minimal settle (was 100ms).
+        time.sleep(0.01)
 
 
 # ──────────────────────────── Self-contained demo ──────────────────────────

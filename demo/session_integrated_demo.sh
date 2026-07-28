@@ -104,6 +104,12 @@ fixup_path() {
         [[ -n "$d" && -d "$d" && ":$PATH:" != *":$d:"* ]] && PATH="$d:$PATH"
     done
     export PATH
+    # Inherit the invoking user's rustup/cargo config; otherwise rustup under
+    # sudo has no default toolchain configured and cargo refuses to run.
+    if [[ -n "$home" ]]; then
+        [[ -d "$home/.rustup" ]] && export RUSTUP_HOME="$home/.rustup"
+        [[ -d "$home/.cargo" ]] && export CARGO_HOME="$home/.cargo"
+    fi
 }
 
 # ──────────────────────────── Preflight ────────────────────────────────────
@@ -134,7 +140,12 @@ build() {
     (cd "$PROJECT_ROOT/ShadowFS" && go build -o shadowfs .)
     info "ShadowFS built"
     step "Building ShadowProc (release)..."
-    (cd "$PROJECT_ROOT/ShadowProc" && cargo build --release 2>&1 | tail -2)
+    # Do not let the pipe swallow cargo's exit code: a failed build used to print
+    # "ShadowProc built" while the demo silently ran a stale binary.
+    if ! (cd "$PROJECT_ROOT/ShadowProc" && cargo build --release 2>&1 | tail -2; exit "${PIPESTATUS[0]}"); then
+        fail "ShadowProc build failed"
+        exit 1
+    fi
     info "ShadowProc built"
 }
 
