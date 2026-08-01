@@ -2259,6 +2259,44 @@ class ShadowOrchestrator:
                 log.error("  finalize_commit (process layer) failed: %s", e)
                 return {"status": "error", "message": str(e),
                         "released": False}
+            # FULL RELEASE of the primary cgroup's fenced workload processes.
+            # finalize_commit only resumes the candidate SHELL (continue_pid).
+            # Effects fenced MID-EPOCH (network/IPC/...) belong to separate
+            # frozen workload processes (e.g. pip stopped inside connect());
+            # without this step the released shell waits on a frozen child
+            # forever and the epoch's held effects never get out -- exactly
+            # the "commit -> full release" the SessionProxy contract promises.
+            # continue_by_cgroup resumes them under ENFORCED+allow-all so the
+            # held syscalls auto-restart and run to completion. Must happen
+            # BEFORE the group ack (effects out first, then ack).
+            try:
+                frozen_resp = self.proc_client.request(
+                    {"action": "list_frozen", "cgroup_id": cgroup_id})
+                leftover = (frozen_resp or {}).get("frozen") or []
+            except Exception as e:  # noqa: BLE001
+                leftover = []
+                log.error("  list_frozen(%s) after finalize_commit failed: %s "
+                          "-- fence-frozen processes (if any) stay frozen",
+                          cgroup_id, e)
+            if leftover:
+                log.info("  Releasing %d fence-frozen workload process(es) "
+                         "in %s: %s", len(leftover), cgroup_id,
+                         [p.get("pid") for p in leftover])
+                try:
+                    resume_resp = self.proc_client.request(
+                        {"action": "continue_by_cgroup",
+                         "cgroup_id": cgroup_id})
+                except Exception as e:  # noqa: BLE001
+                    resume_resp = {"status": "error", "message": str(e)}
+                if resume_resp.get("status") != "ok":
+                    # 不阻断 commit：结局已 durably COMMITTED、shell 已释放。
+                    # 失败几乎只有进程已退出（ESRCH）一种情况，如实记录。
+                    log.error("  continue_by_cgroup(%s) failed: %r -- "
+                              "fence-frozen processes may stay frozen",
+                              cgroup_id, resume_resp)
+                else:
+                    log.info("  Fence released: resumed PIDs %s",
+                             resume_resp.get("pids", []))
             released_cgroups.add(cgroup_id)
             self._record_epoch_result(primary_member or (epoch_id or ""),
                                       cgroup_id, committed_output,
