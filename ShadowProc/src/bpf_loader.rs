@@ -510,7 +510,21 @@ impl BpfManager {
     /// cgroup_map slot for reuse. This is what makes a long-lived daemon able to
     /// churn through an unbounded number of sessions without exhausting the
     /// 64-slot array. No-op error if the path was never registered.
+    ///
+    /// Also drops every policy entry keyed by this cgroup's id. Those maps are
+    /// keyed by cgroup_id, not by slot, so releasing the slot alone leaked ~40
+    /// class_policy entries per session (one enforce_allow_all worth). With a
+    /// 1024-entry map that wedged the daemon after ~25 sessions: the next
+    /// commit's map update failed E2BIG, epoch setup failed, and callers
+    /// silently degraded to dry-run. Policies must die with the cgroup.
     pub fn remove_cgroup(&self, cgroup_path: &Path) -> Result<()> {
+        // Resolve the id before the cgroup dir goes away (callers rmdir right
+        // after this returns). Best-effort: a caller that already removed the
+        // dir still gets its slot released below.
+        if let Ok(cg_id) = self.cgroup_id_from_path(&cgroup_path.to_string_lossy()) {
+            let _ = self.clear_all_policies(cg_id);
+        }
+
         let path_key = cgroup_path.to_string_lossy().to_string();
         let mut slots = self.cgroup_slots.lock().unwrap();
 

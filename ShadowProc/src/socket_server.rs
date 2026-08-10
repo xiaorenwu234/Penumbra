@@ -37,6 +37,10 @@ struct Request {
     /// (P0-5). See ProcessManager::parse_proc_policy for the schema.
     #[serde(default)]
     policy: Option<serde_json::Value>,
+    /// freeze_by_cgroup 专用：仅 COMMIT 路径可置 true —— 允许为解开
+    /// vfork-D 死锁而提前恢复围栏冻结的子进程（reject 路径绝不能）。
+    #[serde(default)]
+    release_fence_vfork: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -912,7 +916,7 @@ impl SocketServer {
                     };
                 };
                 let mut pm = process_manager.lock().unwrap();
-                match pm.freeze_by_cgroup(cgroup_id) {
+                match pm.freeze_by_cgroup(cgroup_id, req.release_fence_vfork.unwrap_or(false)) {
                     Ok(pids) => Response {
                         status: "ok".into(),
                         message: Some(format!("Froze {} processes", pids.len())),

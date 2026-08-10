@@ -1492,7 +1492,9 @@ class SessionProxy:
             raise RuntimeError("no active epoch to commit")
         # Quiesce the candidate to a stopped read()-boundary first (the proven
         # commit flow acts on a frozen candidate, then continues it).
-        self._quiesce_epoch(sess)
+        # release_fence_vfork=True: commit 路径解冻是必然结局，允许为解开
+        # vfork-D 死锁提前恢复围栏冻结的子进程（reject 路径则绝不）。
+        self._quiesce_epoch(sess, release_fence_vfork=True)
 
     def finalize_commit(self, sid):
         """DESTRUCTIVE commit phase 2: discard the frozen baseline, keep the
@@ -1605,17 +1607,22 @@ class SessionProxy:
         self._log(f"session {sid}: REJECT — discarded candidate {candidate}, "
                   f"resumed pristine baseline {sess.live_pid}")
 
-    def _quiesce_epoch(self, sess):
+    def _quiesce_epoch(self, sess, release_fence_vfork=False):
         """Bring the speculative candidate to a stopped read()-boundary (state T).
 
         Both the proven reject (Scenario 8) and commit (Scenario 12) flows make
         the commit/reject decision on a *stopped* candidate. freeze_by_cgroup
         stops the candidate (and skips the frozen baseline, which is a tracked
         versioning baseline).
+
+        release_fence_vfork: 仅 commit 路径传 True —— 允许 ShadowProc 为解开
+        vfork-D 死锁提前恢复围栏冻结的子进程（commit 后解冻本就是必然结局）；
+        reject 路径保持 False，绝不放出被否决 epoch 的未决外部效应。
         """
         candidate = sess.epoch["candidate"]
         try:
-            self.client.call("freeze_by_cgroup", cgroup_id=sess.cgroup_id)
+            self.client.call("freeze_by_cgroup", cgroup_id=sess.cgroup_id,
+                             release_fence_vfork=release_fence_vfork)
         except RuntimeError:
             pass
         if not self._wait_state_T(candidate, timeout=3.0):

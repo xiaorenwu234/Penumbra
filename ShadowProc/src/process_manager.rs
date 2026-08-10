@@ -1014,7 +1014,11 @@ impl ProcessManager {
     /// Actively freeze (SIGSTOP) all processes in a given cgroup.
     /// Reads pids from /sys/fs/cgroup/<cgroup_name>/cgroup.procs and sends SIGSTOP.
     /// Records them in the frozen list for later resume/kill.
-    pub fn freeze_by_cgroup(&mut self, cgroup_path: &str) -> Result<Vec<u32>> {
+    pub fn freeze_by_cgroup(
+        &mut self,
+        cgroup_path: &str,
+        release_fence_vfork: bool,
+    ) -> Result<Vec<u32>> {
         // Construct the cgroup.procs path from the cgroup_id
         // cgroup_path is like "/shadow-demo", map to /sys/fs/cgroup/shadow-demo/cgroup.procs
         let cgroup_dir = if cgroup_path.starts_with('/') {
@@ -1031,7 +1035,7 @@ impl ProcessManager {
         // cgroup must either already be recorded+stopped or receive SIGSTOP and
         // reach T/t. Already-recorded pids are verified again instead of being
         // skipped, which closes the record_frozen-before-proof hole.
-        for _ in 0..1000 {
+        for pass in 0..1000u32 {
             let data = fs::read_to_string(&cgroup_dir)
                 .with_context(|| format!("Failed to read cgroup.procs: {}", cgroup_dir))?;
             let mut seen = HashSet::new();
@@ -1083,14 +1087,130 @@ impl ProcessManager {
                 }
             }
 
-            let mut all_stopped = true;
+            // 诊断用：收集所有未停稳的 pid（不再提前 break，以便看全）。
+            // D 态（不可中断睡眠）视为已受控：见 thread_group_contained。
+            let mut unstopped: Vec<u32> = Vec::new();
             for pid in &seen {
-                if !wait_thread_group_stopped(*pid, 50) {
-                    all_stopped = false;
-                    break;
+                if !wait_thread_group_stopped(*pid, 50)
+                    && !thread_group_contained(*pid)
+                {
+                    unstopped.push(*pid);
                 }
             }
-            if all_stopped && seen == last_seen {
+            // vfork 死锁解锁：wchan=kernel_clone 的进程是 vfork 父进程，
+            // 处于不可中断等待（D 态，SIGSTOP 不生效），等子进程 exec/_exit。
+            // 而子进程刚被本循环 SIGSTOP，永远 exec 不了 —— 互相等待，
+            // 循环永不收敛（实测空转 1000 轮 ≈ 62s，scikit-learn build_ext
+            // 即此场景）。对策：恢复「被我们停掉」的子进程让它完成 exec，
+            // 父进程离开 D 态后待决的 SIGSTOP 自然生效。只恢复 dummy
+            // 冻结（我们自己 SIGSTOP 的）；围栏冻结的进程持有未决外部
+            // 效应，绝不能恢复 —— 宁可继续等也不能泄漏效应。
+            for pid in &unstopped {
+                let wchan =
+                    fs::read_to_string(format!("/proc/{}/wchan", pid)).unwrap_or_default();
+                if wchan.trim() != "kernel_clone" {
+                    continue;
+                }
+                let kids = fs::read_to_string(format!("/proc/{}/task/{}/children", pid, pid))
+                    .unwrap_or_default();
+                eprintln!(
+                    "[freeze_diag] vfork parent {} children=[{}]",
+                    pid,
+                    kids.trim()
+                );
+                for kid in kids.split_whitespace() {
+                    let kpid: u32 = match kid.parse() {
+                        Ok(k) => k,
+                        Err(_) => continue,
+                    };
+                    // 子进程现场：状态、wchan、是否在冻结表里（及事件类型）。
+                    let kstate = fs::read_to_string(format!("/proc/{}/status", kpid))
+                        .ok()
+                        .and_then(|s| {
+                            s.lines()
+                                .find(|l| l.starts_with("State:"))
+                                .map(|l| l.trim().to_string())
+                        })
+                        .unwrap_or_else(|| "<gone>".to_string());
+                    let kwchan = fs::read_to_string(format!("/proc/{}/wchan", kpid))
+                        .unwrap_or_default();
+                    let krec = self.frozen.get(&kpid).map(|fp| {
+                        format!("frozen(event_type={})", fp.event.event_type)
+                    });
+                    eprintln!(
+                        "[freeze_diag]   child {} {} wchan={} record={:?}",
+                        kpid,
+                        kstate,
+                        kwchan.trim(),
+                        krec
+                    );
+                    // vfork 父进程在 D 态等子进程 exec/_exit；子进程被停着
+                    // （无论是我们 SIGSTOP 的还是围栏冻结的），父进程就永远
+                    // 出不了 D 态，收敛循环空转 1000 轮 ≈ 62s。恢复子进程：
+                    //   - dummy 停的：本来就该恢复；
+                    //   - 围栏冻结的：cow/spec 臂走 commit-driven release，
+                    //     解冻是必然结局（commit 后 continue_by_cgroup 也会
+                    //     在 allow-all 下恢复它们）。这里只是把恢复提前到
+                    //     quiesce 阶段 —— 未决效应照常发出，不会比正常
+                    //     release 路径泄漏更多；换来的是父进程能离开 D 态、
+                    //     收敛循环能结束。不恢复则两头卡死。
+                    let kstopped = task_state_is_stopped(kpid);
+                    if !kstopped {
+                        continue;
+                    }
+                    let fence_held = self
+                        .frozen
+                        .get(&kpid)
+                        .map(|fp| fp.event.event_type != 0)
+                        .unwrap_or(false);
+                    if fence_held && !release_fence_vfork {
+                        // 仅 COMMIT 路径（调用方明确传 true）才允许提前恢复
+                        // 围栏冻结的子进程；reject/回滚路径绝不能放出未决
+                        // 外部效应 —— 宁可继续等（循环会超时失败，上层有
+                        // 兼容处理）也不能泄漏效应。
+                        eprintln!(
+                            "[freeze_diag]   child {} is FENCE-held and caller may not \
+                             release -- NOT resuming",
+                            kpid
+                        );
+                        continue;
+                    }
+                    if signal::kill(Pid::from_raw(kpid as i32), Signal::SIGCONT).is_ok() {
+                        if fence_held {
+                            // 保留冻结记录：审计与 release 记账仍需要它；
+                            // 后续 continue_by_cgroup 对已运行的进程无副作用。
+                            eprintln!(
+                                "[freeze_diag] vfork unlock: SIGCONT FENCE-held child {} of {} \
+                                 (early release to break vfork-D deadlock)",
+                                kpid, pid
+                            );
+                        } else {
+                            // dummy 记录移除：它 exec 后还是活的，下一轮重新停。
+                            self.frozen.remove(&kpid);
+                            eprintln!(
+                                "[freeze_diag] vfork unlock: SIGCONT child {} of {} \
+                                 (stopped, let it finish exec)",
+                                kpid, pid
+                            );
+                        }
+                    }
+                }
+            }
+            // 卡住进程的内核现场取证：早期（pass 2）抓一次拿新鲜 D 态栈，
+            // 之后每 150 轮采样一次看状态演变，避免刷爆日志。
+            if !unstopped.is_empty() && (pass == 2 || pass % 150 == 0) {
+                eprintln!(
+                    "[freeze_diag] {} pass={} seen={} unstopped={:?}",
+                    cgroup_path,
+                    pass,
+                    seen.len(),
+                    unstopped
+                );
+                for pid in &unstopped {
+                    freeze_diag_dump(*pid);
+                }
+            }
+            if unstopped.is_empty() && seen == last_seen {
                 converged = true;
                 break;
             }
@@ -1098,6 +1218,21 @@ impl ProcessManager {
         }
 
         if !converged {
+            eprintln!(
+                "[freeze_diag] {} FAILED after 1000 passes -- final unstopped dump:",
+                cgroup_path
+            );
+            if let Ok(data) = fs::read_to_string(&cgroup_dir) {
+                for line in data.lines() {
+                    if let Ok(pid) = line.trim().parse::<u32>() {
+                        if !self.memory_tracker.is_shadow_pid(pid)
+                            && !wait_thread_group_stopped(pid, 20)
+                        {
+                            freeze_diag_dump(pid);
+                        }
+                    }
+                }
+            }
             return Err(anyhow::anyhow!(
                 "freeze_by_cgroup {} did not converge after 1000 passes",
                 cgroup_path
@@ -1121,7 +1256,9 @@ impl ProcessManager {
             if self.memory_tracker.is_shadow_pid(pid) {
                 continue;
             }
-            if !wait_thread_group_stopped(pid, 1000) {
+            if !wait_thread_group_stopped(pid, 1000)
+                && !thread_group_contained(pid)
+            {
                 return Err(anyhow::anyhow!(
                     "pid {} in {} is not fully stopped after cgroup freeze",
                     pid,
@@ -1288,6 +1425,117 @@ fn process_starttime(pid: u32) -> Option<u64> {
     // parens, so we anchor on the LAST ')').
     let after = &stat[stat.rfind(')')? + 1..];
     after.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// 诊断用：转储一个拒绝进入 T 态进程的内核现场 —— 进程状态、wchan、
+/// 内核栈和命令行。freeze_by_cgroup 收敛失败时调用，用于定位它卡在
+/// 哪个 syscall（如 FUSE 不可中断 IO 会在此显示 fuse_* 栈帧）。
+fn freeze_diag_dump(pid: u32) {
+    let state = fs::read_to_string(format!("/proc/{}/status", pid))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("State:"))
+                .map(|l| l.trim().to_string())
+        })
+        .unwrap_or_else(|| "State: <unreadable>".to_string());
+    let wchan = fs::read_to_string(format!("/proc/{}/wchan", pid))
+        .unwrap_or_default();
+    let cmdline = fs::read_to_string(format!("/proc/{}/cmdline", pid))
+        .unwrap_or_default()
+        .replace('\0', " ");
+    let cmdline: String = cmdline.chars().take(120).collect();
+    let stack = fs::read_to_string(format!("/proc/{}/stack", pid))
+        .unwrap_or_else(|e| format!("  <kernel stack unreadable: {}>\n", e));
+    eprintln!(
+        "[freeze_diag]   pid={} {} wchan={} cmd={:?}",
+        pid,
+        state,
+        wchan.trim(),
+        cmdline
+    );
+    for line in stack.lines().take(12) {
+        eprintln!("[freeze_diag]     {}", line.trim_end());
+    }
+    // 线程级状态：主线程 stopped 但某个线程没停也会导致整组判失败。
+    if let Ok(tasks) = fs::read_dir(format!("/proc/{}/task", pid)) {
+        for ent in tasks.flatten() {
+            if let Ok(tid) = ent.file_name().to_string_lossy().parse::<u32>() {
+                if !task_state_is_stopped(tid) {
+                    let tst = fs::read_to_string(format!("/proc/{}/task/{}/status", pid, tid))
+                        .ok()
+                        .and_then(|s| {
+                            s.lines()
+                                .find(|l| l.starts_with("State:"))
+                                .map(|l| l.trim().to_string())
+                        })
+                        .unwrap_or_default();
+                    let twchan = fs::read_to_string(format!("/proc/{}/task/{}/wchan", pid, tid))
+                        .unwrap_or_default();
+                    eprintln!(
+                        "[freeze_diag]     tid={} NOT stopped: {} wchan={}",
+                        tid,
+                        tst,
+                        twchan.trim()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// 线程组是否“已受控”：每个线程满足其一即可：
+///   1. stopped（T/t）；
+///   2. 不可中断睡眠（D）—— 在内核中无法执行用户态代码、无法泄漏效应，
+///      待决的 SIGSTOP 会在其离开 D 态时立即生效；典型是 vfork 父进程
+///      在 kernel_clone 中等待被围栏冻结的子进程 exec，永远到不了 T；
+///   3. 可中断睡眠（S）但 SIGSTOP 已在路上（SigPnd/ShdPnd 含 stop 位）——
+///      停止正在传播，效应同样已被封闭。
+/// 等这三类线程“真正变 T”只会空转 1000 轮（≈62s）且可能永远达不到。
+fn thread_group_contained(pid: u32) -> bool {
+    let tasks = match fs::read_dir(format!("/proc/{}/task", pid)) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    let mut saw_any = false;
+    for ent in tasks.flatten() {
+        let name = ent.file_name();
+        let tid: u32 = match name.to_string_lossy().parse() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        saw_any = true;
+        let stat = match fs::read_to_string(format!("/proc/{}/task/{}/stat", pid, tid)) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        // comm 里可能含空格/括号：取最后一个 ')' 之后的状态字段。
+        let state = match stat.rfind(')') {
+            Some(i) if i + 2 < stat.len() => stat.as_bytes()[i + 2] as char,
+            _ => '?',
+        };
+        if matches!(state, 'T' | 't' | 'D') {
+            continue;
+        }
+        // S 态：仅当 SIGSTOP（19 号，位 18）已挂起时才算受控。
+        let status = match fs::read_to_string(format!("/proc/{}/task/{}/status", pid, tid)) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let mut pending: u64 = 0;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("SigPnd:").or_else(|| line.strip_prefix("ShdPnd:")) {
+                if let Ok(v) = u64::from_str_radix(rest.trim(), 16) {
+                    pending |= v;
+                }
+            }
+        }
+        const SIGSTOP_BIT: u64 = 1 << (19 - 1);
+        if pending & SIGSTOP_BIT == 0 {
+            return false;
+        }
+    }
+    saw_any
 }
 
 /// Poll every /proc/<pid>/task/<tid>/stat until the entire thread group is in

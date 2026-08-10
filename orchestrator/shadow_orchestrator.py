@@ -2441,6 +2441,18 @@ class ShadowOrchestrator:
         log.info("SESSION_CLOSE sid=%s agent=%s", session_id, aid or "-")
         return {"status": "ok"}
 
+    def session_list(self) -> dict:
+        """List every currently-open session.
+
+        Exists so a client can sweep sessions leaked by a crashed or killed
+        driver: without it a session the client forgot to close is held by the
+        daemon forever -- its shell stays frozen in state T and it keeps
+        occupying one of ShadowProc's limited eBPF cgroup slots.
+        """
+        with self._sessions_lock:
+            sids = list(self._sessions.keys())
+        return {"status": "ok", "sessions": sids}
+
     # ──────────────────────────────────────────────────────────────────────
     # ShadowObserve integration
     # ──────────────────────────────────────────────────────────────────────
@@ -3022,6 +3034,9 @@ class OrchestratorServer:
                 if not session_id:
                     return {"status": "error", "message": "session_id required"}
                 return self.orch.session_close(session_id)
+
+            elif action == "session_list":
+                return self.orch.session_list()
 
             else:
                 return {"status": "error", "message": f"unknown action: {action}"}

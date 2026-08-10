@@ -2289,6 +2289,16 @@ func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, e
 		}
 	}
 
+	// git 的 link-unlink 模式：写 tmp_obj → link(tmp, final) → unlink(tmp)。
+	// tmp 的 visible head 是 OpWhiteout，永远不会被提升到 orig，但 OpLink
+	// 的 LinkTarget 指向 tmp 的 orig 路径。提升前先把 tmp 的 WRITE 版本
+	// 从 stage 落盘到 orig，否则 os.Link 会永久 ENOENT。
+	if head.Operation == OpLink && head.LinkTarget != "" {
+		if _, statErr := os.Lstat(head.LinkTarget); os.IsNotExist(statErr) {
+			b.ensureLinkTarget(head.LinkTarget)
+		}
+	}
+
 	if err := promoteVersion(head); err != nil {
 		// FAIL CLOSED: preserve ALL recovery state so the exact same
 		// promotion can be retried. Record why on every owner.
@@ -2333,6 +2343,38 @@ func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, e
 	b.publishDirs[filepath.Dir(obj)] = struct{}{}
 	log.Printf("[backend] Promote: obj=%q head=v%d promoted (%d chain version(s) cleared)", obj, head.ID, len(chain))
 	return true, nil
+}
+
+// ensureLinkTarget 在提升 OpLink 版本前，确保 link 目标文件在 orig 中存在。
+// git 的 finalize_object_file 用 link(tmp_obj, final) + unlink(tmp_obj) 模式：
+// tmp_obj 的 visible head 是 OpWhiteout（被 unlink 覆盖），永远不会被正常
+// 提升到 orig。但 tmp_obj 的 WRITE 版本仍在版本链里，其 stage 副本可用。
+// 本方法把 stage 内容落盘到 orig，使后续的 os.Link 能成功。
+// Must be called with b.mu held.
+func (b *Backend) ensureLinkTarget(target string) {
+	targetObj := ObjectID(target)
+	tChain := b.versionsByObject[targetObj]
+	for _, vid := range tChain {
+		tv := b.versionByID[vid]
+		if tv == nil || tv.StagePath == "" {
+			continue
+		}
+		if tv.Operation != OpWrite {
+			continue
+		}
+		if _, err := os.Lstat(tv.StagePath); err != nil {
+			continue
+		}
+		_ = os.MkdirAll(filepath.Dir(target), 0o755)
+		if err := copyFileContents(tv.StagePath, target); err != nil {
+			log.Printf("[backend] ensureLinkTarget: copy %q -> %q: %v",
+				tv.StagePath, target, err)
+		} else {
+			log.Printf("[backend] ensureLinkTarget: materialized %q from stage v%d",
+				target, tv.ID)
+		}
+		return
+	}
 }
 
 // finalizeEpoch performs the state mutation of finalizing one epoch: drop

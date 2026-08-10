@@ -203,7 +203,9 @@ fn main() -> Result<()> {
                             let cgroup_path =
                                 pm.get_frozen(trigger_tgid).map(|f| f.cgroup_path.clone());
                             if let Some(cgroup_path) = cgroup_path {
-                                match pm.freeze_by_cgroup(&cgroup_path) {
+                                // 围栏触发的兄弟进程冻结：不是 commit 路径，
+                                // 绝不允许提前恢复围栏冻结的 vfork 子进程。
+                                match pm.freeze_by_cgroup(&cgroup_path, false) {
                                     Ok(pids) if !pids.is_empty() => {
                                         eprintln!(
                                             "\x1b[1;33m[CGROUP-FREEZE]\x1b[0m froze {} sibling process(es) in {}: {:?}",

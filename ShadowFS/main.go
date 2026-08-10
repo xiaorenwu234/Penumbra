@@ -41,6 +41,42 @@ type cgroupCacheKey struct {
 
 var cgroupCache sync.Map // cgroupCacheKey -> string
 
+// procCgroupFd caches an OPEN fd on /proc/<pid>/cgroup for a caller pid, so a
+// FUSE operation costs one pread instead of an open+read+close.
+//
+// Why an fd rather than just memoising the value: the fd IS the pid-reuse
+// guard, which is what lets us skip the /proc/<pid>/stat read that used to
+// provide it. Once the process behind the fd exits and is reaped, pread
+// returns ESRCH (verified on this kernel), and a process that later recycles
+// the same pid is a *different* procfs file that this fd can never reach. So a
+// successful pread proves "same process incarnation" without reading starttime.
+//
+// Measured on a Ryzen laptop: pread on a cached fd 1.4us versus 7.5us for the
+// open+read+close it replaces. Every FUSE operation pays this, and
+// metadata-heavy tools issue thousands per command -- a full-tree `find` over
+// the Django worktree went 0.59s -> 0.37s and `git status` 0.79s -> 0.44s.
+type procCgroupFd struct {
+	// mu serialises pread against close. Without it one goroutine could close
+	// the fd while another is about to pread that same number after the
+	// runtime recycled it onto an unrelated file -- reading someone else's
+	// cgroup and mis-attributing the epoch. Uncontended it costs ~20ns.
+	mu     sync.Mutex
+	fd     int    // -1 once closed
+	raw    string // last raw file content, so an unchanged read skips parsing
+	cgroup string // parsed path for raw
+}
+
+// maxProcCgroupFds bounds the fd table. Entries for dead pids are reclaimed
+// lazily (a failed pread evicts), so the cap is only reached when many
+// short-lived callers were never observed dying; crossing it triggers a sweep.
+const maxProcCgroupFds = 512
+
+var (
+	procFdCache sync.Map // int (pid) -> *procCgroupFd
+	procFdMu    sync.Mutex
+	procFdCount int
+)
+
 // shadowBackend is the global MVCC backend, initialized in main.
 var shadowBackend *backend.Backend
 
@@ -165,6 +201,38 @@ func procStarttime(pid int) string {
 	return fields[19]
 }
 
+// parseCgroupData extracts the effective cgroup path from the contents of a
+// /proc/<pid>/cgroup file. Prefers the cgroup-v2 line ("0::<path>"), falling
+// back to the first non-root v1 controller path.
+func parseCgroupData(data string) (string, error) {
+	if data == "" {
+		return "", fmt.Errorf("empty cgroup file")
+	}
+	var v2Path, v1Path string
+	for _, line := range strings.Split(data, "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		switch {
+		case parts[0] == "0" && parts[1] == "":
+			v2Path = parts[2]
+		case v1Path == "" && parts[2] != "" && parts[2] != "/":
+			v1Path = parts[2]
+		}
+	}
+	if v2Path != "" {
+		return v2Path, nil
+	}
+	if v1Path != "" {
+		return v1Path, nil
+	}
+	return "", fmt.Errorf("no usable cgroup path in %q", data)
+}
+
 // readCgroupRaw reads /proc/<pid>/cgroup with a small retry loop and
 // returns the parsed cgroup path on success. Returns ("", err) if every
 // attempt fails. Retries cover both transient empty reads (kernel
@@ -188,38 +256,140 @@ func readCgroupRaw(pid int) (string, error) {
 	if lastErr != nil {
 		return "", lastErr
 	}
-	if len(data) == 0 {
-		return "", fmt.Errorf("empty cgroup file")
+	return parseCgroupData(string(data))
+}
+
+// cgroupFromCachedFd serves the caller's cgroup through a cached fd.
+// ok=false means there is no usable entry and the caller must take the slow
+// path (which will install one).
+func cgroupFromCachedFd(pid int) (string, bool) {
+	v, loaded := procFdCache.Load(pid)
+	if !loaded {
+		return "", false
 	}
-	var v2Path, v1Path string
-	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" {
-			continue
+	h := v.(*procCgroupFd)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.fd < 0 {
+		return "", false
+	}
+	var buf [512]byte
+	n, err := syscall.Pread(h.fd, buf[:], 0)
+	if err != nil || n <= 0 {
+		// ESRCH: the process exited. Evict -- and note a recycled pid cannot
+		// be served through this fd, so there is no stale-identity window.
+		evictProcCgroupFdLocked(pid, h)
+		return "", false
+	}
+	raw := string(buf[:n])
+	if raw == h.raw {
+		return h.cgroup, true // unchanged: skip re-parsing
+	}
+	cg, perr := parseCgroupData(raw)
+	if perr != nil {
+		return "", false // let the slow path retry/report
+	}
+	h.raw, h.cgroup = raw, cg
+	return cg, true
+}
+
+// evictProcCgroupFdLocked closes and removes an entry. Caller holds h.mu.
+func evictProcCgroupFdLocked(pid int, h *procCgroupFd) {
+	if h.fd >= 0 {
+		syscall.Close(h.fd)
+		h.fd = -1
+	}
+	if _, existed := procFdCache.LoadAndDelete(pid); existed {
+		procFdMu.Lock()
+		procFdCount--
+		procFdMu.Unlock()
+	}
+}
+
+// sweepProcCgroupFds drops entries whose process is gone. Cheap because a dead
+// pid fails pread immediately; called only when the table hits its cap.
+func sweepProcCgroupFds() {
+	procFdCache.Range(func(k, v any) bool {
+		pid, _ := k.(int)
+		h, _ := v.(*procCgroupFd)
+		if h == nil {
+			return true
 		}
-		parts := strings.SplitN(line, ":", 3)
-		if len(parts) != 3 {
-			continue
+		h.mu.Lock()
+		if h.fd >= 0 {
+			var buf [1]byte
+			if _, err := syscall.Pread(h.fd, buf[:], 0); err != nil {
+				evictProcCgroupFdLocked(pid, h)
+			}
 		}
-		switch {
-		case parts[0] == "0" && parts[1] == "":
-			v2Path = parts[2]
-		case v1Path == "" && parts[2] != "" && parts[2] != "/":
-			v1Path = parts[2]
+		h.mu.Unlock()
+		return true
+	})
+}
+
+// installProcCgroupFd opens and caches an fd for pid. Best-effort: on any
+// failure the caller simply keeps taking the slow path.
+func installProcCgroupFd(pid int) {
+	procFdMu.Lock()
+	over := procFdCount >= maxProcCgroupFds
+	procFdMu.Unlock()
+	if over {
+		sweepProcCgroupFds()
+		procFdMu.Lock()
+		over = procFdCount >= maxProcCgroupFds
+		procFdMu.Unlock()
+		if over {
+			return // still saturated: stay on the slow path rather than leak
 		}
 	}
-	if v2Path != "" {
-		return v2Path, nil
+	fd, err := syscall.Open(fmt.Sprintf("/proc/%d/cgroup", pid),
+		syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return
 	}
-	if v1Path != "" {
-		return v1Path, nil
+	var buf [512]byte
+	n, rerr := syscall.Pread(fd, buf[:], 0)
+	if rerr != nil || n <= 0 {
+		syscall.Close(fd)
+		return
 	}
-	return "", fmt.Errorf("no usable cgroup path in %q", string(data))
+	raw := string(buf[:n])
+	cg, perr := parseCgroupData(raw)
+	if perr != nil {
+		syscall.Close(fd)
+		return
+	}
+	h := &procCgroupFd{fd: fd, raw: raw, cgroup: cg}
+	if prev, dup := procFdCache.LoadOrStore(pid, h); dup {
+		_ = prev
+		syscall.Close(fd) // lost the race; keep the winner
+		return
+	}
+	procFdMu.Lock()
+	procFdCount++
+	procFdMu.Unlock()
 }
 
 // getCgroupID reads the cgroup ID of the calling process. Successful
-// resolutions are cached by (pid, starttime) so that subsequent
-// /proc/<pid>/cgroup read failures (observed as persistent EBADF on
-// some kernels) fall back to the previously-known good answer.
+// resolutions are cached by (pid, starttime) and the cache is consulted
+// FIRST: (pid, starttime) pins exactly one process incarnation, and in this
+// design a process is enrolled into its monitored cgroup by the launcher
+// before it execs the session shell and is never migrated afterwards (the
+// release path switches a cgroup's MODE, not its membership; a speculative
+// candidate is a fork and so carries a fresh pid). A hit is therefore
+// authoritative, and skipping the /proc/<pid>/cgroup read halves the
+// per-operation /proc I/O.
+//
+// Why that matters: every FUSE operation pays this. Measured on a Ryzen
+// laptop, the two /proc reads cost ~29us against ~59us of total
+// per-operation overhead, so they are half the cost of the whole FUSE layer.
+// Metadata-heavy tools amplify it brutally -- `git status` over the Django
+// worktree (6k files) went 0.97s -> 0.74s and a full-tree `find` 0.80s ->
+// 0.55s from this change alone.
+//
+// The cache also still serves its original purpose: covering subsequent
+// /proc/<pid>/cgroup read failures (observed as persistent EBADF on some
+// kernels) with the previously-known good answer.
 //
 // Fail-closed policy: if the cgroup path cannot be resolved AND there is
 // no cached value, the function returns an error. The caller (epochForCtx)
@@ -233,14 +403,37 @@ func getCgroupID(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no caller pid in FUSE context")
 	}
 	pid := int(caller.Pid)
+
+	// Hot path: a cached fd proves same-incarnation and yields the value in a
+	// single pread (~1.4us vs ~7.5us for an open+read+close). Every FUSE
+	// operation goes through here, and metadata-heavy tools issue thousands per
+	// command, so this is the hottest bookkeeping in the filesystem.
+	if cg, hit := cgroupFromCachedFd(pid); hit {
+		return cg, nil
+	}
+
 	start := procStarttime(pid)
 	key := cgroupCacheKey{pid: pid, starttime: start}
+
+	// Second-level memo: (pid, starttime) pins one process incarnation, and in
+	// this design a process is enrolled into its monitored cgroup by the
+	// launcher before it execs the session shell and is never migrated
+	// afterwards (the release path switches a cgroup's MODE, not its
+	// membership; a speculative candidate is a fork and so carries a fresh
+	// pid). A hit is therefore authoritative.
+	if start != "" {
+		if cached, found := cgroupCache.Load(key); found {
+			installProcCgroupFd(pid)
+			return cached.(string), nil
+		}
+	}
 
 	cgroup, err := readCgroupRaw(pid)
 	if err == nil {
 		if start != "" {
 			cgroupCache.Store(key, cgroup)
 		}
+		installProcCgroupFd(pid)
 		return cgroup, nil
 	}
 	// Read failed: prefer a cached value for the same (pid, starttime)
@@ -1012,9 +1205,20 @@ func main() {
 	}
 
 	sec := time.Second
+	// Negative lookups were previously uncached, so every probe for a
+	// non-existent path went to userspace every single time -- git does a lot
+	// of that (index/lock/config probing per invocation). Cache them for the
+	// same window as positive entries: the exposure is symmetric with what
+	// EntryTimeout already accepts.
+	//
+	// Deliberately NOT raising the 1s window: anything that rewrites the
+	// backing tree out-of-band (i.e. not through FUSE) leaves the kernel's
+	// cached metadata stale for as long as the timeout. 1s bounds that; a
+	// longer window would widen an existing hazard.
 	opts := &fs.Options{
-		AttrTimeout:  &sec,
-		EntryTimeout: &sec,
+		AttrTimeout:     &sec,
+		EntryTimeout:    &sec,
+		NegativeTimeout: &sec,
 		MountOptions: fuse.MountOptions{
 			Debug:             *debug,
 			AllowOther:        *allowOther,
@@ -1022,6 +1226,21 @@ func main() {
 			// Enable POSIX (fcntl) and BSD (flock) advisory file locking so
 			// the trackedHandle lock passthrough is exercised by the kernel.
 			EnableLocks: true,
+			// Serve READ replies by copying instead of splice(). go-fuse's
+			// splice path log.Panicf()s -- and thus kills the whole daemon --
+			// when it cannot drain a splice pair:
+			//
+			//   trySplice: illegal seek
+			//   splicing into /dev/null: invalid argument
+			//   panic: ... splice.(*Pair).discard -> Server.trySplice
+			//
+			// Losing the filesystem mid-run leaves every in-flight epoch
+			// stranded (callers then fail every request with EPIPE) and turns
+			// the mountpoint into a stale "transport endpoint is not
+			// connected" husk. The throughput given up is negligible for a
+			// source-tree workload: READ is ~9% of operations and the files
+			// are small, so almost every read is a single sub-128KB reply.
+			DisableSplice: true,
 		},
 	}
 	server, err := fs.Mount(mntDir, root, opts)
