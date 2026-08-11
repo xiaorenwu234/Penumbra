@@ -1,19 +1,23 @@
 ========================================================================
   EXPERIMENT: exp1_effect_coverage
-  Duration: 42.6s
+  Duration: 17.1s
 ========================================================================
 
   Metric                           Count        Rate                95% CI
   ------------------------  ------------  ----------  --------------------
-  escaped_before_auth              0/360    0.000000  [0.000000, 0.015556]
-  incorrectly_allowed             0/1270    0.000000  [0.000000, 0.004447]
-  incorrectly_denied               0/400    0.000000  [0.000000, 0.014017]
-  duplicated_after_restart          0/10    0.000000  [0.000000, 0.393803]
-  missing_audit_events               0/0    0.000000  [0.000000, 1.000000]
-  audit_tests_skipped              0/230    0.000000  [0.000000, 0.024188]
-  effect_not_observed                0/0    0.000000  [0.000000, 1.000000]
+  escaped_before_auth               0/70    0.000000  [0.000000, 0.076283]
+  incorrectly_allowed              0/244    0.000000  [0.000000, 0.022824]
+  incorrectly_denied                0/84    0.000000  [0.000000, 0.064188]
+  duplicated_after_restart           0/2    0.000000  [0.000000, 0.840667]
+  missing_audit_events              0/46    0.000000  [0.000000, 0.112669]
+  audit_tests_skipped                0/0    0.000000  [0.000000, 1.000000]
+  effect_not_observed                2/6    0.333333  [0.663797, 0.766936]
 
 ========================================================================
 
-  RESULT: ALL SAFETY PROPERTIES HELD
+  VIOLATIONS DETECTED: 2
+
+  effect_not_observed (2 violations):
+    - net_send trial=0: effect not observed (ret=-1 errno=22)
+    - net_send trial=1: effect not observed (ret=-1 errno=22)
 ========================================================================

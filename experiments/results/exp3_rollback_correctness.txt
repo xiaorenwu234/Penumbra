@@ -1,20 +1,20 @@
 ========================================================================
   EXPERIMENT: exp3_rollback_correctness
-  Duration: 5.7s
+  Duration: 1.2s
 ========================================================================
 
   Metric                                 Count        Rate                95% CI
   ------------------------------  ------------  ----------  --------------------
-  rollback_content_mismatch               0/40    0.000000  [0.000000, 0.127918]
-  rollback_metadata_mismatch              0/20    0.000000  [0.000000, 0.232905]
-  rollback_direntry_mismatch              0/10    0.000000  [0.000000, 0.393803]
-  child_process_survived                  0/10    0.000000  [0.000000, 0.393803]
-  provisional_output_not_removed          0/10    0.000000  [0.000000, 0.393803]
-  commit_not_exactly_once                 0/10    0.000000  [0.000000, 0.393803]
-  rollback_state_leak                     0/30    0.000000  [0.000000, 0.165163]
-  env_cwd_not_restored                    0/10    0.000000  [0.000000, 0.393803]
-  whiteout_not_cleaned                    0/10    0.000000  [0.000000, 0.393803]
-  memory_state_leaked                     0/20    0.000000  [0.000000, 0.232905]
+  rollback_content_mismatch                0/8    0.000000  [0.000000, 0.456339]
+  rollback_metadata_mismatch               0/4    0.000000  [0.000000, 0.663242]
+  rollback_direntry_mismatch               0/2    0.000000  [0.000000, 0.840667]
+  child_process_survived                   0/2    0.000000  [0.000000, 0.840667]
+  provisional_output_not_removed           0/2    0.000000  [0.000000, 0.840667]
+  commit_not_exactly_once                  0/2    0.000000  [0.000000, 0.840667]
+  rollback_state_leak                      0/6    0.000000  [0.000000, 0.541632]
+  env_cwd_not_restored                     0/2    0.000000  [0.000000, 0.840667]
+  whiteout_not_cleaned                     0/2    0.000000  [0.000000, 0.840667]
+  memory_state_leaked                      0/4    0.000000  [0.000000, 0.663242]
 
 ========================================================================
 

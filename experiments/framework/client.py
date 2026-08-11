@@ -209,6 +209,25 @@ class ShadowFSClient(DaemonClient):
             req["epoch_id"] = epoch_id
         return self.request_ok(req)
 
+    def rollback_with_affected(self, cgroup_id: str, epoch_id: str = None) -> Dict:
+        """Rollback an epoch and return the cascade affected set.
+
+        Response includes:
+          - AffectedEpochs: list of epoch IDs that were cascade-rolled-back
+          - Affected: list of cgroup IDs affected
+        """
+        req = {"action": "rollback", "cgroup_id": cgroup_id}
+        if epoch_id:
+            req["epoch_id"] = epoch_id
+        return self.request_ok(req)
+
+    def rollback_affected(self, cgroup_id: str, epoch_id: str = None) -> Dict:
+        """Query the affected set WITHOUT actually rolling back."""
+        req = {"action": "rollback_affected", "cgroup_id": cgroup_id}
+        if epoch_id:
+            req["epoch_id"] = epoch_id
+        return self.request_ok(req)
+
     def can_release(self, cgroup_id: str) -> bool:
         resp = self.request({"action": "can_release", "cgroup_id": cgroup_id})
         return resp.get("status") == "ok" and resp.get("releasable", False)

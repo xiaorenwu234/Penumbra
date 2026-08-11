@@ -23,6 +23,16 @@ echo "test-content" > /tmp/shadow-rq2-test/orig/test.txt
 # 在 backing store 中预创建实验目录（FUSE 挂载后通过 mnt/ 可见）
 mkdir -p /tmp/shadow-rq2-test/orig/{exp1,exp2,exp3,exp4,exp5}
 
+# 构建 ShadowObserve (如果尚未构建)
+if [ ! -x "$PROJ/ShadowObserve/build/observ_daemon" ]; then
+    echo "  构建 ShadowObserve..."
+    cd "$PROJ/ShadowObserve"
+    mkdir -p build && cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1
+    make -j$(nproc) observ_daemon >/dev/null 2>&1 || echo "  WARNING: ShadowObserve 构建失败"
+    cd "$EXP"
+fi
+
 echo "[3/6] 启动 ShadowFS..."
 "$PROJ/ShadowFS/shadowfs" \
     -staging /tmp/shadow-rq2-test/staging \
@@ -56,9 +66,9 @@ fi
 
 # 启动 ShadowObserve (如果二进制存在)
 OBSERVE_PID=""
-if [ -x "$PROJ/ShadowObserve/build/shadow-observe" ]; then
+if [ -x "$PROJ/ShadowObserve/build/observ_daemon" ]; then
     echo "  启动 ShadowObserve..."
-    "$PROJ/ShadowObserve/build/shadow-observe" \
+    "$PROJ/ShadowObserve/build/observ_daemon" \
         --sock /tmp/shadow_observe.sock \
         </dev/null >/var/tmp/shadowobserve.log 2>&1 &
     OBSERVE_PID=$!
@@ -70,7 +80,7 @@ if [ -x "$PROJ/ShadowObserve/build/shadow-observe" ]; then
         echo "  WARNING: ShadowObserve 启动失败 (audit 测试将受限)"
     fi
 else
-    echo "  INFO: ShadowObserve 二进制不存在，跳过 (audit 测试将被 skip)"
+    echo "  WARNING: ShadowObserve 二进制不存在，audit 测试将被 skip"
 fi
 
 # 连接测试

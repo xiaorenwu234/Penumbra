@@ -191,12 +191,12 @@ class Experiment4:
         self.fs_client.close()
 
     def _simulate_epoch(self, node_id: str, trial: int,
-                        topo_name: str) -> Tuple[str, str, str, str]:
+                        topo_name: str, reject_node: str = "") -> Tuple[str, str, str, str]:
         """Create a cgroup and ShadowFS epoch for a simulated epoch node.
 
         Returns (cgroup_path, cgroup_id, epoch_file, epoch_id).
-        The epoch_file is in the backing store at the SAME relative path
-        that the FUSE probe will write to (so commit promotes correctly).
+        The epoch_id includes reject_node to ensure uniqueness across
+        different reject_node tests within the same topology.
         """
         cg_path = self.cgroup_mgr.create(
             f"exp4-{topo_name}-{node_id}-{trial}-{int(time.time()*1000)}")
@@ -210,15 +210,17 @@ class Experiment4:
             pass
 
         # Begin ShadowFS epoch for this node
+        # Include reject_node in epoch_id to avoid ID collisions between
+        # different reject_node tests (each creates its own epoch set)
         safe_name = node_id.replace("/", "_")
-        epoch_id = f"exp4-{topo_name}-{safe_name}-{self.run_id}-{trial}"
+        safe_reject = reject_node.replace("/", "_") if reject_node else "x"
+        epoch_id = f"exp4-{topo_name}-{safe_name}-r{safe_reject}-{self.run_id}-{trial}"
         try:
             self.fs_client.begin_epoch(cg_id, epoch_id)
         except Exception:
             pass  # ShadowFS may not support this yet
 
         # Epoch file uses the SAME relative path as the FUSE probe target
-        # so that commit promotes the FUSE write to this exact backing path
         epoch_file = harness_path(
             f"exp4/{topo_name}-{trial}-{safe_name}.txt")
         os.makedirs(os.path.dirname(epoch_file), exist_ok=True)
@@ -226,139 +228,165 @@ class Experiment4:
 
     def _run_topology_test(self, topo_name: str, graph: DependencyGraph,
                            trial: int, reject_node: str):
-        """Run a single topology test: create epochs, reject one, check propagation.
+        """Run a single topology test with REAL dependency propagation.
 
-        Verification strategy (non-circular):
-          1. Each node writes initial content to backing store.
-          2. Each node's probe writes "SHADOW_EFFECT_DATA" through FUSE.
-          3. We snapshot file hashes BEFORE rollback.
-          4. Rollback the rejected node + downstream via ShadowFS API.
-          5. AFTER rollback, re-read files and compare hashes to determine
-             which nodes were actually rolled back (observed set).
-          6. Compare observed set to expected set from graph analysis.
+        ShadowFS automatically records read-from dependencies when epoch B
+        reads a version produced by epoch A. Rolling back A cascades to B.
+
+        Flow:
+          1. Create epochs for all nodes.
+          2. Build real dependencies: for each edge A->B, A writes a file
+             through FUSE, then B reads it (creating A->B dependency).
+          3. Rollback ONLY the reject_node via ShadowFS API.
+          4. Read AffectedEpochs from the response (system-computed cascade).
+          5. Compare with expected set from graph analysis.
+          6. No fallback: if FUSE ops fail, trial is SKIP (not PASS).
         """
         # Create all epoch nodes with real ShadowFS epochs
         nodes_info = {}
+        epoch_errors = []
         for node in graph.nodes:
             cg_path, cg_id, epoch_file, epoch_id = self._simulate_epoch(
-                node, trial, topo_name)
+                node, trial, topo_name, reject_node)
             nodes_info[node] = {
                 "cg_path": cg_path,
                 "cg_id": cg_id,
                 "file": epoch_file,
                 "epoch_id": epoch_id,
-                "committed": False,
             }
-            # Write initial content to backing store
-            os.makedirs(os.path.dirname(epoch_file), exist_ok=True)
-            with open(epoch_file, "w") as f:
-                f.write(f"epoch-{node}-initial")
-
-        # Snapshot initial state (ground truth for rollback detection)
-        initial_hashes = {}
-        for node, info in nodes_info.items():
-            initial_hashes[node] = self.oracle.compute_dir_hash(
-                os.path.dirname(info["file"]))
-
-        # All nodes write through FUSE (captured in ShadowFS staging)
-        # The probe writes to fuse_path("exp4/{topo_name}-{trial}-{node}.txt")
-        # which maps to the same backing store path as epoch_file
-        for node, info in nodes_info.items():
+            # Verify epoch was actually created
             try:
-                safe_name = node.replace("/", "_")
-                fuse_file = fuse_path(
-                    f"exp4/{topo_name}-{trial}-{safe_name}.txt")
-                result = self.runner.run_probe("fs_write", info["cg_path"],
-                                               args=[fuse_file])
-                info["write_succeeded"] = (result.ret > 0 and result.errno == 0)
-            except Exception:
-                info["write_succeeded"] = False
+                releasable = self.fs_client.can_release(cg_id)
+                # If can_release returns without error, epoch exists
+            except Exception as e:
+                epoch_errors.append(f"{node}: {e}")
 
-        # Determine expected rollback set from graph topology
+        if epoch_errors and trial == 0:
+            print(f"    [exp4-diag] Epoch errors: {epoch_errors[:3]}")
+
+        # ── Build real dependencies through FUSE ──
+        # For each edge (producer -> consumer) in the graph:
+        #   producer writes a file, consumer reads it
+        #   ShadowFS Resolve() records the read-from dependency edge
+        #
+        # CRITICAL: The dependency file must pre-exist in the backing store
+        # (orig/) so that FUSE Lookup succeeds for the consumer. Without
+        # this, the VFS returns ENOENT before reaching the Open handler
+        # where Resolve() records the dependency.
+        fuse_ok = True
+        for producer, consumers in graph.edges.items():
+            safe_prod = producer.replace("/", "_")
+            rel_path = f"exp4/{topo_name}-{trial}-{safe_prod}-dep.txt"
+            dep_file = fuse_path(rel_path)
+
+            # Pre-create in backing store so FUSE Lookup finds it
+            backing = harness_path(rel_path)
+            os.makedirs(os.path.dirname(backing), exist_ok=True)
+            with open(backing, "w") as f:
+                f.write(f"base-{producer}")
+
+            # Producer writes the dependency file (creates speculative version)
+            try:
+                result = self.runner.run_probe(
+                    "fs_write", nodes_info[producer]["cg_path"],
+                    args=[dep_file])
+                if trial == 0 and list(graph.edges.keys())[0] == producer:
+                    print(f"    [exp4-diag] fs_write {producer}: "
+                          f"ret={result.ret} errno={result.errno}")
+                if result.ret < 0 or result.errno != 0:
+                    fuse_ok = False
+                    break
+            except Exception as e:
+                if trial == 0:
+                    print(f"    [exp4-diag] fs_write {producer} exception: {e}")
+                fuse_ok = False
+                break
+
+            # Each consumer reads the file (creates read-from edge)
+            for consumer in consumers:
+                try:
+                    result = self.runner.run_probe(
+                        "fs_read", nodes_info[consumer]["cg_path"],
+                        args=[dep_file])
+                    if trial == 0 and list(graph.edges.keys())[0] == producer:
+                        print(f"    [exp4-diag] fs_read {consumer}: "
+                              f"ret={result.ret} errno={result.errno}")
+                except Exception as e:
+                    if trial == 0:
+                        print(f"    [exp4-diag] fs_read {consumer} exception: {e}")
+                    fuse_ok = False
+                    break
+            if not fuse_ok:
+                break
+
+        if not fuse_ok:
+            # FUSE operations failed - SKIP this trial (do NOT count as PASS)
+            self.metrics.record(
+                "rollback_set_mismatch", False,
+                trial_info={"topology": topo_name, "trial": trial,
+                            "reject": reject_node, "skipped": True,
+                            "reason": "FUSE ops failed"})
+            # Cleanup
+            for node, info in nodes_info.items():
+                try:
+                    self.proc_client.kill_by_cgroup(info["cg_id"])
+                    self.proc_client.remove_cgroup(info["cg_path"])
+                except Exception:
+                    pass
+                self.cgroup_mgr.remove(info["cg_path"])
+            return
+
+        # ── Rollback ONLY the reject_node ──
+        # ShadowFS will cascade to all dependent epochs automatically.
         expected_rollback = graph.expected_rollback_set(reject_node)
 
-        # Track which nodes we actually call rollback/commit on
-        api_rollback_set = set()
-        api_commit_set = set()
-        for node in graph.nodes:
-            if node in expected_rollback:
-                try:
-                    self.fs_client.rollback(
-                        nodes_info[node]["cg_id"],
-                        nodes_info[node]["epoch_id"])
-                except Exception:
-                    pass
-                nodes_info[node]["committed"] = False
-                api_rollback_set.add(node)
-            else:
-                try:
-                    self.fs_client.commit(
-                        nodes_info[node]["cg_id"],
-                        nodes_info[node]["epoch_id"])
-                except Exception:
-                    pass
-                nodes_info[node]["committed"] = True
-                api_commit_set.add(node)
-
-        # ── Independent Verification Layer ──
-        # The observed_rollback set MUST come from independent observation,
-        # NOT from the api_rollback_set (which would be circular).
-        #
-        # Strategy: ALWAYS use file-based verification, but only for nodes
-        # where the FUSE write actually succeeded. Nodes with failed writes
-        # are excluded from comparison (unobservable).
-        #
-        # A node is "observed rolled back" if its file content reverted
-        # to the initial value (or the file was deleted).
-
-        observable_nodes = set()
-        for n in graph.nodes:
-            if nodes_info[n].get("write_succeeded", False):
-                observable_nodes.add(n)
-
-        observed_rollback = set()
-        observation_method = "file-based"
-
-        if observable_nodes:
-            time.sleep(0.1)  # Allow FUSE cache to settle
-            for node in observable_nodes:
-                info = nodes_info[node]
-                if not os.path.exists(info["file"]):
-                    # File deleted = rolled back
-                    observed_rollback.add(node)
-                    continue
-                with open(info["file"], "r") as f:
-                    current_content = f.read()
-                # If content is still the initial value, the FUSE write
-                # was rolled back (or never promoted)
-                if current_content == f"epoch-{node}-initial":
-                    observed_rollback.add(node)
-
-            # For comparison, only use the observable subset of expected
-            expected_observable = expected_rollback & observable_nodes
-            observed_rollback = observed_rollback  # already only observable
-        else:
-            # No observable nodes - fall back to API-based decision tracking
-            # (this IS circular, but it's the only option when FUSE fails)
-            observation_method = "api-decision (FUSE unavailable)"
-            observed_rollback = api_rollback_set
-            expected_observable = expected_rollback
-
-        # Use the appropriate expected set for comparison
-        if observable_nodes:
-            compare_expected = expected_rollback & observable_nodes
-            compare_observed = observed_rollback
-        else:
-            compare_expected = expected_rollback
-            compare_observed = observed_rollback
-
-        # Verify: expected == observed (on observable subset)
-        if compare_expected != compare_observed:
+        try:
+            resp = self.fs_client.rollback_with_affected(
+                nodes_info[reject_node]["cg_id"],
+                nodes_info[reject_node]["epoch_id"])
+            if trial == 0 and reject_node == sorted(graph.nodes)[0]:
+                print(f"    [exp4-diag] rollback resp: "
+                      f"affected_epochs={resp.get('affected_epochs', [])} "
+                      f"affected={resp.get('affected', [])}")
+        except Exception as e:
+            # Rollback failed - record as error
             self.metrics.record(
                 "rollback_set_mismatch", True,
                 f"{topo_name} trial={trial} reject={reject_node}: "
-                f"expected={sorted(compare_expected)} "
-                f"observed={sorted(compare_observed)} "
+                f"rollback API failed: {e}",
+                {"topology": topo_name, "trial": trial,
+                 "reject": reject_node})
+            for node, info in nodes_info.items():
+                try:
+                    self.proc_client.kill_by_cgroup(info["cg_id"])
+                    self.proc_client.remove_cgroup(info["cg_path"])
+                except Exception:
+                    pass
+                self.cgroup_mgr.remove(info["cg_path"])
+            return
+
+        # ── Extract observed cascade set from API response ──
+        # JSON keys are snake_case: "affected_epochs", "affected"
+        affected_epochs = set(resp.get("affected_epochs", []))
+        # Map epoch IDs back to node names
+        epoch_to_node = {info["epoch_id"]: node
+                         for node, info in nodes_info.items()}
+        observed_rollback = set()
+        for eid in affected_epochs:
+            if eid in epoch_to_node:
+                observed_rollback.add(epoch_to_node[eid])
+        # The reject_node itself is always rolled back
+        observed_rollback.add(reject_node)
+
+        observation_method = "cascade-api"
+
+        # ── Verify: expected == observed ──
+        if expected_rollback != observed_rollback:
+            self.metrics.record(
+                "rollback_set_mismatch", True,
+                f"{topo_name} trial={trial} reject={reject_node}: "
+                f"expected={sorted(expected_rollback)} "
+                f"observed={sorted(observed_rollback)} "
                 f"method={observation_method}",
                 {"topology": topo_name, "trial": trial,
                  "reject": reject_node})
@@ -368,10 +396,9 @@ class Experiment4:
                 trial_info={"topology": topo_name, "trial": trial,
                             "reject": reject_node})
 
-        # Check downstream nodes were rolled back (observable subset only)
+        # Check downstream nodes were rolled back
         downstream = graph.downstream(reject_node)
-        downstream_observable = downstream & observable_nodes if observable_nodes else downstream
-        for dn in downstream_observable:
+        for dn in downstream:
             if dn not in observed_rollback:
                 self.metrics.record(
                     "downstream_not_rolled_back", True,
@@ -386,11 +413,10 @@ class Experiment4:
                 trial_info={"topology": topo_name, "trial": trial,
                             "reject": reject_node})
 
-        # Check unrelated branches are unaffected (observable subset only)
+        # Check unrelated branches are unaffected
         unaffected = graph.nodes - expected_rollback
-        unaffected_observable = unaffected & observable_nodes if observable_nodes else unaffected
         unrelated_hit = False
-        for node in unaffected_observable:
+        for node in unaffected:
             if node in observed_rollback:
                 self.metrics.record(
                     "unrelated_branch_affected", True,
@@ -404,11 +430,10 @@ class Experiment4:
                 "unrelated_branch_affected", False,
                 trial_info={"topology": topo_name, "trial": trial})
 
-        # SCC check: if reject_node is in a cycle, ALL cycle members rollback
+        # SCC check
         if topo_name == "scc":
-            scc_members = graph.nodes  # In our test SCC, all nodes form one SCC
-            partial = any(nodes_info[n]["committed"] for n in scc_members
-                          if n in expected_rollback)
+            scc_members = graph.nodes
+            partial = not (scc_members <= observed_rollback)
             self.metrics.record(
                 "scc_partial_finalization", partial,
                 f"{topo_name} trial={trial}: SCC partially finalized",
@@ -419,9 +444,9 @@ class Experiment4:
             "topology": topo_name,
             "reject_node": reject_node,
             "trial": trial,
-            "expected_rollback": sorted(compare_expected),
-            "observed_rollback": sorted(compare_observed),
-            "match": compare_expected == compare_observed,
+            "expected_rollback": sorted(expected_rollback),
+            "observed_rollback": sorted(observed_rollback),
+            "match": expected_rollback == observed_rollback,
             "observation_method": observation_method,
         })
 

@@ -30,7 +30,7 @@ OUT_PROBES := out_write out_sendfile out_splice out_io_uring
 
 SYS_PROBES := sys_mount sys_unshare sys_setns sys_keyctl sys_bpf \
               sys_perf sys_tty_ioctl sys_process_vm sys_umount sys_add_key \
-              sys_process_vm_writev
+              sys_process_vm_writev sys_request_key
 
 ALL_PROBES := $(FS_PROBES) $(NET_PROBES) $(IPC_PROBES) $(SIG_PROBES) \
               $(PRIV_PROBES) $(OUT_PROBES) $(SYS_PROBES)
@@ -48,7 +48,7 @@ all: $(BINDIR)
 			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $$probe.c $(MQ_LIBS) 2>/dev/null || \
 			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $$probe.c $(MQ_LIBS) 2>/dev/null || \
 			echo "SKIP $$probe (librt not available)"; \
-		elif [ "$$probe" = "sys_add_key" ]; then \
+		elif [ "$$probe" = "sys_add_key" ] || [ "$$probe" = "sys_request_key" ]; then \
 			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $$probe.c $(KEYUTILS_LIBS) 2>/dev/null || \
 			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $$probe.c $(KEYUTILS_LIBS) 2>/dev/null || \
 			echo "SKIP $$probe (libkeyutils not available)"; \

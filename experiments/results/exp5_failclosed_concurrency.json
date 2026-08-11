@@ -1,161 +1,171 @@
 {
   "experiment": "exp5_failclosed_concurrency",
-  "duration_seconds": 86.1,
-  "start_time": 1786462910.565315,
-  "end_time": 1786462996.6617455,
+  "duration_seconds": 105.42,
+  "start_time": 1786468388.9930797,
+  "end_time": 1786468494.411445,
   "metadata": {},
   "counters": {
     "unauthorized_effect_leaked": {
       "count": 0,
-      "total": 0,
+      "total": 90,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.06010397260720787
       ],
       "details": []
     },
     "partial_file_published": {
       "count": 0,
-      "total": 0,
+      "total": 60,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.08814456722682265
       ],
       "details": []
     },
     "baseline_premature_delete": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "effect_duplicated": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "rejected_transcript_canonical": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "fault_audit_corruption": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "fault_policy_partial": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "fault_fork_during_freeze": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "fault_token_replay": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "fault_wal_torn_tail": {
       "count": 0,
-      "total": 0,
+      "total": 5,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.596741011882846
       ],
       "details": []
     },
     "fault_concurrent_race": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "fault_ring_buffer_drop": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "fault_path_reconstruction": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "fault_pid_cgroup_reuse": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "fault_finalization_failure": {
       "count": 0,
-      "total": 0,
+      "total": 30,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.1651625739865457
       ],
       "details": []
     },
     "fault_drain_failure": {
+      "count": 0,
+      "total": 30,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.1651625739865457
+      ],
+      "details": []
+    },
+    "fault_injection_error": {
       "count": 0,
       "total": 0,
       "rate": 0.0,
@@ -166,5 +176,5 @@
       "details": []
     }
   },
-  "total_trials": 0
+  "total_trials": 545
 }

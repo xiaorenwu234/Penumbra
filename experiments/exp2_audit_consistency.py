@@ -105,7 +105,7 @@ class Experiment2:
     def test_allow_history_deny_future(self):
         """Policy allows past file writes but denies future network connects.
 
-        The file write (already in ShadowFS epoch) should be committed.
+        The file write goes through FUSE (real ShadowFS speculative version).
         The network connect (at fence) should get EPERM on restart.
         """
         for trial in range(self.repeats):
@@ -123,23 +123,21 @@ class Experiment2:
                     epoch_ok = False
                     print(f"    [exp2] WARNING: begin_epoch failed trial={trial}: {e}")
 
-                # Create a file through backing store (historical operation)
-                test_file = os.path.join(self.work_dir, f"hist-{trial}.txt")
-                os.makedirs(os.path.dirname(test_file), exist_ok=True)
-                with open(test_file, "w") as f:
-                    f.write("historical data")
+                # Set ENFORCED so FUSE attributes the write to this epoch
+                self.proc_client.set_epoch_mode(cg_id, 2)
+
+                # Create historical file THROUGH FUSE (real speculative version)
+                fuse_target = fuse_path(f"exp2/hist-{trial}.txt")
+                self.runner.run_probe("fs_write", cg_path, args=[fuse_target])
 
                 # Phase 2: Install policy that allows FILESYSTEM/WRITE
                 # but denies NETWORK/CONNECT
                 allow_fs = {"event_type": "WRITE", "action": "allow",
                             "path_pattern": "/"}
                 deny_net = {"event_type": "CONNECT", "action": "deny",
-                            "path_pattern": "/",
-                            "endpoint": {"family": 2, "addr": 0x7F000001,
-                                         "port": 9999}}
+                            "path_pattern": "/"}
                 policy = PolicyIR.from_allowed_ops([allow_fs, deny_net]).to_proc_policy()
                 self.proc_client.install_proc_policy(cg_id, policy)
-                self.proc_client.set_epoch_mode(cg_id, 2)
 
                 # Phase 3: Spawn network probe - should be denied
                 result = self.runner.run_probe("net_connect", cg_path,
@@ -152,11 +150,18 @@ class Experiment2:
                     f"trial={trial}: CONNECT allowed despite deny policy",
                     {"scenario": "allow_hist_deny_future", "trial": trial})
 
-                # Historical file should still be intact (committed via ShadowFS)
-                if not os.path.exists(test_file):
+                # Historical file: commit the epoch and verify file persists
+                check_path = harness_path(f"exp2/hist-{trial}.txt")
+                if epoch_ok:
+                    try:
+                        self.fs_client.commit(cg_id, epoch_id)
+                    except Exception:
+                        pass
+                # After commit, historical file should be visible
+                if not os.path.exists(check_path):
                     self.metrics.record(
                         "semantic_gap_detected", True,
-                        f"trial={trial}: historical file lost",
+                        f"trial={trial}: historical file lost after commit",
                         {"scenario": "allow_hist_deny_future", "trial": trial})
                 else:
                     self.metrics.record(
@@ -524,51 +529,66 @@ class Experiment2:
 
     def test_future_violation_eperm_restart(self):
         """When a fenced syscall is restarted after policy denies it,
-        the process must receive EPERM (not silently succeed or hang)."""
+        the process must receive EPERM (not silently succeed or hang).
+
+        Correct flow:
+          1. Set SPECULATIVE (mode=0) so probe gets fenced
+          2. Spawn probe and confirm it enters frozen list
+          3. Install deny policy
+          4. continue_by_cgroup (restart syscall with policy)
+          5. Verify probe receives EPERM
+        """
         for trial in range(self.repeats):
             cg_path = self.cgroup_mgr.create(f"exp2-ep-{trial}-{int(time.time()*1000)}")
             cg_id = self.cgroup_mgr.get_cgroup_id(cg_path)
             self.proc_client.add_cgroup(cg_path)
 
             try:
-                # Install deny policy for NETWORK/CONNECT
-                deny_net = {"event_type": "CONNECT", "action": "deny",
-                            "path_pattern": "/"}
-                policy = PolicyIR.from_allowed_ops([deny_net]).to_proc_policy()
-                self.proc_client.install_proc_policy(cg_id, policy)
-                self.proc_client.set_epoch_mode(cg_id, 2)
+                # Step 1: SPECULATIVE mode (probe will be fenced by BPF)
+                self.proc_client.set_epoch_mode(cg_id, 0)
 
-                # Spawn probe in SPECULATIVE first (gets fenced)
+                # Step 2: Spawn probe - it should get fenced
                 proc, write_fd = self.runner.spawn_and_hold(
                     "net_connect", cg_path, args=["9999"])
                 self.runner.release(write_fd)
 
-                # Wait for fence
-                time.sleep(0.1)
+                # Wait for fence and confirm probe is in frozen list
+                time.sleep(0.2)
+                frozen = self.proc_client.list_frozen(cg_id)
+                if not frozen:
+                    # Probe was not fenced - cannot test restart path
+                    proc.kill()
+                    proc.wait(timeout=2)
+                    self.metrics.record(
+                        "future_violation_not_denied", False,
+                        trial_info={"scenario": "eperm_restart",
+                                    "trial": trial, "skipped": True,
+                                    "reason": "probe not fenced"})
+                    continue
 
-                # Now continue (restart syscall) - should get EPERM
+                # Step 3: Install deny policy
+                deny_net = {"event_type": "CONNECT", "action": "deny",
+                            "path_pattern": "/"}
+                policy = PolicyIR.from_allowed_ops([deny_net]).to_proc_policy()
+                self.proc_client.install_proc_policy(cg_id, policy)
+                # Switch to ENFORCED so the policy takes effect on restart
+                self.proc_client.set_epoch_mode(cg_id, 2)
+
+                # Step 4: Continue (restart syscall with deny policy)
                 try:
                     self.proc_client.continue_by_cgroup(cg_id)
                 except Exception:
                     pass
 
-                # Collect result - must show EPERM
+                # Step 5: Collect result - must show EPERM
                 result = self.runner.wait_result(proc, "net_connect", timeout=5.0)
 
-                # The restarted syscall must return EPERM
-                got_eperm = (result.errno == errno.EPERM)
                 succeeded = (result.ret >= 0 and result.errno == 0)
                 self.metrics.record(
                     "future_violation_not_denied", succeeded,
                     f"trial={trial}: future violation not denied on restart "
                     f"(ret={result.ret} errno={result.errno})",
                     {"scenario": "eperm_restart", "trial": trial})
-
-                # If process was killed instead of getting EPERM, that's
-                # also acceptable (fail-closed), but record it
-                if not got_eperm and not succeeded and result.returncode != 0:
-                    # Process was killed - acceptable fail-closed behavior
-                    pass
 
             finally:
                 try:

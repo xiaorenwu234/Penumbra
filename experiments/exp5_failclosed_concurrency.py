@@ -60,9 +60,11 @@ class Experiment5:
 
     # BPF map capacity limit. Exp5 runs with a FRESH ShadowProc daemon
     # (restarted after exp1-4), so the full map capacity is available.
-    # The kernel BPF map default is 65536 entries; we cap at 5000 to
-    # stay well within limits while allowing full trial coverage.
-    MAX_CGROUPS_PER_RUN = 5000
+    # Empirically the map holds ~2500 entries; we cap at 2400 to leave
+    # buffer for teardown operations and ensure all 16 test types get
+    # an equal share (~150 trials each).
+    MAX_CGROUPS_PER_RUN = 2400
+    NUM_FAULT_TYPES = 16  # Total number of fault injection test methods
 
     def __init__(self, trials: int = 5000):
         self.trials = trials
@@ -100,6 +102,8 @@ class Experiment5:
         self.metrics.add_counter("fault_pid_cgroup_reuse")
         self.metrics.add_counter("fault_finalization_failure")
         self.metrics.add_counter("fault_drain_failure")
+        # Error tracking: exceptions that would otherwise be swallowed
+        self.metrics.add_counter("fault_injection_error")
 
     def setup(self):
         if os.geteuid() != 0:
@@ -155,15 +159,12 @@ class Experiment5:
         return max(0, self.MAX_CGROUPS_PER_RUN - self._cgroups_created)
 
     def _trials_for_test(self, base_trials: int) -> int:
-        """Get number of trials for a test, limited by remaining budget.
+        """Get number of trials for a test.
 
-        Uses proportional allocation: each of the 16 test types gets an
-        equal share of the remaining budget, ensuring later tests are not
-        starved by earlier ones.
+        Fixed per-test allocation: MAX_CGROUPS_PER_RUN / NUM_FAULT_TYPES.
+        This ensures each fault type gets equal budget regardless of order.
         """
-        # Divide remaining budget evenly across remaining test types
-        tests_remaining = max(1, 16 - self._tests_completed)
-        per_test_budget = self._remaining_budget() // tests_remaining
+        per_test_budget = self.MAX_CGROUPS_PER_RUN // self.NUM_FAULT_TYPES
         return max(0, min(base_trials, per_test_budget))
 
     def teardown(self):
@@ -451,22 +452,89 @@ class Experiment5:
 
     # ─── Fault: WAL torn tail ────────────────────────────────────────────
 
-    def test_wal_torn_tail(self):
-        """WAL torn tail (crash mid-write) -> recovery must be deterministic.
+    def _restart_shadowfs(self):
+        """Kill and restart ShadowFS, reconnect the client.
 
-        Uses the real ShadowFS journal path when available, falling back to
-        a synthetic journal that exercises the same recovery logic.
+        Returns True if restart succeeded, False otherwise.
+        """
+        import signal as _signal
+
+        # Find ShadowFS PID
+        fs_pid = None
+        try:
+            import subprocess as _sp
+            result = _sp.run(["pgrep", "-f", "shadowfs"],
+                             capture_output=True, text=True, timeout=5)
+            pids = result.stdout.strip().split("\n")
+            if pids and pids[0]:
+                fs_pid = int(pids[0])
+        except Exception:
+            pass
+
+        if fs_pid:
+            # Kill -9 (simulate crash)
+            try:
+                os.kill(fs_pid, _signal.SIGKILL)
+                time.sleep(0.5)
+            except ProcessLookupError:
+                pass
+
+        # Restart ShadowFS
+        proj = os.environ.get("PROJ_PATH",
+                              "/home/xht/桌面/penumbra-work/RQ2/speculative_shadow")
+        shadowfs_bin = os.path.join(proj, "ShadowFS", "shadowfs")
+        staging = os.environ.get("SHADOWFS_STAGING", "/tmp/shadow-rq2-test/staging")
+        mnt = os.environ.get("SHADOWFS_MNT", "/tmp/shadow-rq2-test/mnt")
+        orig = os.environ.get("SHADOWFS_ORIG", "/tmp/shadow-rq2-test/orig")
+        sock = os.environ.get("SHADOWFS_SOCK", "/tmp/shadowfs.sock")
+
+        if not os.path.exists(shadowfs_bin):
+            return False
+
+        import subprocess as _sp
+        try:
+            _sp.Popen(
+                [shadowfs_bin, "-staging", staging, "-sock", sock,
+                 "-allow-other", mnt, orig],
+                stdin=_sp.DEVNULL,
+                stdout=open("/var/tmp/shadowfs.log", "a"),
+                stderr=_sp.STDOUT)
+            time.sleep(2)  # Wait for startup
+        except Exception:
+            return False
+
+        # Reconnect client
+        try:
+            self.fs_client.close()
+        except Exception:
+            pass
+        try:
+            self.fs_client.connect()
+        except Exception:
+            return False
+
+        return True
+
+    def test_wal_torn_tail(self):
+        """WAL torn tail: kill -9 ShadowFS, truncate WAL, restart, verify.
+
+        Real crash recovery test:
+          1. Create epoch + write through FUSE
+          2. Begin commit (generates WAL records)
+          3. kill -9 ShadowFS (crash mid-commit)
+          4. Truncate WAL file (simulate torn write)
+          5. Restart ShadowFS
+          6. Verify: backing store is consistent (all-or-nothing)
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [5/14] WAL torn tail ({actual_trials} trials) ...", flush=True)
+        # Limit WAL restart trials (each restart is expensive)
+        actual_trials = min(actual_trials, 5)
+        print(f"  [5/16] WAL torn tail ({actual_trials} trials) ...", flush=True)
 
-        # Determine real journal path from ShadowFS staging area
         staging = os.environ.get("SHADOWFS_STAGING", "/tmp/shadow-rq2-test/staging")
-        real_journal_dir = os.path.join(staging, "journal")
-        use_real_journal = os.path.isdir(real_journal_dir)
+        wal_dir = os.path.join(staging, "journal")
 
         for trial in range(actual_trials):
-            # Create a cgroup+epoch to generate real journal entries
             try:
                 cg_path, cg_id = self._setup_cgroup_safe(f"exp5-wal-{trial}")
             except RuntimeError as e:
@@ -482,77 +550,96 @@ class Experiment5:
                 except Exception:
                     pass
 
-                # Generate some real journal activity
+                # Write through FUSE
                 self.proc_client.set_epoch_mode(cg_id, 2)
                 target = fuse_path(f"exp5/wal-{trial}.txt")
                 self.runner.run_probe("fs_write", cg_path, args=[target])
 
-                # Attempt commit (generates commit_intent + fs_committed records)
+                # Begin commit (starts WAL write)
                 try:
                     self.fs_client.commit(cg_id, epoch_id)
                 except Exception:
                     pass
 
-                # Now simulate torn tail: write a partial journal record
-                # to the staging journal directory (or synthetic path)
-                if use_real_journal:
-                    journal_path = os.path.join(
-                        real_journal_dir, f"torn-{trial}.jsonl")
-                else:
-                    journal_path = os.path.join(
-                        self.work_dir, f"journal-{trial}.jsonl")
-
-                os.makedirs(os.path.dirname(journal_path), exist_ok=True)
-                with open(journal_path, "w") as f:
-                    f.write('{"op": "open", "sid": "s1", "cgroup": "%s"}\n' % cg_id)
-                    f.write('{"op": "commit_intent", "sid": "s1"}\n')
-                    # Torn final record (simulates crash mid-write)
-                    f.write('{"op": "fs_committed", "sid": "s1", "cgroup":')
-
-                # Verify: torn tail must be detectable and only last record invalid
-                with open(journal_path, "r") as f:
-                    lines = f.readlines()
-                valid = 0
-                torn_detected = False
-                for i, line in enumerate(lines):
-                    try:
-                        json.loads(line.strip())
-                        valid += 1
-                    except json.JSONDecodeError:
-                        if i == len(lines) - 1:
-                            torn_detected = True
-                        else:
-                            # Mid-file corruption = real violation
-                            self.metrics.record(
-                                "fault_wal_torn_tail", True,
-                                f"trial={trial}: mid-file corruption at line {i}",
-                                {"fault": "wal_torn", "trial": trial})
-                            break
-                else:
-                    # All records parsed OK (torn was not detected) - violation
-                    self.metrics.record(
-                        "fault_wal_torn_tail", not torn_detected,
-                        f"trial={trial}: torn tail not detected",
-                        {"fault": "wal_torn", "trial": trial})
-
-                # Safety: after torn WAL, no effect should leak
+                # Record pre-crash state
                 check_path = harness_path(f"exp5/wal-{trial}.txt")
-                # File may or may not exist depending on commit timing,
-                # but must not be in a partial state
+                pre_crash_exists = os.path.exists(check_path)
+                pre_crash_content = None
+                if pre_crash_exists:
+                    with open(check_path, "rb") as f:
+                        pre_crash_content = f.read()
+
+                # ── CRASH: kill -9 ShadowFS ──
+                import signal as _signal
+                import subprocess as _sp
+                fs_pid = None
+                try:
+                    result = _sp.run(["pgrep", "-f", "shadowfs"],
+                                     capture_output=True, text=True, timeout=5)
+                    pids = result.stdout.strip().split("\n")
+                    if pids and pids[0]:
+                        fs_pid = int(pids[0])
+                except Exception:
+                    pass
+
+                if fs_pid:
+                    try:
+                        os.kill(fs_pid, _signal.SIGKILL)
+                        time.sleep(0.5)
+                    except ProcessLookupError:
+                        pass
+
+                # ── TORN TAIL: truncate WAL ──
+                if os.path.isdir(wal_dir):
+                    wal_files = [f for f in os.listdir(wal_dir)
+                                 if f.endswith('.jsonl') or f.endswith('.wal')]
+                    if wal_files:
+                        wal_path = os.path.join(wal_dir, wal_files[0])
+                        try:
+                            size = os.path.getsize(wal_path)
+                            if size > 10:
+                                # Truncate to half (torn write)
+                                with open(wal_path, 'r+b') as f:
+                                    f.truncate(size // 2)
+                        except OSError:
+                            pass
+
+                # ── RESTART ShadowFS ──
+                restarted = self._restart_shadowfs()
+                if not restarted:
+                    # Cannot restart - skip verification
+                    self.metrics.record(
+                        "fault_wal_torn_tail", False,
+                        trial_info={"fault": "wal_torn", "trial": trial,
+                                    "skipped": True, "reason": "restart failed"})
+                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    continue
+
+                # ── VERIFY: backing store consistency ──
+                # After recovery, file must be either:
+                #   - Fully committed (content == SHADOW_EFFECT_DATA)
+                #   - Fully absent (rollback)
+                # NEVER partial.
+                time.sleep(0.5)  # Allow recovery to complete
+
                 if os.path.exists(check_path):
                     with open(check_path, "rb") as f:
                         content = f.read()
+                    # Partial = has some bytes but not the full probe payload
                     partial = 0 < len(content) < 18
                     self.metrics.record(
-                        "unauthorized_effect_leaked", partial,
+                        "fault_wal_torn_tail", partial,
                         f"wal_torn trial={trial}: partial file ({len(content)}B)",
                         {"fault": "wal_torn", "trial": trial})
-
-                # Clean up synthetic journal
-                try:
-                    os.unlink(journal_path)
-                except OSError:
-                    pass
+                    self.metrics.record(
+                        "partial_file_published", partial,
+                        f"wal_torn trial={trial}: partial content after recovery",
+                        {"fault": "wal_torn", "trial": trial})
+                else:
+                    # File absent = rolled back (acceptable)
+                    self.metrics.record(
+                        "fault_wal_torn_tail", False,
+                        trial_info={"fault": "wal_torn", "trial": trial})
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
@@ -562,6 +649,8 @@ class Experiment5:
                 raise
             finally:
                 self._teardown_cgroup_safe(cg_path, cg_id)
+
+        self._tests_completed += 1
         print(f"    completed")
 
     # ─── Fault: Concurrent release/finalize race ─────────────────────────

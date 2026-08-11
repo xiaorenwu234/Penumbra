@@ -1,60 +1,60 @@
 {
   "experiment": "exp2_audit_consistency",
-  "duration_seconds": 6.02,
-  "start_time": 1786463491.5123265,
-  "end_time": 1786463497.532051,
+  "duration_seconds": 1.41,
+  "start_time": 1786468380.7396128,
+  "end_time": 1786468382.1524277,
   "metadata": {},
   "counters": {
     "historical_violation_not_rolled_back": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.39380253984098157
+        0.8406668742202352
       ],
       "details": []
     },
     "future_violation_not_denied": {
       "count": 0,
-      "total": 20,
+      "total": 4,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.2329050341138344
+        0.6632424901094364
       ],
       "details": []
     },
     "fingerprint_mismatch_released": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.39380253984098157
+        0.8406668742202352
       ],
       "details": []
     },
     "dual_path_single_check": {
       "count": 0,
-      "total": 20,
+      "total": 4,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.2329050341138344
+        0.6632424901094364
       ],
       "details": []
     },
     "semantic_gap_detected": {
       "count": 0,
-      "total": 40,
+      "total": 8,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.12791845975652216
+        0.4563394949072672
       ],
       "details": []
     }
   },
-  "total_trials": 100
+  "total_trials": 20
 }
