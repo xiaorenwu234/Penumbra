@@ -1,8 +1,8 @@
 {
   "experiment": "exp5_failclosed_concurrency",
-  "duration_seconds": 95.49,
-  "start_time": 1786451479.687409,
-  "end_time": 1786451575.1797545,
+  "duration_seconds": 94.95,
+  "start_time": 1786462329.4843302,
+  "end_time": 1786462424.4367237,
   "metadata": {},
   "counters": {
     "unauthorized_effect_leaked": {

@@ -12,10 +12,11 @@ BINDIR   := bin
 # Probes that need extra libraries
 IO_URING_LIBS := -luring
 MQ_LIBS       := -lrt -lpthread
+KEYUTILS_LIBS := -lkeyutils
 
 # All probe sources
 FS_PROBES := fs_write fs_create fs_delete fs_rename fs_link fs_symlink \
-             fs_truncate fs_chmod fs_chown fs_mkdir fs_rmdir
+             fs_truncate fs_chmod fs_chown fs_mkdir fs_rmdir fs_read fs_mknod
 
 NET_PROBES := net_connect net_bind net_send
 
@@ -23,12 +24,13 @@ IPC_PROBES := ipc_pipe ipc_unix ipc_shm ipc_msg ipc_sem ipc_mq ipc_mmap
 
 SIG_PROBES := sig_kill sig_ptrace
 
-PRIV_PROBES := priv_setuid priv_setgid priv_setgroups priv_capset
+PRIV_PROBES := priv_setuid priv_setgid priv_setgroups priv_capset priv_exec
 
 OUT_PROBES := out_write out_sendfile out_splice out_io_uring
 
 SYS_PROBES := sys_mount sys_unshare sys_setns sys_keyctl sys_bpf \
-              sys_perf sys_tty_ioctl sys_process_vm
+              sys_perf sys_tty_ioctl sys_process_vm sys_umount sys_add_key \
+              sys_process_vm_writev
 
 ALL_PROBES := $(FS_PROBES) $(NET_PROBES) $(IPC_PROBES) $(SIG_PROBES) \
               $(PRIV_PROBES) $(OUT_PROBES) $(SYS_PROBES)
@@ -46,6 +48,10 @@ all: $(BINDIR)
 			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $$probe.c $(MQ_LIBS) 2>/dev/null || \
 			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $$probe.c $(MQ_LIBS) 2>/dev/null || \
 			echo "SKIP $$probe (librt not available)"; \
+		elif [ "$$probe" = "sys_add_key" ]; then \
+			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $$probe.c $(KEYUTILS_LIBS) 2>/dev/null || \
+			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $$probe.c $(KEYUTILS_LIBS) 2>/dev/null || \
+			echo "SKIP $$probe (libkeyutils not available)"; \
 		else \
 			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $$probe.c 2>/dev/null || \
 			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $$probe.c || \

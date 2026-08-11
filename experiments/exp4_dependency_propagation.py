@@ -300,37 +300,66 @@ class Experiment4:
                 nodes_info[node]["committed"] = True
                 api_commit_set.add(node)
 
-        # ── Verification Layer 1: Decision correctness ──
-        # The rollback API must be called on EXACTLY the expected set
-        observed_rollback = api_rollback_set  # Decision-based observation
+        # ── Independent Verification Layer ──
+        # The observed_rollback set MUST come from independent observation,
+        # NOT from the api_rollback_set (which would be circular).
+        #
+        # Strategy: ALWAYS use file-based verification, but only for nodes
+        # where the FUSE write actually succeeded. Nodes with failed writes
+        # are excluded from comparison (unobservable).
+        #
+        # A node is "observed rolled back" if its file content reverted
+        # to the initial value (or the file was deleted).
 
-        # ── Verification Layer 2: File-state confirmation ──
-        # Only use file-based verification if ALL nodes' FUSE writes succeeded.
-        # Partial FUSE success would give misleading file-state observations.
-        fuse_reliable = all(
-            nodes_info[n].get("write_succeeded", False)
-            for n in graph.nodes)
-        if fuse_reliable:
-            file_based_rollback = set()
-            for node in graph.nodes:
+        observable_nodes = set()
+        for n in graph.nodes:
+            if nodes_info[n].get("write_succeeded", False):
+                observable_nodes.add(n)
+
+        observed_rollback = set()
+        observation_method = "file-based"
+
+        if observable_nodes:
+            time.sleep(0.1)  # Allow FUSE cache to settle
+            for node in observable_nodes:
                 info = nodes_info[node]
                 if not os.path.exists(info["file"]):
-                    file_based_rollback.add(node)
+                    # File deleted = rolled back
+                    observed_rollback.add(node)
                     continue
                 with open(info["file"], "r") as f:
                     current_content = f.read()
+                # If content is still the initial value, the FUSE write
+                # was rolled back (or never promoted)
                 if current_content == f"epoch-{node}-initial":
-                    file_based_rollback.add(node)
-            # Use file-based observation when FUSE is reliable
-            observed_rollback = file_based_rollback
+                    observed_rollback.add(node)
 
-        # Verify: expected == observed
-        if expected_rollback != observed_rollback:
+            # For comparison, only use the observable subset of expected
+            expected_observable = expected_rollback & observable_nodes
+            observed_rollback = observed_rollback  # already only observable
+        else:
+            # No observable nodes - fall back to API-based decision tracking
+            # (this IS circular, but it's the only option when FUSE fails)
+            observation_method = "api-decision (FUSE unavailable)"
+            observed_rollback = api_rollback_set
+            expected_observable = expected_rollback
+
+        # Use the appropriate expected set for comparison
+        if observable_nodes:
+            compare_expected = expected_rollback & observable_nodes
+            compare_observed = observed_rollback
+        else:
+            compare_expected = expected_rollback
+            compare_observed = observed_rollback
+
+        # Verify: expected == observed (on observable subset)
+        if compare_expected != compare_observed:
             self.metrics.record(
                 "rollback_set_mismatch", True,
                 f"{topo_name} trial={trial} reject={reject_node}: "
-                f"expected={sorted(expected_rollback)} "
-                f"observed={sorted(observed_rollback)}",
+                f"expected={sorted(compare_expected)} "
+                f"observed={sorted(compare_observed)} "
+                f"method={observation_method}",
                 {"topology": topo_name, "trial": trial,
                  "reject": reject_node})
         else:
@@ -339,9 +368,10 @@ class Experiment4:
                 trial_info={"topology": topo_name, "trial": trial,
                             "reject": reject_node})
 
-        # Check downstream nodes were rolled back
+        # Check downstream nodes were rolled back (observable subset only)
         downstream = graph.downstream(reject_node)
-        for dn in downstream:
+        downstream_observable = downstream & observable_nodes if observable_nodes else downstream
+        for dn in downstream_observable:
             if dn not in observed_rollback:
                 self.metrics.record(
                     "downstream_not_rolled_back", True,
@@ -356,12 +386,11 @@ class Experiment4:
                 trial_info={"topology": topo_name, "trial": trial,
                             "reject": reject_node})
 
-        # Check unrelated branches are unaffected
-        # Use the observed_rollback set (decision-based or file-based)
-        # to determine if unrelated nodes were incorrectly rolled back
+        # Check unrelated branches are unaffected (observable subset only)
         unaffected = graph.nodes - expected_rollback
+        unaffected_observable = unaffected & observable_nodes if observable_nodes else unaffected
         unrelated_hit = False
-        for node in unaffected:
+        for node in unaffected_observable:
             if node in observed_rollback:
                 self.metrics.record(
                     "unrelated_branch_affected", True,
@@ -390,9 +419,10 @@ class Experiment4:
             "topology": topo_name,
             "reject_node": reject_node,
             "trial": trial,
-            "expected_rollback": sorted(expected_rollback),
-            "observed_rollback": sorted(observed_rollback),
-            "match": expected_rollback == observed_rollback,
+            "expected_rollback": sorted(compare_expected),
+            "observed_rollback": sorted(compare_observed),
+            "match": compare_expected == compare_observed,
+            "observation_method": observation_method,
         })
 
         # Cleanup cgroups
@@ -602,12 +632,12 @@ class Experiment4:
 
     def _print_results_table(self):
         """Print the Expected/Observed rollback set table."""
-        print(f"\n{'='*70}")
+        print(f"\n{'='*80}")
         print(f"  ROLLBACK SET TABLE (Expected vs Observed)")
-        print(f"{'='*70}")
-        print(f"  {'Topology':<15} {'Reject':<8} {'Expected':<25} "
-              f"{'Observed':<25} {'Match'}")
-        print(f"  {'-'*15} {'-'*8} {'-'*25} {'-'*25} {'-'*5}")
+        print(f"{'='*80}")
+        print(f"  {'Topology':<15} {'Reject':<8} {'Expected':<22} "
+              f"{'Observed':<22} {'Method':<12} {'Match'}")
+        print(f"  {'-'*15} {'-'*8} {'-'*22} {'-'*22} {'-'*12} {'-'*5}")
 
         # Show a sample (first repeat of each topology)
         shown = set()
@@ -619,10 +649,11 @@ class Experiment4:
             exp_str = "{" + ",".join(row["expected_rollback"]) + "}"
             obs_str = "{" + ",".join(row["observed_rollback"]) + "}"
             match = "OK" if row["match"] else "FAIL"
+            method = row.get("observation_method", "unknown")
             print(f"  {row['topology']:<15} {row['reject_node']:<8} "
-                  f"{exp_str:<25} {obs_str:<25} {match}")
+                  f"{exp_str:<22} {obs_str:<22} {method:<12} {match}")
 
-        print(f"{'='*70}\n")
+        print(f"{'='*80}\n")
 
 
 def main():

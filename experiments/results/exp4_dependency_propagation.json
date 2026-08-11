@@ -1,8 +1,8 @@
 {
   "experiment": "exp4_dependency_propagation",
-  "duration_seconds": 0.6,
-  "start_time": 1786451479.0744066,
-  "end_time": 1786451479.6781902,
+  "duration_seconds": 2.97,
+  "start_time": 1786462326.5043788,
+  "end_time": 1786462329.475672,
   "metadata": {},
   "counters": {
     "downstream_not_rolled_back": {

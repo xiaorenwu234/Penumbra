@@ -1,60 +1,60 @@
 {
   "experiment": "exp2_audit_consistency",
-  "duration_seconds": 1.22,
-  "start_time": 1786451476.6512396,
-  "end_time": 1786451477.8670437,
+  "duration_seconds": 6.19,
+  "start_time": 1786462631.210721,
+  "end_time": 1786462637.4056516,
   "metadata": {},
   "counters": {
     "historical_violation_not_rolled_back": {
       "count": 0,
-      "total": 2,
+      "total": 10,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.8406668742202352
+        0.39380253984098157
       ],
       "details": []
     },
     "future_violation_not_denied": {
       "count": 0,
-      "total": 4,
+      "total": 20,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.6632424901094364
+        0.2329050341138344
       ],
       "details": []
     },
     "fingerprint_mismatch_released": {
       "count": 0,
-      "total": 2,
+      "total": 10,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.8406668742202352
+        0.39380253984098157
       ],
       "details": []
     },
     "dual_path_single_check": {
       "count": 0,
-      "total": 4,
+      "total": 20,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.6632424901094364
+        0.2329050341138344
       ],
       "details": []
     },
     "semantic_gap_detected": {
       "count": 0,
-      "total": 8,
+      "total": 40,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.4563394949072672
+        0.12791845975652216
       ],
       "details": []
     }
   },
-  "total_trials": 20
+  "total_trials": 100
 }

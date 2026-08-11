@@ -144,6 +144,23 @@ class ShadowProcClient(DaemonClient):
             req["policy"] = policy
         return self.request_ok(req)
 
+    def continue_with_policy(self, cgroup_id: str, policy: Dict) -> Dict:
+        """Continue frozen processes with fine-grained policy (mode=2).
+
+        The policy dict follows the proc_policy schema:
+          {
+            "classes": [{"effect_class": N, "operation": N, "mode": 2}, ...],
+            "network": [{"operation": N, "family": N, "addr": u32, "port": u16, "allow": 1}, ...],
+            "ipc": [{"operation": N, "ipc_type": N, "target": u64, "allow": 1}, ...],
+            "signal": [{"operation": N, "target_cgroup": u64, "allow": 1}, ...]
+          }
+        """
+        return self.request_ok({
+            "action": "continue_by_cgroup",
+            "cgroup_id": cgroup_id,
+            "policy": policy
+        })
+
     def commit_by_cgroup(self, cgroup_id: str) -> Dict:
         return self.request_ok({
             "action": "commit_by_cgroup", "cgroup_id": cgroup_id})

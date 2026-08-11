@@ -205,13 +205,22 @@ class ProbeRunner:
         return False, []
 
     def _parse_output(self, stdout: str) -> Tuple[int, int]:
-        """Parse 'ret=N errno=M' from probe stdout."""
+        """Parse 'ret=N errno=M' from probe stdout.
+
+        Handles unsigned overflow: some probes print -1 as 4294967295
+        (0xFFFFFFFF) due to unsigned printf formatting. Values >= 2^31
+        are converted to signed 32-bit representation.
+        """
         ret = -999
         errno_val = -999
         match = re.search(r"ret=(-?\d+)\s+errno=(\d+)", stdout)
         if match:
             ret = int(match.group(1))
             errno_val = int(match.group(2))
+            # Convert unsigned 32-bit overflow to signed
+            # (e.g., 4294967295 -> -1, 4294967294 -> -2)
+            if ret >= 0x80000000:
+                ret = ret - 0x100000000
         return ret, errno_val
 
     def cleanup(self):

@@ -146,7 +146,7 @@ class Experiment2:
                                                args=["9999"])
 
                 # Future violation must be denied
-                not_denied = (result.ret == 0 and result.errno == 0)
+                not_denied = (result.ret >= 0 and result.errno == 0)
                 self.metrics.record(
                     "future_violation_not_denied", not_denied,
                     f"trial={trial}: CONNECT allowed despite deny policy",
@@ -290,7 +290,7 @@ class Experiment2:
                                                args=["9999"])
 
                 # Should be denied because current policy (v2) doesn't allow 9999
-                released = (result.ret == 0 and result.errno == 0)
+                released = (result.ret >= 0 and result.errno == 0)
                 self.metrics.record(
                     "fingerprint_mismatch_released", released,
                     f"trial={trial}: effect released despite policy change "
@@ -557,7 +557,7 @@ class Experiment2:
 
                 # The restarted syscall must return EPERM
                 got_eperm = (result.errno == errno.EPERM)
-                succeeded = (result.ret == 0 and result.errno == 0)
+                succeeded = (result.ret >= 0 and result.errno == 0)
                 self.metrics.record(
                     "future_violation_not_denied", succeeded,
                     f"trial={trial}: future violation not denied on restart "

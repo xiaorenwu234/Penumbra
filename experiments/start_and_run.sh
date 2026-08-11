@@ -8,9 +8,10 @@ EXP="$PROJ/experiments"
 echo "[1/6] 清理旧进程和挂载..."
 pkill -9 -f shadow-proc 2>/dev/null || true
 pkill -9 -f shadowfs 2>/dev/null || true
+pkill -9 -f shadow-observe 2>/dev/null || true
 umount -l /tmp/shadow-rq2-test/mnt 2>/dev/null || true
 sleep 1
-rm -f /tmp/shadow_proc.sock /tmp/shadowfs.sock
+rm -f /tmp/shadow_proc.sock /tmp/shadowfs.sock /tmp/shadow_observe.sock
 
 echo "[2/6] 准备目录..."
 # 清理旧的 staging/WAL 数据，避免历史 epoch 状态干扰新运行
@@ -51,6 +52,25 @@ if kill -0 $FS_PID 2>/dev/null; then
     echo "  ShadowFS PID=$FS_PID OK"
 else
     echo "  WARNING: ShadowFS 未运行 (filesystem 测试将受限)"
+fi
+
+# 启动 ShadowObserve (如果二进制存在)
+OBSERVE_PID=""
+if [ -x "$PROJ/ShadowObserve/build/shadow-observe" ]; then
+    echo "  启动 ShadowObserve..."
+    "$PROJ/ShadowObserve/build/shadow-observe" \
+        --sock /tmp/shadow_observe.sock \
+        </dev/null >/var/tmp/shadowobserve.log 2>&1 &
+    OBSERVE_PID=$!
+    sleep 1
+    if kill -0 $OBSERVE_PID 2>/dev/null; then
+        echo "  ShadowObserve PID=$OBSERVE_PID OK"
+        export SHADOWOBSERVE_SOCK=/tmp/shadow_observe.sock
+    else
+        echo "  WARNING: ShadowObserve 启动失败 (audit 测试将受限)"
+    fi
+else
+    echo "  INFO: ShadowObserve 二进制不存在，跳过 (audit 测试将被 skip)"
 fi
 
 # 连接测试

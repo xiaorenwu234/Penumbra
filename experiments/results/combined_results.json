@@ -2,38 +2,38 @@
   "experiments": [
     {
       "experiment": "exp1_effect_coverage",
-      "duration_seconds": 7.96,
-      "start_time": 1786451468.6874588,
-      "end_time": 1786451476.6466703,
+      "duration_seconds": 8.36,
+      "start_time": 1786462315.800978,
+      "end_time": 1786462324.162496,
       "metadata": {},
       "counters": {
         "escaped_before_auth": {
-          "count": 0,
-          "total": 66,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.0806225695855719
-          ],
-          "details": []
-        },
-        "incorrectly_allowed": {
-          "count": 0,
-          "total": 234,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.02378236031230349
-          ],
-          "details": []
-        },
-        "incorrectly_denied": {
           "count": 0,
           "total": 72,
           "rate": 0.0,
           "ci_95": [
             0.0,
             0.07428312533191425
+          ],
+          "details": []
+        },
+        "incorrectly_allowed": {
+          "count": 0,
+          "total": 254,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.021940747894398305
+          ],
+          "details": []
+        },
+        "incorrectly_denied": {
+          "count": 0,
+          "total": 80,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.06723388948398218
           ],
           "details": []
         },
@@ -49,23 +49,43 @@
         },
         "missing_audit_events": {
           "count": 0,
-          "total": 44,
+          "total": 0,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.11733165909560225
+            1.0
+          ],
+          "details": []
+        },
+        "audit_tests_skipped": {
+          "count": 0,
+          "total": 46,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.11266886855695088
+          ],
+          "details": []
+        },
+        "effect_not_observed": {
+          "count": 0,
+          "total": 0,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            1.0
           ],
           "details": []
         }
       },
-      "total_trials": 418,
-      "wall_time_seconds": 8.0
+      "total_trials": 454,
+      "wall_time_seconds": 8.4
     },
     {
       "experiment": "exp2_audit_consistency",
-      "duration_seconds": 1.22,
-      "start_time": 1786451476.6512396,
-      "end_time": 1786451477.8670437,
+      "duration_seconds": 1.17,
+      "start_time": 1786462324.167283,
+      "end_time": 1786462325.3417933,
       "metadata": {},
       "counters": {
         "historical_violation_not_rolled_back": {
@@ -124,9 +144,9 @@
     },
     {
       "experiment": "exp3_rollback_correctness",
-      "duration_seconds": 1.2,
-      "start_time": 1786451477.8700788,
-      "end_time": 1786451479.0688453,
+      "duration_seconds": 1.15,
+      "start_time": 1786462325.344977,
+      "end_time": 1786462326.4987223,
       "metadata": {},
       "counters": {
         "rollback_content_mismatch": {
@@ -235,9 +255,9 @@
     },
     {
       "experiment": "exp4_dependency_propagation",
-      "duration_seconds": 0.6,
-      "start_time": 1786451479.0744066,
-      "end_time": 1786451479.6781902,
+      "duration_seconds": 2.97,
+      "start_time": 1786462326.5043788,
+      "end_time": 1786462329.475672,
       "metadata": {},
       "counters": {
         "downstream_not_rolled_back": {
@@ -292,13 +312,13 @@
         }
       },
       "total_trials": 75,
-      "wall_time_seconds": 0.6
+      "wall_time_seconds": 3.0
     },
     {
       "experiment": "exp5_failclosed_concurrency",
-      "duration_seconds": 95.49,
-      "start_time": 1786451479.687409,
-      "end_time": 1786451575.1797545,
+      "duration_seconds": 94.95,
+      "start_time": 1786462329.4843302,
+      "end_time": 1786462424.4367237,
       "metadata": {},
       "counters": {
         "unauthorized_effect_leaked": {
@@ -463,10 +483,10 @@
         }
       },
       "total_trials": 600,
-      "wall_time_seconds": 95.5
+      "wall_time_seconds": 95.0
     }
   ],
   "total_violations": 0,
-  "total_trials": 1147,
-  "timestamp": 1786451575.1929538
+  "total_trials": 1183,
+  "timestamp": 1786462424.4495375
 }
