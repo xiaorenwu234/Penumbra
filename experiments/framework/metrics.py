@@ -44,10 +44,11 @@ def binomial_ci(successes: int, trials: int,
 
 
 def _beta_ppf(p: float, a: int, b: int) -> float:
-    """Approximate inverse of the regularized incomplete beta function.
+    """Compute the p-th quantile of Beta(a, b) distribution.
 
-    Computes the p-th quantile of Beta(a, b).
-    Uses scipy if available, else a normal approximation to the Beta.
+    Uses scipy if available, otherwise implements the regularized
+    incomplete beta function via continued fraction (Lentz's method)
+    with bisection inversion. This gives true Clopper-Pearson intervals.
     """
     try:
         from scipy.stats import beta as beta_dist
@@ -55,16 +56,75 @@ def _beta_ppf(p: float, a: int, b: int) -> float:
     except ImportError:
         pass
 
-    # Fallback: normal approximation to Beta(a, b)
-    # Beta(a,b) has mean = a/(a+b), var = ab/((a+b)^2*(a+b+1))
+    # Fallback: bisection on the regularized incomplete beta function
     if a <= 0 or b <= 0:
         return 0.5
-    mean = a / (a + b)
-    var = (a * b) / ((a + b) ** 2 * (a + b + 1))
-    std = math.sqrt(var)
-    z = _norm_ppf(p)
-    result = mean + z * std
-    return max(0.0, min(1.0, result))
+
+    def _betacf(x: float, a: float, b: float) -> float:
+        """Continued fraction for incomplete beta (Lentz's method)."""
+        MAXIT = 200
+        EPS = 3.0e-12
+        FPMIN = 1.0e-30
+        qab = a + b
+        qap = a + 1.0
+        qam = a - 1.0
+        c = 1.0
+        d = 1.0 - qab * x / qap
+        if abs(d) < FPMIN:
+            d = FPMIN
+        d = 1.0 / d
+        h = d
+        for m in range(1, MAXIT + 1):
+            m2 = 2 * m
+            # Even step
+            aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+            d = 1.0 + aa * d
+            if abs(d) < FPMIN:
+                d = FPMIN
+            c = 1.0 + aa / c
+            if abs(c) < FPMIN:
+                c = FPMIN
+            d = 1.0 / d
+            h *= d * c
+            # Odd step
+            aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+            d = 1.0 + aa * d
+            if abs(d) < FPMIN:
+                d = FPMIN
+            c = 1.0 + aa / c
+            if abs(c) < FPMIN:
+                c = FPMIN
+            d = 1.0 / d
+            delta = d * c
+            h *= delta
+            if abs(delta - 1.0) < EPS:
+                break
+        return h
+
+    def _betai(x: float, a: float, b: float) -> float:
+        """Regularized incomplete beta function I_x(a,b)."""
+        if x <= 0.0:
+            return 0.0
+        if x >= 1.0:
+            return 1.0
+        # Use the symmetry relation for numerical stability
+        lbeta = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) +
+                 a * math.log(x) + b * math.log(1.0 - x))
+        front = math.exp(lbeta)
+        if x < (a + 1.0) / (a + b + 2.0):
+            return front * _betacf(x, a, b) / a
+        else:
+            return 1.0 - front * _betacf(1.0 - x, b, a) / b
+
+    # Bisection to find x such that I_x(a,b) = p
+    lo, hi = 0.0, 1.0
+    for _ in range(100):  # 100 iterations gives ~1e-30 precision
+        mid = (lo + hi) / 2.0
+        if _betai(mid, float(a), float(b)) < p:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
 
 
 def _norm_ppf(p: float) -> float:
@@ -166,6 +226,12 @@ class MetricsCollector:
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a JSON-compatible dict."""
+        # Count skipped trials
+        skipped_count = sum(
+            1 for t in self.trial_results if t.get("skipped", False))
+        # Identify 0/0 counters (no effective observations)
+        empty_counters = [
+            name for name, c in self.counters.items() if c.total == 0]
         return {
             "experiment": self.experiment_name,
             "duration_seconds": round(self.duration, 2),
@@ -183,6 +249,8 @@ class MetricsCollector:
                 for name, c in self.counters.items()
             },
             "total_trials": len(self.trial_results),
+            "skipped_trials": skipped_count,
+            "empty_counters": empty_counters,
         }
 
     def to_json(self, path: str = None) -> str:

@@ -473,7 +473,7 @@ class Experiment5:
                         "action": "grant_restart_token",
                         "tid": tid,
                         "syscall_nr": 272,  # __NR_unshare
-                        "effect_class": 6,  # SYSTEM
+                        "effect_class": 7,  # SYSTEM
                         "operation": 2,     # NAMESPACE
                     })
                 except Exception:
@@ -552,40 +552,50 @@ class Experiment5:
         Returns True if restart succeeded, False otherwise.
         """
         import signal as _signal
+        import subprocess as _sp
 
         # Find ShadowFS PID
         fs_pid = None
         try:
-            import subprocess as _sp
             result = _sp.run(["pgrep", "-f", "shadowfs"],
                              capture_output=True, text=True, timeout=5)
-            pids = result.stdout.strip().split("\n")
-            if pids and pids[0]:
+            pids = [p for p in result.stdout.strip().split("\n") if p]
+            if pids:
                 fs_pid = int(pids[0])
         except Exception:
             pass
 
         if fs_pid:
-            # Kill -9 (simulate crash)
             try:
                 os.kill(fs_pid, _signal.SIGKILL)
                 time.sleep(0.5)
             except ProcessLookupError:
                 pass
 
-        # Restart ShadowFS
-        proj = os.environ.get("PROJ_PATH",
-                              "/home/xht/桌面/penumbra-work/RQ2/speculative_shadow")
-        shadowfs_bin = os.path.join(proj, "ShadowFS", "shadowfs")
+        # Unmount stale FUSE and remove socket
         staging = os.environ.get("SHADOWFS_STAGING", "/tmp/shadow-rq2-test/staging")
         mnt = os.environ.get("SHADOWFS_MNT", "/tmp/shadow-rq2-test/mnt")
         orig = os.environ.get("SHADOWFS_ORIG", "/tmp/shadow-rq2-test/orig")
         sock = os.environ.get("SHADOWFS_SOCK", "/tmp/shadowfs.sock")
 
+        try:
+            _sp.run(["umount", "-l", mnt], capture_output=True, timeout=5)
+        except Exception:
+            pass
+        try:
+            os.unlink(sock)
+        except OSError:
+            pass
+        time.sleep(0.5)
+
+        # Restart ShadowFS
+        proj = os.environ.get("PROJ_PATH",
+                              "/home/xht/桌面/penumbra-work/RQ2/speculative_shadow")
+        shadowfs_bin = os.path.join(proj, "ShadowFS", "shadowfs")
+
         if not os.path.exists(shadowfs_bin):
             return False
 
-        import subprocess as _sp
         try:
             _sp.Popen(
                 [shadowfs_bin, "-staging", staging, "-sock", sock,
@@ -593,8 +603,15 @@ class Experiment5:
                 stdin=_sp.DEVNULL,
                 stdout=open("/var/tmp/shadowfs.log", "a"),
                 stderr=_sp.STDOUT)
-            time.sleep(2)  # Wait for startup
         except Exception:
+            return False
+
+        # Wait for socket to appear (up to 5 seconds)
+        for _ in range(10):
+            if os.path.exists(sock):
+                break
+            time.sleep(0.5)
+        else:
             return False
 
         # Reconnect client
@@ -602,6 +619,7 @@ class Experiment5:
             self.fs_client.close()
         except Exception:
             pass
+        time.sleep(0.5)
         try:
             self.fs_client.connect()
         except Exception:

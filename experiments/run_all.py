@@ -198,11 +198,20 @@ def print_combined_report(all_results: list, output_dir: str):
 
     # Validate: experiments with no counters are errors, not passes
     has_error = False
+    has_warning = False
     for r in merged:
         counters = r.get("counters", {})
         if not counters:
             print(f"  ERROR: {r.get('experiment')} has no counters (crashed?)")
             has_error = True
+        # Warn on 0/0 counters (no effective observations)
+        empty = r.get("empty_counters", [])
+        if empty:
+            print(f"  WARNING: {r.get('experiment')} has 0/0 counters: {empty}")
+            has_warning = True
+        skipped = r.get("skipped_trials", 0)
+        if skipped > 0:
+            print(f"  INFO: {r.get('experiment')} skipped {skipped} trials")
 
     # Recalculate totals (only from valid experiments with counters)
     total_v = sum(
@@ -216,13 +225,16 @@ def print_combined_report(all_results: list, output_dir: str):
             "total_violations": total_v,
             "total_trials": total_t,
             "has_error": has_error,
+            "has_warning": has_warning,
             "experiments_present": sorted(existing_experiments.keys()),
             "experiments_missing": sorted(CANONICAL_NAMES - set(existing_experiments.keys())),
             "timestamp": time.time(),
         }, f, indent=2)
     print(f"  Combined results saved to: {combined_path}")
     if has_error:
-        print(f"  WARNING: Some experiments have errors - results may be invalid")
+        print(f"  ERROR: Some experiments have errors - results may be invalid")
+    if has_warning:
+        print(f"  WARNING: Some counters have 0 effective observations")
 
 
 def main():

@@ -1,8 +1,8 @@
 {
   "experiment": "exp2_audit_consistency",
-  "duration_seconds": 1.45,
-  "start_time": 1786473815.0514743,
-  "end_time": 1786473816.500181,
+  "duration_seconds": 1.41,
+  "start_time": 1786474536.721148,
+  "end_time": 1786474538.1334226,
   "metadata": {},
   "counters": {
     "historical_violation_not_rolled_back": {
@@ -11,7 +11,7 @@
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.7954028465205154
+        0.8418861169915808
       ],
       "details": []
     },
@@ -21,7 +21,7 @@
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.5201311493875267
+        0.6023646356164742
       ],
       "details": []
     },
@@ -31,7 +31,7 @@
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.7954028465205154
+        0.8418861169915808
       ],
       "details": []
     },
@@ -41,7 +41,7 @@
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.5201311493875267
+        0.6023646356164742
       ],
       "details": []
     },
@@ -51,10 +51,12 @@
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.30593672431067165
+        0.369416647552819
       ],
       "details": []
     }
   },
-  "total_trials": 20
+  "total_trials": 20,
+  "skipped_trials": 0,
+  "empty_counters": []
 }

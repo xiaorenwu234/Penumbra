@@ -5,16 +5,16 @@
 
   Metric                                 Count        Rate                95% CI
   ------------------------------  ------------  ----------  --------------------
-  rollback_content_mismatch                0/8    0.000000  [0.000000, 0.305937]
-  rollback_metadata_mismatch               0/4    0.000000  [0.000000, 0.520131]
-  rollback_direntry_mismatch               0/2    0.000000  [0.000000, 0.795403]
-  child_process_survived                   0/2    0.000000  [0.000000, 0.795403]
-  provisional_output_not_removed           0/2    0.000000  [0.000000, 0.795403]
-  commit_not_exactly_once                  0/2    0.000000  [0.000000, 0.795403]
-  rollback_state_leak                      0/6    0.000000  [0.000000, 0.385393]
-  env_cwd_not_restored                     0/2    0.000000  [0.000000, 0.795403]
-  whiteout_not_cleaned                     0/2    0.000000  [0.000000, 0.795403]
-  memory_state_leaked                      0/4    0.000000  [0.000000, 0.520131]
+  rollback_content_mismatch                0/8    0.000000  [0.000000, 0.369417]
+  rollback_metadata_mismatch               0/4    0.000000  [0.000000, 0.602365]
+  rollback_direntry_mismatch               0/2    0.000000  [0.000000, 0.841886]
+  child_process_survived                   0/2    0.000000  [0.000000, 0.841886]
+  provisional_output_not_removed           0/2    0.000000  [0.000000, 0.841886]
+  commit_not_exactly_once                  0/2    0.000000  [0.000000, 0.841886]
+  rollback_state_leak                      0/6    0.000000  [0.000000, 0.459258]
+  env_cwd_not_restored                     0/2    0.000000  [0.000000, 0.841886]
+  whiteout_not_cleaned                     0/2    0.000000  [0.000000, 0.841886]
+  memory_state_leaked                      0/4    0.000000  [0.000000, 0.602365]
 
 ========================================================================
 
