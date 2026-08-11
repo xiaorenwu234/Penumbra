@@ -1,8 +1,8 @@
 {
   "experiment": "exp3_rollback_correctness",
-  "duration_seconds": 5.87,
-  "start_time": 1786462637.4091594,
-  "end_time": 1786462643.275876,
+  "duration_seconds": 5.72,
+  "start_time": 1786463497.5836785,
+  "end_time": 1786463503.305936,
   "metadata": {},
   "counters": {
     "rollback_content_mismatch": {

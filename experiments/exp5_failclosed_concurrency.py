@@ -58,10 +58,11 @@ RUN_EXPERIMENTS = os.environ.get("SHADOW_RUN_RQ2_EXPERIMENTS") == "1"
 class Experiment5:
     """Fail-closed and concurrency experiment."""
 
-    # BPF map capacity limit - increased to allow full trial coverage.
-    # The kernel BPF map default is 65536 entries; we stay well below but
-    # allow enough for thousands of trials across all fault types.
-    MAX_CGROUPS_PER_RUN = 6000
+    # BPF map capacity limit. Exp5 runs with a FRESH ShadowProc daemon
+    # (restarted after exp1-4), so the full map capacity is available.
+    # The kernel BPF map default is 65536 entries; we cap at 5000 to
+    # stay well within limits while allowing full trial coverage.
+    MAX_CGROUPS_PER_RUN = 5000
 
     def __init__(self, trials: int = 5000):
         self.trials = trials
@@ -238,7 +239,14 @@ class Experiment5:
 
                 # After corruption: ENFORCED with no policy = default deny
                 # BPF enforcement must still work (unaffected by journal state)
-                self.proc_client.set_epoch_mode(cg_id, 2)
+                try:
+                    self.proc_client.set_epoch_mode(cg_id, 2)
+                except RuntimeError as e:
+                    if "Argument list too long" in str(e) or "map" in str(e).lower():
+                        print(f"    [BPF map full at trial {trial}, stopping early]")
+                        self._teardown_cgroup_safe(cg_path, cg_id)
+                        break
+                    raise
 
                 # BPF-enforced probe must be denied
                 result = self.runner.run_probe("sys_unshare", cg_path)

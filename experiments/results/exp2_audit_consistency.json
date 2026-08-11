@@ -1,8 +1,8 @@
 {
   "experiment": "exp2_audit_consistency",
-  "duration_seconds": 6.19,
-  "start_time": 1786462631.210721,
-  "end_time": 1786462637.4056516,
+  "duration_seconds": 6.02,
+  "start_time": 1786463491.5123265,
+  "end_time": 1786463497.532051,
   "metadata": {},
   "counters": {
     "historical_violation_not_rolled_back": {

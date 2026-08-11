@@ -1,327 +1,53 @@
 {
   "experiments": [
     {
-      "experiment": "exp1_effect_coverage",
-      "duration_seconds": 8.36,
-      "start_time": 1786462315.800978,
-      "end_time": 1786462324.162496,
-      "metadata": {},
-      "counters": {
-        "escaped_before_auth": {
-          "count": 0,
-          "total": 72,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.07428312533191425
-          ],
-          "details": []
-        },
-        "incorrectly_allowed": {
-          "count": 0,
-          "total": 254,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.021940747894398305
-          ],
-          "details": []
-        },
-        "incorrectly_denied": {
-          "count": 0,
-          "total": 80,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.06723388948398218
-          ],
-          "details": []
-        },
-        "duplicated_after_restart": {
-          "count": 0,
-          "total": 2,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.8406668742202352
-          ],
-          "details": []
-        },
-        "missing_audit_events": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        },
-        "audit_tests_skipped": {
-          "count": 0,
-          "total": 46,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.11266886855695088
-          ],
-          "details": []
-        },
-        "effect_not_observed": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        }
-      },
-      "total_trials": 454,
-      "wall_time_seconds": 8.4
-    },
-    {
-      "experiment": "exp2_audit_consistency",
-      "duration_seconds": 1.17,
-      "start_time": 1786462324.167283,
-      "end_time": 1786462325.3417933,
-      "metadata": {},
-      "counters": {
-        "historical_violation_not_rolled_back": {
-          "count": 0,
-          "total": 2,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.8406668742202352
-          ],
-          "details": []
-        },
-        "future_violation_not_denied": {
-          "count": 0,
-          "total": 4,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.6632424901094364
-          ],
-          "details": []
-        },
-        "fingerprint_mismatch_released": {
-          "count": 0,
-          "total": 2,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.8406668742202352
-          ],
-          "details": []
-        },
-        "dual_path_single_check": {
-          "count": 0,
-          "total": 4,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.6632424901094364
-          ],
-          "details": []
-        },
-        "semantic_gap_detected": {
-          "count": 0,
-          "total": 8,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.4563394949072672
-          ],
-          "details": []
-        }
-      },
-      "total_trials": 20,
-      "wall_time_seconds": 1.2
-    },
-    {
-      "experiment": "exp3_rollback_correctness",
-      "duration_seconds": 1.15,
-      "start_time": 1786462325.344977,
-      "end_time": 1786462326.4987223,
-      "metadata": {},
-      "counters": {
-        "rollback_content_mismatch": {
-          "count": 0,
-          "total": 8,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.4563394949072672
-          ],
-          "details": []
-        },
-        "rollback_metadata_mismatch": {
-          "count": 0,
-          "total": 4,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.6632424901094364
-          ],
-          "details": []
-        },
-        "rollback_direntry_mismatch": {
-          "count": 0,
-          "total": 2,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.8406668742202352
-          ],
-          "details": []
-        },
-        "child_process_survived": {
-          "count": 0,
-          "total": 2,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.8406668742202352
-          ],
-          "details": []
-        },
-        "provisional_output_not_removed": {
-          "count": 0,
-          "total": 2,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.8406668742202352
-          ],
-          "details": []
-        },
-        "commit_not_exactly_once": {
-          "count": 0,
-          "total": 2,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.8406668742202352
-          ],
-          "details": []
-        },
-        "rollback_state_leak": {
-          "count": 0,
-          "total": 6,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.5416315500561295
-          ],
-          "details": []
-        },
-        "env_cwd_not_restored": {
-          "count": 0,
-          "total": 2,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.8406668742202352
-          ],
-          "details": []
-        },
-        "whiteout_not_cleaned": {
-          "count": 0,
-          "total": 2,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.8406668742202352
-          ],
-          "details": []
-        },
-        "memory_state_leaked": {
-          "count": 0,
-          "total": 4,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.6632424901094364
-          ],
-          "details": []
-        }
-      },
-      "total_trials": 34,
-      "wall_time_seconds": 1.2
-    },
-    {
       "experiment": "exp4_dependency_propagation",
-      "duration_seconds": 2.97,
-      "start_time": 1786462326.5043788,
-      "end_time": 1786462329.475672,
+      "duration_seconds": 15.48,
+      "start_time": 1786463503.3597693,
+      "end_time": 1786463518.8363178,
       "metadata": {},
       "counters": {
         "downstream_not_rolled_back": {
           "count": 0,
-          "total": 23,
+          "total": 115,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.20740064659972968
+            0.04750811483836765
           ],
           "details": []
         },
         "unrelated_branch_affected": {
           "count": 0,
-          "total": 23,
+          "total": 115,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.20740064659972968
+            0.04750811483836765
           ],
           "details": []
         },
         "scc_partial_finalization": {
           "count": 0,
-          "total": 3,
+          "total": 15,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.7439738358735741
+            0.29284180455804304
           ],
           "details": []
         },
         "premature_downstream_release": {
           "count": 0,
-          "total": 2,
+          "total": 10,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.8406668742202352
+            0.39380253984098157
           ],
           "details": []
         },
         "rollback_set_mismatch": {
-          "count": 0,
-          "total": 24,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.20009368479147915
-          ],
-          "details": []
-        }
-      },
-      "total_trials": 75,
-      "wall_time_seconds": 3.0
-    },
-    {
-      "experiment": "exp5_failclosed_concurrency",
-      "duration_seconds": 94.95,
-      "start_time": 1786462329.4843302,
-      "end_time": 1786462424.4367237,
-      "metadata": {},
-      "counters": {
-        "unauthorized_effect_leaked": {
           "count": 0,
           "total": 120,
           "rate": 0.0,
@@ -330,163 +56,13 @@
             0.04559692548879232
           ],
           "details": []
-        },
-        "partial_file_published": {
-          "count": 0,
-          "total": 60,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.08814456722682265
-          ],
-          "details": []
-        },
-        "baseline_premature_delete": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "effect_duplicated": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "rejected_transcript_canonical": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_audit_corruption": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_policy_partial": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_fork_during_freeze": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_token_replay": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_wal_torn_tail": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_concurrent_race": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_ring_buffer_drop": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_path_reconstruction": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_pid_cgroup_reuse": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_finalization_failure": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
-        },
-        "fault_drain_failure": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1651625739865457
-          ],
-          "details": []
         }
       },
-      "total_trials": 600,
-      "wall_time_seconds": 95.0
+      "total_trials": 375,
+      "wall_time_seconds": 15.5
     }
   ],
   "total_violations": 0,
-  "total_trials": 1183,
-  "timestamp": 1786462424.4495375
+  "total_trials": 375,
+  "timestamp": 1786463518.8404925
 }

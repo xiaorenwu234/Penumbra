@@ -111,7 +111,50 @@ export SHADOWFS_MNT=/tmp/shadow-rq2-test/mnt
 export SHADOWFS_ORIG=/tmp/shadow-rq2-test/orig
 export SHADOWFS_STAGING=/tmp/shadow-rq2-test/staging
 
-python3 run_all.py --repeats "${1:-2}" --trials "${2:-100}" --skip-build --output-dir ./results
+REPEATS="${1:-2}"
+TRIALS="${2:-100}"
+
+# Phase A: Run exp1-4 (BPF map accumulates entries)
+python3 run_all.py --repeats "$REPEATS" --trials "$TRIALS" --skip-build --exp 1 --output-dir ./results
+python3 run_all.py --repeats "$REPEATS" --trials "$TRIALS" --skip-build --exp 2 --output-dir ./results
+python3 run_all.py --repeats "$REPEATS" --trials "$TRIALS" --skip-build --exp 3 --output-dir ./results
+python3 run_all.py --repeats "$REPEATS" --trials "$TRIALS" --skip-build --exp 4 --output-dir ./results
+
+# Phase B: Restart ShadowProc to get fresh BPF maps for exp5
+echo ""
+echo "######################################################################"
+echo "  RESTARTING ShadowProc (fresh BPF maps for Exp5)"
+echo "######################################################################"
+kill -9 $SP_PID 2>/dev/null || true
+sleep 1
+rm -f /tmp/shadow_proc.sock
+# Ensure cgroup path exists for the restarted daemon
+mkdir -p /sys/fs/cgroup/shadow-rq2 2>/dev/null || true
+"$PROJ/ShadowProc/target/release/shadow-proc" \
+    --sock /tmp/shadow_proc.sock \
+    --cgroup-path /sys/fs/cgroup/shadow-rq2 \
+    </dev/null >/var/tmp/shadowproc.log 2>&1 &
+SP_PID=$!
+sleep 3
+if ! kill -0 $SP_PID 2>/dev/null; then
+    echo "ERROR: ShadowProc restart failed"; cat /var/tmp/shadowproc.log; exit 1
+fi
+# Wait for socket to appear (up to 10 seconds)
+for i in $(seq 1 10); do
+    if [ -S /tmp/shadow_proc.sock ]; then
+        break
+    fi
+    sleep 1
+done
+if [ ! -S /tmp/shadow_proc.sock ]; then
+    echo "ERROR: ShadowProc socket not created after restart"
+    cat /var/tmp/shadowproc.log
+    exit 1
+fi
+echo "  ShadowProc restarted PID=$SP_PID OK (socket ready)"
+
+# Phase C: Run exp5 with fresh BPF maps
+python3 run_all.py --repeats "$REPEATS" --trials "$TRIALS" --skip-build --exp 5 --output-dir ./results
 
 echo ""
 echo "=== 实验完成 ==="

@@ -1,8 +1,8 @@
 {
   "experiment": "exp1_effect_coverage",
-  "duration_seconds": 42.65,
-  "start_time": 1786462588.5522537,
-  "end_time": 1786462631.1984527,
+  "duration_seconds": 42.61,
+  "start_time": 1786463448.8455276,
+  "end_time": 1786463491.4519384,
   "metadata": {},
   "counters": {
     "escaped_before_auth": {
