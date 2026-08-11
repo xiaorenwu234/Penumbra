@@ -1,26 +1,26 @@
 ========================================================================
   EXPERIMENT: exp5_failclosed_concurrency
-  Duration: 27.2s
+  Duration: 74.8s
 ========================================================================
 
   Metric                                Count        Rate                95% CI
   -----------------------------  ------------  ----------  --------------------
-  unauthorized_effect_leaked             0/90    0.000000  [0.000000, 0.040159]
-  partial_file_published                 0/65    0.000000  [0.000000, 0.055172]
-  baseline_premature_delete              0/30    0.000000  [0.000000, 0.115703]
-  effect_duplicated                      0/30    0.000000  [0.000000, 0.115703]
-  rejected_transcript_canonical          0/30    0.000000  [0.000000, 0.115703]
-  fault_audit_corruption                 0/30    0.000000  [0.000000, 0.115703]
-  fault_policy_partial                   0/30    0.000000  [0.000000, 0.115703]
-  fault_fork_during_freeze               0/30    0.000000  [0.000000, 0.115703]
+  unauthorized_effect_leaked            0/300    0.000000  [0.000000, 0.012221]
+  partial_file_published                0/155    0.000000  [0.000000, 0.023518]
+  baseline_premature_delete             0/106    0.000000  [0.000000, 0.034202]
+  effect_duplicated                       0/0    0.000000  [0.000000, 1.000000]
+  rejected_transcript_canonical           0/0    0.000000  [0.000000, 1.000000]
+  fault_audit_corruption                0/150    0.000000  [0.000000, 0.024293]
+  fault_policy_partial                  0/150    0.000000  [0.000000, 0.024293]
+  fault_fork_during_freeze              0/150    0.000000  [0.000000, 0.024293]
   fault_token_replay                      0/0    0.000000  [0.000000, 1.000000]
   fault_wal_torn_tail                     0/5    0.000000  [0.000000, 0.521824]
-  fault_concurrent_race                  0/30    0.000000  [0.000000, 0.115703]
-  fault_ring_buffer_drop                 0/30    0.000000  [0.000000, 0.115703]
-  fault_path_reconstruction              0/30    0.000000  [0.000000, 0.115703]
-  fault_pid_cgroup_reuse                 0/30    0.000000  [0.000000, 0.115703]
-  fault_finalization_failure             0/30    0.000000  [0.000000, 0.115703]
-  fault_drain_failure                    0/30    0.000000  [0.000000, 0.115703]
+  fault_concurrent_race                 0/150    0.000000  [0.000000, 0.024293]
+  fault_ring_buffer_drop                  0/0    0.000000  [0.000000, 1.000000]
+  fault_path_reconstruction               0/0    0.000000  [0.000000, 1.000000]
+  fault_pid_cgroup_reuse                  0/0    0.000000  [0.000000, 1.000000]
+  fault_finalization_failure              0/0    0.000000  [0.000000, 1.000000]
+  fault_drain_failure                     0/0    0.000000  [0.000000, 1.000000]
   fault_injection_error                   0/0    0.000000  [0.000000, 1.000000]
 
 ========================================================================

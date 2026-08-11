@@ -1,57 +1,57 @@
 {
   "experiment": "exp1_effect_coverage",
-  "duration_seconds": 18.3,
-  "start_time": 1786474518.3646703,
-  "end_time": 1786474536.6631207,
+  "duration_seconds": 90.94,
+  "start_time": 1786474807.7078874,
+  "end_time": 1786474898.6476815,
   "metadata": {},
   "counters": {
     "escaped_before_auth": {
       "count": 0,
-      "total": 76,
+      "total": 380,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.04737875386693119
+        0.00966061107988142
       ],
       "details": []
     },
     "incorrectly_allowed": {
       "count": 0,
-      "total": 268,
+      "total": 1340,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.013670178327654436
+        0.0027491093739669403
       ],
       "details": []
     },
     "incorrectly_denied": {
       "count": 0,
-      "total": 94,
+      "total": 470,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.03848335099752914
+        0.007817959227397087
       ],
       "details": []
     },
     "duplicated_after_restart": {
       "count": 0,
-      "total": 2,
+      "total": 10,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.8418861169915808
+        0.3084971078187607
       ],
       "details": []
     },
     "missing_audit_events": {
       "count": 0,
-      "total": 52,
+      "total": 260,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.0684822087033205
+        0.014087822580252263
       ],
       "details": []
     },
@@ -67,16 +67,16 @@
     },
     "effect_not_observed": {
       "count": 0,
-      "total": 4,
+      "total": 20,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.6023646356164742
+        0.1684334709830852
       ],
       "details": []
     }
   },
-  "total_trials": 496,
+  "total_trials": 2480,
   "skipped_trials": 0,
   "empty_counters": [
     "audit_tests_skipped"
