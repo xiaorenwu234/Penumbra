@@ -1,0 +1,472 @@
+{
+  "experiments": [
+    {
+      "experiment": "exp1_effect_coverage",
+      "duration_seconds": 7.96,
+      "start_time": 1786451468.6874588,
+      "end_time": 1786451476.6466703,
+      "metadata": {},
+      "counters": {
+        "escaped_before_auth": {
+          "count": 0,
+          "total": 66,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0806225695855719
+          ],
+          "details": []
+        },
+        "incorrectly_allowed": {
+          "count": 0,
+          "total": 234,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.02378236031230349
+          ],
+          "details": []
+        },
+        "incorrectly_denied": {
+          "count": 0,
+          "total": 72,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.07428312533191425
+          ],
+          "details": []
+        },
+        "duplicated_after_restart": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8406668742202352
+          ],
+          "details": []
+        },
+        "missing_audit_events": {
+          "count": 0,
+          "total": 44,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.11733165909560225
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 418,
+      "wall_time_seconds": 8.0
+    },
+    {
+      "experiment": "exp2_audit_consistency",
+      "duration_seconds": 1.22,
+      "start_time": 1786451476.6512396,
+      "end_time": 1786451477.8670437,
+      "metadata": {},
+      "counters": {
+        "historical_violation_not_rolled_back": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8406668742202352
+          ],
+          "details": []
+        },
+        "future_violation_not_denied": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.6632424901094364
+          ],
+          "details": []
+        },
+        "fingerprint_mismatch_released": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8406668742202352
+          ],
+          "details": []
+        },
+        "dual_path_single_check": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.6632424901094364
+          ],
+          "details": []
+        },
+        "semantic_gap_detected": {
+          "count": 0,
+          "total": 8,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.4563394949072672
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 20,
+      "wall_time_seconds": 1.2
+    },
+    {
+      "experiment": "exp3_rollback_correctness",
+      "duration_seconds": 1.2,
+      "start_time": 1786451477.8700788,
+      "end_time": 1786451479.0688453,
+      "metadata": {},
+      "counters": {
+        "rollback_content_mismatch": {
+          "count": 0,
+          "total": 8,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.4563394949072672
+          ],
+          "details": []
+        },
+        "rollback_metadata_mismatch": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.6632424901094364
+          ],
+          "details": []
+        },
+        "rollback_direntry_mismatch": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8406668742202352
+          ],
+          "details": []
+        },
+        "child_process_survived": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8406668742202352
+          ],
+          "details": []
+        },
+        "provisional_output_not_removed": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8406668742202352
+          ],
+          "details": []
+        },
+        "commit_not_exactly_once": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8406668742202352
+          ],
+          "details": []
+        },
+        "rollback_state_leak": {
+          "count": 0,
+          "total": 6,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.5416315500561295
+          ],
+          "details": []
+        },
+        "env_cwd_not_restored": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8406668742202352
+          ],
+          "details": []
+        },
+        "whiteout_not_cleaned": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8406668742202352
+          ],
+          "details": []
+        },
+        "memory_state_leaked": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.6632424901094364
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 34,
+      "wall_time_seconds": 1.2
+    },
+    {
+      "experiment": "exp4_dependency_propagation",
+      "duration_seconds": 0.6,
+      "start_time": 1786451479.0744066,
+      "end_time": 1786451479.6781902,
+      "metadata": {},
+      "counters": {
+        "downstream_not_rolled_back": {
+          "count": 0,
+          "total": 23,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.20740064659972968
+          ],
+          "details": []
+        },
+        "unrelated_branch_affected": {
+          "count": 0,
+          "total": 23,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.20740064659972968
+          ],
+          "details": []
+        },
+        "scc_partial_finalization": {
+          "count": 0,
+          "total": 3,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7439738358735741
+          ],
+          "details": []
+        },
+        "premature_downstream_release": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8406668742202352
+          ],
+          "details": []
+        },
+        "rollback_set_mismatch": {
+          "count": 0,
+          "total": 24,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.20009368479147915
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 75,
+      "wall_time_seconds": 0.6
+    },
+    {
+      "experiment": "exp5_failclosed_concurrency",
+      "duration_seconds": 95.49,
+      "start_time": 1786451479.687409,
+      "end_time": 1786451575.1797545,
+      "metadata": {},
+      "counters": {
+        "unauthorized_effect_leaked": {
+          "count": 0,
+          "total": 120,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.04559692548879232
+          ],
+          "details": []
+        },
+        "partial_file_published": {
+          "count": 0,
+          "total": 60,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.08814456722682265
+          ],
+          "details": []
+        },
+        "baseline_premature_delete": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "effect_duplicated": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "rejected_transcript_canonical": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_audit_corruption": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_policy_partial": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_fork_during_freeze": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_token_replay": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_wal_torn_tail": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_concurrent_race": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_ring_buffer_drop": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_path_reconstruction": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_pid_cgroup_reuse": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_finalization_failure": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        },
+        "fault_drain_failure": {
+          "count": 0,
+          "total": 30,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1651625739865457
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 600,
+      "wall_time_seconds": 95.5
+    }
+  ],
+  "total_violations": 0,
+  "total_trials": 1147,
+  "timestamp": 1786451575.1929538
+}

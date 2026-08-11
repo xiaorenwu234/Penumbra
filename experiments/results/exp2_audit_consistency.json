@@ -1,0 +1,60 @@
+{
+  "experiment": "exp2_audit_consistency",
+  "duration_seconds": 1.22,
+  "start_time": 1786451476.6512396,
+  "end_time": 1786451477.8670437,
+  "metadata": {},
+  "counters": {
+    "historical_violation_not_rolled_back": {
+      "count": 0,
+      "total": 2,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.8406668742202352
+      ],
+      "details": []
+    },
+    "future_violation_not_denied": {
+      "count": 0,
+      "total": 4,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.6632424901094364
+      ],
+      "details": []
+    },
+    "fingerprint_mismatch_released": {
+      "count": 0,
+      "total": 2,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.8406668742202352
+      ],
+      "details": []
+    },
+    "dual_path_single_check": {
+      "count": 0,
+      "total": 4,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.6632424901094364
+      ],
+      "details": []
+    },
+    "semantic_gap_detected": {
+      "count": 0,
+      "total": 8,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.4563394949072672
+      ],
+      "details": []
+    }
+  },
+  "total_trials": 20
+}
