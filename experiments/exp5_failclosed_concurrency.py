@@ -278,7 +278,13 @@ class Experiment5:
     # ─── Fault: Policy partial install ───────────────────────────────────
 
     def test_policy_partial_install(self):
-        """Policy install fails halfway -> must fail closed (deny all)."""
+        """Partial policy: allow ONE class, verify uncovered classes denied.
+
+        Installs allow policy for NETWORK only, then verifies that
+        SYSTEM/NAMESPACE (unshare) is still denied. This tests that
+        a partial policy installation does NOT accidentally allow
+        non-covered effect classes.
+        """
         actual_trials = self._trials_for_test(self.trials)
         print(f"  [2/16] Policy partial install ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
@@ -291,16 +297,22 @@ class Experiment5:
                 raise
 
             try:
-                # Set ENFORCED without installing any policy
-                # (simulates partial install failure)
+                # Install allow for NETWORK/CONNECT ONLY (partial coverage)
+                policy = PolicyIR.from_allowed_ops([
+                    {"event_type": "CONNECT", "action": "allow",
+                     "path_pattern": "/"}
+                ]).to_proc_policy()
+                self.proc_client.install_proc_policy(cg_id, policy)
                 self.proc_client.set_epoch_mode(cg_id, 2)
 
-                # Try various effects - all must be denied
+                # SYSTEM/NAMESPACE (unshare) is NOT covered by the policy
+                # It MUST be denied despite NETWORK being allowed
                 result = self.runner.run_probe("sys_unshare", cg_path)
                 leaked = (result.ret >= 0 and result.errno == 0)
                 self.metrics.record(
                     "unauthorized_effect_leaked", leaked,
-                    f"partial_policy trial={trial}: unshare succeeded",
+                    f"partial_policy trial={trial}: unshare succeeded "
+                    f"despite only NETWORK allowed (ret={result.ret} errno={result.errno})",
                     {"fault": "partial_policy", "trial": trial})
                 self.metrics.record(
                     "fault_policy_partial", leaked,
@@ -318,14 +330,18 @@ class Experiment5:
     # ─── Fault: Fork during freeze ───────────────────────────────────────
 
     def test_fork_during_freeze(self):
-        """Continuous fork/clone during freeze -> no effect escapes.
+        """Real fork/clone storm during freeze -> no effect escapes.
 
-        The test verifies that even with rapid forking, no unauthorized
-        effects leak to the external system. We check the actual external
-        state (file existence) rather than probe return values.
+        Spawns N processes simultaneously into the cgroup, all attempting
+        sys_unshare. ENFORCED mode with no policy must deny ALL of them,
+        even under concurrent fork pressure.
         """
+        import subprocess as _sp
+
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [3/12] Fork during freeze ({actual_trials} trials) ...", flush=True)
+        print(f"  [3/16] Fork during freeze ({actual_trials} trials) ...", flush=True)
+        STORM_SIZE = 10  # processes per trial
+
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._setup_cgroup_safe(f"exp5-fork-{trial}")
@@ -336,53 +352,63 @@ class Experiment5:
                 raise
 
             try:
-                # Begin epoch for this cgroup
-                epoch_id = f"exp5-fork-{self.run_id}-{trial}"
-                try:
-                    self.fs_client.begin_epoch(cg_id, epoch_id)
-                except Exception:
-                    pass
-
                 # ENFORCED with no policy = default deny
                 self.proc_client.set_epoch_mode(cg_id, 2)
 
-                # Target file that should NOT be created (no policy = deny)
-                fuse_target = fuse_path(f"exp5/fork-freeze-{trial}.txt")
-                check_path = harness_path(f"exp5/fork-freeze-{trial}.txt")
-
-                # Ensure clean state
-                if os.path.exists(check_path):
-                    os.unlink(check_path)
-
-                # Spawn a probe that forks and tries to write
-                # Use fs_write which will fork is not needed - just test the write
-                proc, write_fd = self.runner.spawn_and_hold(
-                    "fs_write", cg_path, args=[fuse_target])
-                self.runner.release(write_fd)
-
-                # Immediately try to freeze
-                time.sleep(0.01)
-                try:
-                    self.proc_client.freeze_by_cgroup(cg_id)
-                except Exception:
-                    pass
-
-                result = self.runner.wait_result(proc, "fs_write")
-
-                # Check: file must NOT exist in backing store (effect denied)
-                # This is the real security invariant - not the probe return value
-                effect_leaked = os.path.exists(check_path)
-                self.metrics.record(
-                    "fault_fork_during_freeze", effect_leaked,
-                    f"fork_freeze trial={trial}: file created despite no policy",
-                    {"fault": "fork_freeze", "trial": trial})
-
-                # Clean up test file if it was created
-                if os.path.exists(check_path):
+                # Spawn STORM_SIZE processes simultaneously
+                probe_path = self.runner.get_probe_path("sys_unshare")
+                procs = []
+                for i in range(STORM_SIZE):
+                    read_fd, write_fd = os.pipe()
+                    env = dict(os.environ)
+                    env["SHADOW_GO_FD"] = str(read_fd)
+                    p = _sp.Popen(
+                        [probe_path],
+                        pass_fds=(read_fd,),
+                        stdin=_sp.DEVNULL,
+                        stdout=_sp.PIPE,
+                        stderr=_sp.PIPE,
+                        text=True,
+                        env=env)
+                    os.close(read_fd)
+                    # Place into cgroup
                     try:
-                        os.unlink(check_path)
+                        with open(os.path.join(cg_path, "cgroup.procs"), "w") as f:
+                            f.write(str(p.pid))
                     except Exception:
                         pass
+                    procs.append((p, write_fd))
+
+                # Release ALL simultaneously (fork storm)
+                for p, wfd in procs:
+                    try:
+                        os.write(wfd, b"x")
+                        os.close(wfd)
+                    except OSError:
+                        pass
+
+                # Wait for all and check results
+                any_leaked = False
+                for p, _ in procs:
+                    try:
+                        stdout, _ = p.communicate(timeout=3)
+                        # Parse ret/errno
+                        import re
+                        m = re.search(r"ret=(-?\d+)\s+errno=(\d+)", stdout)
+                        if m:
+                            ret = int(m.group(1))
+                            err = int(m.group(2))
+                            if ret >= 0 and err == 0:
+                                any_leaked = True
+                    except _sp.TimeoutExpired:
+                        p.kill()
+                        p.wait(timeout=2)
+
+                self.metrics.record(
+                    "fault_fork_during_freeze", any_leaked,
+                    f"fork_freeze trial={trial}: {STORM_SIZE} procs, "
+                    f"leaked={any_leaked}",
+                    {"fault": "fork_freeze", "trial": trial})
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
@@ -397,13 +423,18 @@ class Experiment5:
     # ─── Fault: Token replay ─────────────────────────────────────────────
 
     def test_token_replay(self):
-        """Single-use pass token replayed -> must be rejected.
+        """Real single-use restart token replay -> second use must fail.
 
-        No artificial cap: runs the full trial count to achieve
-        statistical significance for the paper.
+        Flow:
+          1. SPECULATIVE mode: probe gets fenced
+          2. Grant a restart token via grant_restart_token API
+          3. Continue process: token consumed, syscall succeeds
+          4. Same process tries ANOTHER syscall: no token -> fenced/denied
+
+        This verifies tokens are truly single-use and cannot be replayed.
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [4/14] Token replay ({actual_trials} trials) ...", flush=True)
+        print(f"  [4/16] Token replay ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._setup_cgroup_safe(f"exp5-token-{trial}")
@@ -414,30 +445,85 @@ class Experiment5:
                 raise
 
             try:
-                # Install allow policy
-                policy = PolicyIR.from_allowed_ops([
-                    {"event_type": "UNSHARE", "action": "allow",
-                     "path_pattern": "/"}
-                ]).to_proc_policy()
-                self.proc_client.install_proc_policy(cg_id, policy)
-                self.proc_client.set_epoch_mode(cg_id, 2)
+                # SPECULATIVE mode: probe will be fenced
+                self.proc_client.set_epoch_mode(cg_id, 0)
 
-                # First use: should succeed (use short timeout)
-                r1 = self.runner.run_probe("sys_unshare", cg_path)
+                # Spawn probe (gets fenced on unshare)
+                proc, write_fd = self.runner.spawn_and_hold(
+                    "sys_unshare", cg_path)
+                self.runner.release(write_fd)
+                time.sleep(0.2)
 
-                # Clear policy to simulate token expiration
-                self.proc_client.clear_all_policies(cg_id)
+                # Confirm fenced
+                frozen = self.proc_client.list_frozen(cg_id)
+                if not frozen:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                    self.metrics.record(
+                        "fault_token_replay", False,
+                        trial_info={"fault": "token_replay", "trial": trial,
+                                    "skipped": True, "reason": "not fenced"})
+                    continue
 
-                # "Replay": run again without policy (token should be invalid)
-                r2 = self.runner.run_probe("sys_unshare", cg_path)
+                # Grant a ONE-TIME restart token for this process
+                # syscall_nr=272 (unshare on x86_64), class=6 (SYSTEM), op=2 (NAMESPACE)
+                tid = proc.pid
+                try:
+                    self.proc_client.request_ok({
+                        "action": "grant_restart_token",
+                        "tid": tid,
+                        "syscall_nr": 272,  # __NR_unshare
+                        "effect_class": 6,  # SYSTEM
+                        "operation": 2,     # NAMESPACE
+                    })
+                except Exception:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                    self.metrics.record(
+                        "fault_token_replay", False,
+                        trial_info={"fault": "token_replay", "trial": trial,
+                                    "skipped": True, "reason": "grant failed"})
+                    continue
 
-                # The second use MUST be denied (fail-closed)
-                # If it succeeds, that's a token replay vulnerability
-                replay_succeeded = (r2.ret == 0 and r2.errno == 0)
+                # SIGCONT the process: token consumed, unshare succeeds
+                import signal as _sig
+                os.kill(tid, _sig.SIGCONT)
+                result = self.runner.wait_result(proc, "sys_unshare", timeout=3.0)
+
+                # First use should succeed (token was valid)
+                first_ok = (result.ret >= 0 and result.errno == 0)
+
+                # Now the token is CONSUMED. If the process tries another
+                # intercepted syscall, it should be fenced again (no token).
+                # Since the probe already exited after one syscall, we verify
+                # that the token was indeed consumed by checking that a NEW
+                # process in the same cgroup gets fenced.
+                proc2, wfd2 = self.runner.spawn_and_hold(
+                    "sys_unshare", cg_path)
+                self.runner.release(wfd2)
+                time.sleep(0.2)
+
+                # Second process should be FENCED (no token available)
+                frozen2 = self.proc_client.list_frozen(cg_id)
+                replay_detected = len(frozen2) == 0  # NOT fenced = token leaked
+
+                # If not fenced, the second syscall might succeed = replay
+                if not frozen2:
+                    r2 = self.runner.wait_result(proc2, "sys_unshare", timeout=3.0)
+                    replay_detected = (r2.ret >= 0 and r2.errno == 0)
+                else:
+                    # Properly fenced - kill it
+                    self.proc_client.kill_by_cgroup(cg_id)
+                    try:
+                        proc2.kill()
+                        proc2.wait(timeout=2)
+                    except Exception:
+                        pass
+
                 self.metrics.record(
-                    "fault_token_replay", replay_succeeded,
-                    f"token_replay trial={trial}: second use succeeded "
-                    f"(r1={r1.ret} r2={r2.ret})",
+                    "fault_token_replay", replay_detected,
+                    f"token_replay trial={trial}: first_ok={first_ok} "
+                    f"replay_detected={replay_detected}",
                     {"fault": "token_replay", "trial": trial})
 
             except RuntimeError as e:

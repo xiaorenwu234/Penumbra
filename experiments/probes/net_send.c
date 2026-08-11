@@ -1,4 +1,8 @@
-/* net_send.c - NETWORK/SEND probe: send a UDP datagram. */
+/* net_send.c - NETWORK/SEND probe: send a UDP datagram via sendto().
+ * Does NOT use connect() because that triggers the socket_connect BPF hook.
+ * Note: BPF reads skc_daddr/dport which are 0 for unconnected UDP,
+ * so endpoint policy must use wildcard (addr=0, port=0).
+ */
 #include "common.h"
 #include <sys/socket.h>
 #include <netinet/in.h>

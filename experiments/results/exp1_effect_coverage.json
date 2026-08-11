@@ -1,8 +1,8 @@
 {
   "experiment": "exp1_effect_coverage",
-  "duration_seconds": 17.14,
-  "start_time": 1786468363.5404773,
-  "end_time": 1786468380.6842473,
+  "duration_seconds": 16.72,
+  "start_time": 1786470771.1474838,
+  "end_time": 1786470787.8648422,
   "metadata": {},
   "counters": {
     "escaped_before_auth": {
@@ -11,7 +11,7 @@
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.07628255067963192
+        0.041309513462237685
       ],
       "details": []
     },
@@ -21,7 +21,7 @@
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.02282446716371716
+        0.012050651299553544
       ],
       "details": []
     },
@@ -31,7 +31,7 @@
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.06418816450264836
+        0.03455841803075224
       ],
       "details": []
     },
@@ -41,7 +41,7 @@
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.8406668742202352
+        0.7954028465205154
       ],
       "details": []
     },
@@ -51,7 +51,7 @@
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.11266886855695088
+        0.0621089111124211
       ],
       "details": []
     },
@@ -66,18 +66,15 @@
       "details": []
     },
     "effect_not_observed": {
-      "count": 2,
-      "total": 6,
-      "rate": 0.3333333333333333,
+      "count": 0,
+      "total": 4,
+      "rate": 0.0,
       "ci_95": [
-        0.663796696951072,
-        0.7669361131996577
+        0.0,
+        0.5201311493875267
       ],
-      "details": [
-        "net_send trial=0: effect not observed (ret=-1 errno=22)",
-        "net_send trial=1: effect not observed (ret=-1 errno=22)"
-      ]
+      "details": []
     }
   },
-  "total_trials": 452
+  "total_trials": 450
 }

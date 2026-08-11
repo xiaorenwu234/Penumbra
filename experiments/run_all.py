@@ -167,13 +167,31 @@ def print_combined_report(all_results: list, output_dir: str):
         print(f"  RESULT: VIOLATIONS DETECTED - SEE INDIVIDUAL REPORTS")
     print(f"  {'='*60}\n")
 
-    # Save combined JSON
+    # Save combined JSON (merge with existing results from prior --exp runs)
     combined_path = os.path.join(output_dir, "combined_results.json")
+    existing_experiments = {}
+    if os.path.exists(combined_path):
+        try:
+            with open(combined_path, "r") as f:
+                prev = json.load(f)
+            for exp in prev.get("experiments", []):
+                existing_experiments[exp.get("experiment", "")] = exp
+        except (json.JSONDecodeError, KeyError):
+            pass
+    # Merge current results (overwrite same experiment name)
+    for result in all_results:
+        existing_experiments[result.get("experiment", "")] = result
+    merged = list(existing_experiments.values())
+    # Recalculate totals
+    total_v = sum(
+        c["count"] for r in merged for c in r.get("counters", {}).values())
+    total_t = sum(
+        c["total"] for r in merged for c in r.get("counters", {}).values())
     with open(combined_path, "w") as f:
         json.dump({
-            "experiments": all_results,
-            "total_violations": total_violations,
-            "total_trials": total_trials,
+            "experiments": merged,
+            "total_violations": total_v,
+            "total_trials": total_t,
             "timestamp": time.time(),
         }, f, indent=2)
     print(f"  Combined results saved to: {combined_path}")

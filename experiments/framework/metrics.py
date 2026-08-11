@@ -46,14 +46,8 @@ def binomial_ci(successes: int, trials: int,
 def _beta_ppf(p: float, a: int, b: int) -> float:
     """Approximate inverse of the regularized incomplete beta function.
 
-    Uses the relationship: if X ~ Beta(a,b), then
-    P(X <= x) = I_x(a,b) = 1 - I_{1-x}(b,a)
-
-    For the Clopper-Pearson interval we use the F-distribution:
-      lower = a / (a + b * F_{1-alpha/2}(2b, 2a))
-      upper = a * F_{1-alpha/2}(2a, 2b) / (b + a * F_{1-alpha/2}(2a, 2b))
-
-    Simplified: use scipy if available, else a normal approximation fallback.
+    Computes the p-th quantile of Beta(a, b).
+    Uses scipy if available, else a normal approximation to the Beta.
     """
     try:
         from scipy.stats import beta as beta_dist
@@ -61,17 +55,15 @@ def _beta_ppf(p: float, a: int, b: int) -> float:
     except ImportError:
         pass
 
-    # Fallback: normal approximation (less accurate but functional)
-    # Using the Wilson score interval approximation
-    n = a + b - 1
-    if n <= 0:
+    # Fallback: normal approximation to Beta(a, b)
+    # Beta(a,b) has mean = a/(a+b), var = ab/((a+b)^2*(a+b+1))
+    if a <= 0 or b <= 0:
         return 0.5
-    p_hat = a / (a + b)
+    mean = a / (a + b)
+    var = (a * b) / ((a + b) ** 2 * (a + b + 1))
+    std = math.sqrt(var)
     z = _norm_ppf(p)
-    denom = 1 + z * z / n
-    center = (p_hat + z * z / (2 * n)) / denom
-    spread = z * math.sqrt(p_hat * (1 - p_hat) / n + z * z / (4 * n * n)) / denom
-    result = center + spread if p > 0.5 else center - spread
+    result = mean + z * std
     return max(0.0, min(1.0, result))
 
 

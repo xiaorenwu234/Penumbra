@@ -2,9 +2,9 @@
   "experiments": [
     {
       "experiment": "exp5_failclosed_concurrency",
-      "duration_seconds": 105.42,
-      "start_time": 1786468388.9930797,
-      "end_time": 1786468494.411445,
+      "duration_seconds": 27.7,
+      "start_time": 1786470796.1793914,
+      "end_time": 1786470823.8797297,
       "metadata": {},
       "counters": {
         "unauthorized_effect_leaked": {
@@ -13,7 +13,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.06010397260720787
+            0.032296364753268
           ],
           "details": []
         },
@@ -23,7 +23,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.08814456722682265
+            0.04800846643096329
           ],
           "details": []
         },
@@ -33,7 +33,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -43,7 +43,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -53,7 +53,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -63,7 +63,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -73,7 +73,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -83,7 +83,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -93,7 +93,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -103,7 +103,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.596741011882846
+            0.4428060174979346
           ],
           "details": []
         },
@@ -113,7 +113,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -123,7 +123,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -133,7 +133,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -143,7 +143,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -153,7 +153,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -163,7 +163,7 @@
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1651625739865457
+            0.0934885231067864
           ],
           "details": []
         },
@@ -179,10 +179,329 @@
         }
       },
       "total_trials": 545,
-      "wall_time_seconds": 105.4
+      "wall_time_seconds": 27.7
+    },
+    {
+      "experiment": "exp1",
+      "error": "invalid literal for int() with base 10: '/exp1-sig-ep-target-0-1786469811301'",
+      "counters": {}
+    },
+    {
+      "experiment": "exp2_audit_consistency",
+      "duration_seconds": 1.41,
+      "start_time": 1786470787.9211655,
+      "end_time": 1786470789.3284066,
+      "metadata": {},
+      "counters": {
+        "historical_violation_not_rolled_back": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7954028465205154
+          ],
+          "details": []
+        },
+        "future_violation_not_denied": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.5201311493875267
+          ],
+          "details": []
+        },
+        "fingerprint_mismatch_released": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7954028465205154
+          ],
+          "details": []
+        },
+        "dual_path_single_check": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.5201311493875267
+          ],
+          "details": []
+        },
+        "semantic_gap_detected": {
+          "count": 0,
+          "total": 8,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.30593672431067165
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 20,
+      "wall_time_seconds": 1.4
+    },
+    {
+      "experiment": "exp3_rollback_correctness",
+      "duration_seconds": 1.15,
+      "start_time": 1786470789.3800647,
+      "end_time": 1786470790.531008,
+      "metadata": {},
+      "counters": {
+        "rollback_content_mismatch": {
+          "count": 0,
+          "total": 8,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.30593672431067165
+          ],
+          "details": []
+        },
+        "rollback_metadata_mismatch": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.5201311493875267
+          ],
+          "details": []
+        },
+        "rollback_direntry_mismatch": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7954028465205154
+          ],
+          "details": []
+        },
+        "child_process_survived": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7954028465205154
+          ],
+          "details": []
+        },
+        "provisional_output_not_removed": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7954028465205154
+          ],
+          "details": []
+        },
+        "commit_not_exactly_once": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7954028465205154
+          ],
+          "details": []
+        },
+        "rollback_state_leak": {
+          "count": 0,
+          "total": 6,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.3853931142153183
+          ],
+          "details": []
+        },
+        "env_cwd_not_restored": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7954028465205154
+          ],
+          "details": []
+        },
+        "whiteout_not_cleaned": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7954028465205154
+          ],
+          "details": []
+        },
+        "memory_state_leaked": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.5201311493875267
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 34,
+      "wall_time_seconds": 1.2
+    },
+    {
+      "experiment": "exp4_dependency_propagation",
+      "duration_seconds": 0.51,
+      "start_time": 1786470790.5900679,
+      "end_time": 1786470791.1047492,
+      "metadata": {},
+      "counters": {
+        "downstream_not_rolled_back": {
+          "count": 0,
+          "total": 23,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1200143645061047
+          ],
+          "details": []
+        },
+        "unrelated_branch_affected": {
+          "count": 0,
+          "total": 23,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.1200143645061047
+          ],
+          "details": []
+        },
+        "scc_partial_finalization": {
+          "count": 0,
+          "total": 3,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.6296288432620756
+          ],
+          "details": []
+        },
+        "premature_downstream_release": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7954028465205154
+          ],
+          "details": []
+        },
+        "rollback_set_mismatch": {
+          "count": 0,
+          "total": 24,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.11533946050627164
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 75,
+      "wall_time_seconds": 0.5
+    },
+    {
+      "experiment": "exp1_effect_coverage",
+      "duration_seconds": 16.72,
+      "start_time": 1786470771.1474838,
+      "end_time": 1786470787.8648422,
+      "metadata": {},
+      "counters": {
+        "escaped_before_auth": {
+          "count": 0,
+          "total": 70,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.041309513462237685
+          ],
+          "details": []
+        },
+        "incorrectly_allowed": {
+          "count": 0,
+          "total": 244,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.012050651299553544
+          ],
+          "details": []
+        },
+        "incorrectly_denied": {
+          "count": 0,
+          "total": 84,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.03455841803075224
+          ],
+          "details": []
+        },
+        "duplicated_after_restart": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7954028465205154
+          ],
+          "details": []
+        },
+        "missing_audit_events": {
+          "count": 0,
+          "total": 46,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0621089111124211
+          ],
+          "details": []
+        },
+        "audit_tests_skipped": {
+          "count": 0,
+          "total": 0,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            1.0
+          ],
+          "details": []
+        },
+        "effect_not_observed": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.5201311493875267
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 450,
+      "wall_time_seconds": 16.7
     }
   ],
   "total_violations": 0,
-  "total_trials": 545,
-  "timestamp": 1786468494.4209764
+  "total_trials": 1124,
+  "timestamp": 1786470823.889725
 }

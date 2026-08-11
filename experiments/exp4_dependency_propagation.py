@@ -311,6 +311,12 @@ class Experiment4:
                     if trial == 0 and list(graph.edges.keys())[0] == producer:
                         print(f"    [exp4-diag] fs_read {consumer}: "
                               f"ret={result.ret} errno={result.errno}")
+                    # fs_read must succeed for dependency to be recorded
+                    if result.ret < 0 and result.errno != 0:
+                        if trial == 0:
+                            print(f"    [exp4-diag] fs_read {consumer} FAILED")
+                        fuse_ok = False
+                        break
                 except Exception as e:
                     if trial == 0:
                         print(f"    [exp4-diag] fs_read {consumer} exception: {e}")

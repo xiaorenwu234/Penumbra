@@ -5,11 +5,11 @@
 
   Metric                               Count        Rate                95% CI
   ----------------------------  ------------  ----------  --------------------
-  downstream_not_rolled_back            0/23    0.000000  [0.000000, 0.207401]
-  unrelated_branch_affected             0/23    0.000000  [0.000000, 0.207401]
-  scc_partial_finalization               0/3    0.000000  [0.000000, 0.743974]
-  premature_downstream_release           0/2    0.000000  [0.000000, 0.840667]
-  rollback_set_mismatch                 0/24    0.000000  [0.000000, 0.200094]
+  downstream_not_rolled_back            0/23    0.000000  [0.000000, 0.120014]
+  unrelated_branch_affected             0/23    0.000000  [0.000000, 0.120014]
+  scc_partial_finalization               0/3    0.000000  [0.000000, 0.629629]
+  premature_downstream_release           0/2    0.000000  [0.000000, 0.795403]
+  rollback_set_mismatch                 0/24    0.000000  [0.000000, 0.115339]
 
 ========================================================================
 
