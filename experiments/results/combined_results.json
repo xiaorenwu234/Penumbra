@@ -2,9 +2,9 @@
   "experiments": [
     {
       "experiment": "exp5_failclosed_concurrency",
-      "duration_seconds": 27.7,
-      "start_time": 1786470796.1793914,
-      "end_time": 1786470823.8797297,
+      "duration_seconds": 24.67,
+      "start_time": 1786473823.427367,
+      "end_time": 1786473848.099177,
       "metadata": {},
       "counters": {
         "unauthorized_effect_leaked": {
@@ -89,21 +89,21 @@
         },
         "fault_token_replay": {
           "count": 0,
-          "total": 30,
+          "total": 0,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.0934885231067864
+            1.0
           ],
           "details": []
         },
         "fault_wal_torn_tail": {
           "count": 0,
-          "total": 5,
+          "total": 0,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.4428060174979346
+            1.0
           ],
           "details": []
         },
@@ -179,18 +179,13 @@
         }
       },
       "total_trials": 545,
-      "wall_time_seconds": 27.7
-    },
-    {
-      "experiment": "exp1",
-      "error": "invalid literal for int() with base 10: '/exp1-sig-ep-target-0-1786469811301'",
-      "counters": {}
+      "wall_time_seconds": 24.7
     },
     {
       "experiment": "exp2_audit_consistency",
-      "duration_seconds": 1.41,
-      "start_time": 1786470787.9211655,
-      "end_time": 1786470789.3284066,
+      "duration_seconds": 1.45,
+      "start_time": 1786473815.0514743,
+      "end_time": 1786473816.500181,
       "metadata": {},
       "counters": {
         "historical_violation_not_rolled_back": {
@@ -245,13 +240,13 @@
         }
       },
       "total_trials": 20,
-      "wall_time_seconds": 1.4
+      "wall_time_seconds": 1.5
     },
     {
       "experiment": "exp3_rollback_correctness",
-      "duration_seconds": 1.15,
-      "start_time": 1786470789.3800647,
-      "end_time": 1786470790.531008,
+      "duration_seconds": 1.2,
+      "start_time": 1786473816.5529249,
+      "end_time": 1786473817.7578533,
       "metadata": {},
       "counters": {
         "rollback_content_mismatch": {
@@ -360,9 +355,9 @@
     },
     {
       "experiment": "exp4_dependency_propagation",
-      "duration_seconds": 0.51,
-      "start_time": 1786470790.5900679,
-      "end_time": 1786470791.1047492,
+      "duration_seconds": 0.55,
+      "start_time": 1786473817.8120234,
+      "end_time": 1786473818.358579,
       "metadata": {},
       "counters": {
         "downstream_not_rolled_back": {
@@ -417,42 +412,42 @@
         }
       },
       "total_trials": 75,
-      "wall_time_seconds": 0.5
+      "wall_time_seconds": 0.6
     },
     {
       "experiment": "exp1_effect_coverage",
-      "duration_seconds": 16.72,
-      "start_time": 1786470771.1474838,
-      "end_time": 1786470787.8648422,
+      "duration_seconds": 18.4,
+      "start_time": 1786473796.5996027,
+      "end_time": 1786473814.9959219,
       "metadata": {},
       "counters": {
         "escaped_before_auth": {
           "count": 0,
-          "total": 70,
+          "total": 76,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.041309513462237685
+            0.03811816154334356
           ],
           "details": []
         },
         "incorrectly_allowed": {
           "count": 0,
-          "total": 244,
+          "total": 268,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.012050651299553544
+            0.010978143863191576
           ],
           "details": []
         },
         "incorrectly_denied": {
           "count": 0,
-          "total": 84,
+          "total": 94,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.03455841803075224
+            0.030945964797598036
           ],
           "details": []
         },
@@ -468,11 +463,11 @@
         },
         "missing_audit_events": {
           "count": 0,
-          "total": 46,
+          "total": 52,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.0621089111124211
+            0.05516507150911791
           ],
           "details": []
         },
@@ -497,11 +492,20 @@
           "details": []
         }
       },
-      "total_trials": 450,
-      "wall_time_seconds": 16.7
+      "total_trials": 496,
+      "wall_time_seconds": 18.4
     }
   ],
   "total_violations": 0,
-  "total_trials": 1124,
-  "timestamp": 1786470823.889725
+  "total_trials": 1135,
+  "has_error": false,
+  "experiments_present": [
+    "exp1_effect_coverage",
+    "exp2_audit_consistency",
+    "exp3_rollback_correctness",
+    "exp4_dependency_propagation",
+    "exp5_failclosed_concurrency"
+  ],
+  "experiments_missing": [],
+  "timestamp": 1786473848.108611
 }

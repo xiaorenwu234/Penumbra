@@ -1,37 +1,37 @@
 {
   "experiment": "exp1_effect_coverage",
-  "duration_seconds": 16.72,
-  "start_time": 1786470771.1474838,
-  "end_time": 1786470787.8648422,
+  "duration_seconds": 18.4,
+  "start_time": 1786473796.5996027,
+  "end_time": 1786473814.9959219,
   "metadata": {},
   "counters": {
     "escaped_before_auth": {
       "count": 0,
-      "total": 70,
+      "total": 76,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.041309513462237685
+        0.03811816154334356
       ],
       "details": []
     },
     "incorrectly_allowed": {
       "count": 0,
-      "total": 244,
+      "total": 268,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.012050651299553544
+        0.010978143863191576
       ],
       "details": []
     },
     "incorrectly_denied": {
       "count": 0,
-      "total": 84,
+      "total": 94,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.03455841803075224
+        0.030945964797598036
       ],
       "details": []
     },
@@ -47,11 +47,11 @@
     },
     "missing_audit_events": {
       "count": 0,
-      "total": 46,
+      "total": 52,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.0621089111124211
+        0.05516507150911791
       ],
       "details": []
     },
@@ -76,5 +76,5 @@
       "details": []
     }
   },
-  "total_trials": 450
+  "total_trials": 496
 }

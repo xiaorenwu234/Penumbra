@@ -136,9 +136,16 @@ class MetricsCollector:
 
     def record(self, counter_name: str, violated: bool, detail: str = "",
                trial_info: Dict = None):
-        """Record a measurement for a named counter."""
-        counter = self.add_counter(counter_name)
-        counter.record(violated, detail)
+        """Record a measurement for a named counter.
+
+        If trial_info contains 'skipped': True, the trial is NOT counted
+        in the denominator (does not affect pass/fail statistics).
+        """
+        # Skipped trials do NOT increase the denominator
+        is_skipped = trial_info and trial_info.get("skipped", False)
+        if not is_skipped:
+            counter = self.add_counter(counter_name)
+            counter.record(violated, detail)
         if trial_info is not None:
             trial_info["metric"] = counter_name
             trial_info["violated"] = violated

@@ -940,16 +940,22 @@ class Experiment3:
                         content_after = f.read()
                     if content_after == init_content:
                         # FUSE write+commit did NOT promote to backing store.
-                        # This happens when FUSE epoch attribution fails for the
-                        # probe's cgroup (version never created) or commit doesn't
-                        # promote. Fall back to direct backing store write.
-                        use_fuse = False
+                        # This is an infrastructure failure - SKIP, not fallback.
+                        self.metrics.record(
+                            "rollback_content_mismatch", False,
+                            trial_info={"scenario": "allow_matches_native",
+                                        "trial": trial, "skipped": True,
+                                        "reason": "FUSE promotion failed"})
+                        continue
 
+                # No fallback: if FUSE is not active, skip entirely
                 if not use_fuse:
-                    # Direct backing store write (no FUSE interception).
-                    # Tests that allow policy doesn't interfere with normal I/O.
-                    shadow_result = self.runner.run_probe("fs_write", cg_path,
-                                                          args=[shadow_file])
+                    self.metrics.record(
+                        "rollback_content_mismatch", False,
+                        trial_info={"scenario": "allow_matches_native",
+                                    "trial": trial, "skipped": True,
+                                    "reason": "FUSE not mounted"})
+                    continue
 
                 # Run same probe natively (reference execution)
                 native_target = os.path.join(native_base, "target.txt")

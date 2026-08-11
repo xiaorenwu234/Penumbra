@@ -5,9 +5,10 @@
 # library path issues inside mount namespaces.
 
 CC       := gcc
-CFLAGS   := -Wall -Wextra -O2 -g -I.
+CFLAGS   := -Wall -Wextra -O2 -g -Iprobes
 LDFLAGS  := -static
-BINDIR   := bin
+SRCDIR   := probes
+BINDIR   := probes/bin
 
 # Probes that need extra libraries
 IO_URING_LIBS := -luring
@@ -41,20 +42,20 @@ ALL_PROBES := $(FS_PROBES) $(NET_PROBES) $(IPC_PROBES) $(SIG_PROBES) \
 all: $(BINDIR)
 	@for probe in $(ALL_PROBES); do \
 		if [ "$$probe" = "out_io_uring" ]; then \
-			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $$probe.c $(IO_URING_LIBS) 2>/dev/null || \
-			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $$probe.c $(IO_URING_LIBS) $(LDFLAGS) 2>/dev/null || \
+			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $(SRCDIR)/$$probe.c $(IO_URING_LIBS) 2>/dev/null || \
+			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $(SRCDIR)/$$probe.c $(IO_URING_LIBS) $(LDFLAGS) 2>/dev/null || \
 			echo "SKIP $$probe (liburing not available)"; \
 		elif [ "$$probe" = "ipc_mq" ]; then \
-			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $$probe.c $(MQ_LIBS) 2>/dev/null || \
-			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $$probe.c $(MQ_LIBS) 2>/dev/null || \
+			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $(SRCDIR)/$$probe.c $(MQ_LIBS) 2>/dev/null || \
+			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $(SRCDIR)/$$probe.c $(MQ_LIBS) 2>/dev/null || \
 			echo "SKIP $$probe (librt not available)"; \
 		elif [ "$$probe" = "sys_add_key" ] || [ "$$probe" = "sys_request_key" ]; then \
-			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $$probe.c $(KEYUTILS_LIBS) 2>/dev/null || \
-			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $$probe.c $(KEYUTILS_LIBS) 2>/dev/null || \
+			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $(SRCDIR)/$$probe.c $(KEYUTILS_LIBS) 2>/dev/null || \
+			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $(SRCDIR)/$$probe.c $(KEYUTILS_LIBS) 2>/dev/null || \
 			echo "SKIP $$probe (libkeyutils not available)"; \
 		else \
-			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $$probe.c 2>/dev/null || \
-			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $$probe.c || \
+			$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$$probe $(SRCDIR)/$$probe.c 2>/dev/null || \
+			$(CC) $(CFLAGS) -o $(BINDIR)/$$probe $(SRCDIR)/$$probe.c || \
 			echo "FAIL $$probe"; \
 		fi; \
 	done
@@ -64,32 +65,32 @@ $(BINDIR):
 	mkdir -p $(BINDIR)
 
 # Individual probe targets for development
-$(FS_PROBES): %: $(BINDIR) %.c common.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $@.c
+$(FS_PROBES): %: $(BINDIR) $(SRCDIR)/%.c $(SRCDIR)/common.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $(SRCDIR)/$@.c
 
-$(NET_PROBES): %: $(BINDIR) %.c common.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $@.c
+$(NET_PROBES): %: $(BINDIR) $(SRCDIR)/%.c $(SRCDIR)/common.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $(SRCDIR)/$@.c
 
-$(IPC_PROBES): %: $(BINDIR) %.c common.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $@.c
+$(IPC_PROBES): %: $(BINDIR) $(SRCDIR)/%.c $(SRCDIR)/common.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $(SRCDIR)/$@.c
 
-ipc_mq: $(BINDIR) ipc_mq.c common.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $< $(MQ_LIBS)
+ipc_mq: $(BINDIR) $(SRCDIR)/ipc_mq.c $(SRCDIR)/common.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $(SRCDIR)/ipc_mq.c $(MQ_LIBS)
 
-$(SIG_PROBES): %: $(BINDIR) %.c common.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $@.c
+$(SIG_PROBES): %: $(BINDIR) $(SRCDIR)/%.c $(SRCDIR)/common.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $(SRCDIR)/$@.c
 
-$(PRIV_PROBES): %: $(BINDIR) %.c common.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $@.c
+$(PRIV_PROBES): %: $(BINDIR) $(SRCDIR)/%.c $(SRCDIR)/common.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $(SRCDIR)/$@.c
 
-$(OUT_PROBES): %: $(BINDIR) %.c common.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $@.c
+$(OUT_PROBES): %: $(BINDIR) $(SRCDIR)/%.c $(SRCDIR)/common.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $(SRCDIR)/$@.c
 
-out_io_uring: $(BINDIR) out_io_uring.c common.h
-	$(CC) $(CFLAGS) -o $(BINDIR)/$@ $< $(IO_URING_LIBS)
+out_io_uring: $(BINDIR) $(SRCDIR)/out_io_uring.c $(SRCDIR)/common.h
+	$(CC) $(CFLAGS) -o $(BINDIR)/$@ $(SRCDIR)/out_io_uring.c $(IO_URING_LIBS)
 
-$(SYS_PROBES): %: $(BINDIR) %.c common.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $@.c
+$(SYS_PROBES): %: $(BINDIR) $(SRCDIR)/%.c $(SRCDIR)/common.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BINDIR)/$@ $(SRCDIR)/$@.c
 
 clean:
 	rm -rf $(BINDIR)

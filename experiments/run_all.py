@@ -169,32 +169,60 @@ def print_combined_report(all_results: list, output_dir: str):
 
     # Save combined JSON (merge with existing results from prior --exp runs)
     combined_path = os.path.join(output_dir, "combined_results.json")
+    # Canonical experiment names - only these 5 are valid
+    CANONICAL_NAMES = {
+        "exp1_effect_coverage",
+        "exp2_audit_consistency",
+        "exp3_rollback_correctness",
+        "exp4_dependency_propagation",
+        "exp5_failclosed_concurrency",
+    }
     existing_experiments = {}
     if os.path.exists(combined_path):
         try:
             with open(combined_path, "r") as f:
                 prev = json.load(f)
             for exp in prev.get("experiments", []):
-                existing_experiments[exp.get("experiment", "")] = exp
+                name = exp.get("experiment", "")
+                # Only keep canonical names (discard stale/error entries)
+                if name in CANONICAL_NAMES:
+                    existing_experiments[name] = exp
         except (json.JSONDecodeError, KeyError):
             pass
     # Merge current results (overwrite same experiment name)
     for result in all_results:
-        existing_experiments[result.get("experiment", "")] = result
+        name = result.get("experiment", "")
+        if name in CANONICAL_NAMES:
+            existing_experiments[name] = result
     merged = list(existing_experiments.values())
-    # Recalculate totals
+
+    # Validate: experiments with no counters are errors, not passes
+    has_error = False
+    for r in merged:
+        counters = r.get("counters", {})
+        if not counters:
+            print(f"  ERROR: {r.get('experiment')} has no counters (crashed?)")
+            has_error = True
+
+    # Recalculate totals (only from valid experiments with counters)
     total_v = sum(
         c["count"] for r in merged for c in r.get("counters", {}).values())
     total_t = sum(
         c["total"] for r in merged for c in r.get("counters", {}).values())
+
     with open(combined_path, "w") as f:
         json.dump({
             "experiments": merged,
             "total_violations": total_v,
             "total_trials": total_t,
+            "has_error": has_error,
+            "experiments_present": sorted(existing_experiments.keys()),
+            "experiments_missing": sorted(CANONICAL_NAMES - set(existing_experiments.keys())),
             "timestamp": time.time(),
         }, f, indent=2)
     print(f"  Combined results saved to: {combined_path}")
+    if has_error:
+        print(f"  WARNING: Some experiments have errors - results may be invalid")
 
 
 def main():

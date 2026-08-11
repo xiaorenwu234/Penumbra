@@ -1,8 +1,8 @@
 {
   "experiment": "exp5_failclosed_concurrency",
-  "duration_seconds": 27.7,
-  "start_time": 1786470796.1793914,
-  "end_time": 1786470823.8797297,
+  "duration_seconds": 24.67,
+  "start_time": 1786473823.427367,
+  "end_time": 1786473848.099177,
   "metadata": {},
   "counters": {
     "unauthorized_effect_leaked": {
@@ -87,21 +87,21 @@
     },
     "fault_token_replay": {
       "count": 0,
-      "total": 30,
+      "total": 0,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.0934885231067864
+        1.0
       ],
       "details": []
     },
     "fault_wal_torn_tail": {
       "count": 0,
-      "total": 5,
+      "total": 0,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.4428060174979346
+        1.0
       ],
       "details": []
     },

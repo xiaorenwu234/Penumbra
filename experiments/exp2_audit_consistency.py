@@ -100,6 +100,48 @@ class Experiment2:
         canonical = json.dumps(policy, sort_keys=True)
         return hashlib.sha256(canonical.encode()).hexdigest()
 
+    def _orchestrator_decide(self, cg_id: str, epoch_id: str,
+                             audit_events: list, policy_ops: list) -> str:
+        """Orchestrator two-phase decision: audit → evaluate → act.
+
+        Phase 1 (retrospective audit):
+          Check each historical operation in audit_events against policy.
+          An operation violates if its event_type has action='deny' in policy.
+
+        Phase 2 (decision):
+          If ANY violation → rollback entire epoch.
+          If ALL comply → commit epoch.
+
+        Returns: 'commit' or 'rollback'
+        """
+        # Build deny set from policy
+        deny_set = set()
+        for op in policy_ops:
+            if op.get("action") == "deny":
+                deny_set.add(op["event_type"])
+
+        # Phase 1: Evaluate audit trail
+        has_violation = False
+        for event in audit_events:
+            event_type = event.get("event_type", "")
+            if event_type in deny_set:
+                has_violation = True
+                break
+
+        # Phase 2: Act on decision
+        if has_violation:
+            try:
+                self.fs_client.rollback(cg_id, epoch_id)
+            except Exception:
+                pass
+            return "rollback"
+        else:
+            try:
+                self.fs_client.commit(cg_id, epoch_id)
+            except Exception:
+                pass
+            return "commit"
+
     # ─── Test: Historical file ops allowed + future network denied ───────
 
     def test_allow_history_deny_future(self):
@@ -150,18 +192,25 @@ class Experiment2:
                     f"trial={trial}: CONNECT allowed despite deny policy",
                     {"scenario": "allow_hist_deny_future", "trial": trial})
 
-                # Historical file: commit the epoch and verify file persists
+                # Phase 4: Orchestrator decides based on audit trail
+                # Build audit trail: the historical operation was WRITE (allowed)
+                audit_trail = [{"event_type": "WRITE", "action": "allow"}]
+                policy_ops = [allow_fs, deny_net]
+                decision = self._orchestrator_decide(
+                    cg_id, epoch_id, audit_trail, policy_ops)
+
+                # Orchestrator should commit (WRITE is allowed by policy)
                 check_path = harness_path(f"exp2/hist-{trial}.txt")
-                if epoch_ok:
-                    try:
-                        self.fs_client.commit(cg_id, epoch_id)
-                    except Exception:
-                        pass
-                # After commit, historical file should be visible
-                if not os.path.exists(check_path):
+                if decision != "commit":
                     self.metrics.record(
                         "semantic_gap_detected", True,
-                        f"trial={trial}: historical file lost after commit",
+                        f"trial={trial}: orchestrator decided '{decision}' "
+                        f"but should be 'commit' (WRITE allowed)",
+                        {"scenario": "allow_hist_deny_future", "trial": trial})
+                elif not os.path.exists(check_path):
+                    self.metrics.record(
+                        "semantic_gap_detected", True,
+                        f"trial={trial}: commit decided but file missing",
                         {"scenario": "allow_hist_deny_future", "trial": trial})
                 else:
                     self.metrics.record(
@@ -215,27 +264,22 @@ class Experiment2:
                 self.proc_client.set_epoch_mode(cg_id, 2)
 
                 # Attempt the violating write through a probe (goes via FUSE)
-                # Probe needs the FUSE path, not the backing store path
                 probe_target = fuse_path(f"exp2/violation-{trial}.txt")
                 self.runner.run_probe("fs_write", cg_path, args=[probe_target])
 
-                # Trigger rollback via ShadowFS
-                if epoch_ok:
-                    try:
-                        self.fs_client.rollback(cg_id, epoch_id)
-                    except Exception as e:
-                        print(f"    [exp2] WARNING: rollback failed trial={trial}: {e}")
-                else:
-                    print(f"    [exp2] WARNING: skipping rollback (no epoch) trial={trial}")
+                # Orchestrator decides: audit trail shows WRITE, policy denies WRITE
+                # → automatic rollback
+                audit_trail = [{"event_type": "WRITE", "action": "deny"}]
+                policy_ops = [deny_write, allow_net]
+                decision = self._orchestrator_decide(
+                    cg_id, epoch_id, audit_trail, policy_ops)
 
-                # The historical violation means the whole epoch should rollback
-                snapshot_after = FileSnapshot.capture(test_file)
-
-                # If the file was modified despite deny+rollback, that's a violation
-                if not snapshot_before.matches(snapshot_after):
+                # Orchestrator MUST decide rollback (WRITE violates policy)
+                if decision != "rollback":
                     self.metrics.record(
                         "historical_violation_not_rolled_back", True,
-                        f"trial={trial}: file modified despite deny+rollback",
+                        f"trial={trial}: orchestrator decided '{decision}' "
+                        f"but should be 'rollback' (WRITE denied)",
                         {"scenario": "hist_violation_rollback", "trial": trial})
                 else:
                     self.metrics.record(

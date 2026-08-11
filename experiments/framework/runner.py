@@ -32,6 +32,7 @@ class ProbeResult:
     timed_out: bool = False
     was_fenced: bool = False
     duration_ms: float = 0.0
+    pid: int = 0  # PID of the probe process
 
     @property
     def succeeded(self) -> bool:
@@ -157,6 +158,7 @@ class ProbeRunner:
             stderr=stderr,
             timed_out=timed_out,
             duration_ms=duration_ms,
+            pid=proc.pid,
         )
 
     def run_probe(self, probe_name: str, cgroup_path: str,

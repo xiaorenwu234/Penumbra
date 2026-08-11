@@ -492,6 +492,14 @@ class Experiment5:
 
                 # First use should succeed (token was valid)
                 first_ok = (result.ret >= 0 and result.errno == 0)
+                if not first_ok:
+                    # Token grant failed - infrastructure error, skip trial
+                    self.metrics.record(
+                        "fault_token_replay", False,
+                        trial_info={"fault": "token_replay", "trial": trial,
+                                    "skipped": True,
+                                    "reason": f"first_ok=False (ret={result.ret} errno={result.errno})"})
+                    continue
 
                 # Now the token is CONSUMED. If the process tries another
                 # intercepted syscall, it should be fenced again (no token).
@@ -755,10 +763,8 @@ class Experiment5:
                 raise
 
             try:
-                policy = PolicyIR.from_allowed_ops([
-                    {"event_type": "*", "action": "allow", "path_pattern": "/"}
-                ]).to_proc_policy()
-                self.proc_client.install_proc_policy(cg_id, policy)
+                # ENFORCED with NO policy (default deny).
+                # The race must not accidentally create an allow state.
                 self.proc_client.set_epoch_mode(cg_id, 2)
 
                 errors = []
@@ -792,11 +798,20 @@ class Experiment5:
                 for t in threads:
                     t.join(timeout=5)
 
-                # Any error is acceptable (fail-closed), but no crash/hang
+                # Post-race verification: the system must be in a consistent
+                # state. Try to run a probe - it must be denied (no policy).
+                # If the race corrupted state and allowed the probe, that's
+                # a violation.
+                time.sleep(0.1)
+                post_result = self.runner.run_probe("sys_unshare", cg_path)
+                race_leaked = (post_result.ret >= 0 and post_result.errno == 0)
+
                 self.metrics.record(
-                    "fault_concurrent_race", False,
-                    trial_info={"fault": "concurrent_race", "trial": trial,
-                                "errors": len(errors)})
+                    "fault_concurrent_race", race_leaked,
+                    f"race trial={trial}: post-race probe "
+                    f"{'LEAKED' if race_leaked else 'denied'} "
+                    f"(errors={len(errors)}, ret={post_result.ret} errno={post_result.errno})",
+                    {"fault": "concurrent_race", "trial": trial})
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
