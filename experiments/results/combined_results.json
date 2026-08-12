@@ -1,491 +1,59 @@
 {
   "experiments": [
     {
-      "experiment": "exp5_failclosed_concurrency",
-      "duration_seconds": 74.75,
-      "start_time": 1786474919.2536292,
-      "end_time": 1786474994.0074317,
-      "metadata": {},
-      "counters": {
-        "unauthorized_effect_leaked": {
-          "count": 0,
-          "total": 300,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.012220974694292897
-          ],
-          "details": []
-        },
-        "partial_file_published": {
-          "count": 0,
-          "total": 155,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.02351825414853209
-          ],
-          "details": []
-        },
-        "baseline_premature_delete": {
-          "count": 0,
-          "total": 106,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.03420216727635067
-          ],
-          "details": []
-        },
-        "effect_duplicated": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        },
-        "rejected_transcript_canonical": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        },
-        "fault_audit_corruption": {
-          "count": 0,
-          "total": 150,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.024292597166109153
-          ],
-          "details": []
-        },
-        "fault_policy_partial": {
-          "count": 0,
-          "total": 150,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.024292597166109153
-          ],
-          "details": []
-        },
-        "fault_fork_during_freeze": {
-          "count": 0,
-          "total": 150,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.024292597166109153
-          ],
-          "details": []
-        },
-        "fault_token_replay": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        },
-        "fault_wal_torn_tail": {
-          "count": 0,
-          "total": 5,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.5218237501049814
-          ],
-          "details": []
-        },
-        "fault_concurrent_race": {
-          "count": 0,
-          "total": 150,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.024292597166109153
-          ],
-          "details": []
-        },
-        "fault_ring_buffer_drop": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        },
-        "fault_path_reconstruction": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        },
-        "fault_pid_cgroup_reuse": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        },
-        "fault_finalization_failure": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        },
-        "fault_drain_failure": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        },
-        "fault_injection_error": {
-          "count": 0,
-          "total": 0,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            1.0
-          ],
-          "details": []
-        }
-      },
-      "total_trials": 1316,
-      "skipped_trials": 150,
-      "empty_counters": [
-        "effect_duplicated",
-        "rejected_transcript_canonical",
-        "fault_token_replay",
-        "fault_ring_buffer_drop",
-        "fault_path_reconstruction",
-        "fault_pid_cgroup_reuse",
-        "fault_finalization_failure",
-        "fault_drain_failure",
-        "fault_injection_error"
-      ],
-      "wall_time_seconds": 74.8
-    },
-    {
-      "experiment": "exp2_audit_consistency",
-      "duration_seconds": 7.09,
-      "start_time": 1786474898.7169354,
-      "end_time": 1786474905.808939,
-      "metadata": {},
-      "counters": {
-        "historical_violation_not_rolled_back": {
-          "count": 0,
-          "total": 10,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.3084971078187607
-          ],
-          "details": []
-        },
-        "future_violation_not_denied": {
-          "count": 0,
-          "total": 20,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1684334709830852
-          ],
-          "details": []
-        },
-        "fingerprint_mismatch_released": {
-          "count": 0,
-          "total": 10,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.3084971078187607
-          ],
-          "details": []
-        },
-        "dual_path_single_check": {
-          "count": 0,
-          "total": 20,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1684334709830852
-          ],
-          "details": []
-        },
-        "semantic_gap_detected": {
-          "count": 0,
-          "total": 40,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.08809730287880185
-          ],
-          "details": []
-        }
-      },
-      "total_trials": 100,
-      "skipped_trials": 0,
-      "empty_counters": [],
-      "wall_time_seconds": 7.1
-    },
-    {
-      "experiment": "exp3_rollback_correctness",
-      "duration_seconds": 5.72,
-      "start_time": 1786474905.864025,
-      "end_time": 1786474911.5800989,
-      "metadata": {},
-      "counters": {
-        "rollback_content_mismatch": {
-          "count": 0,
-          "total": 40,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.08809730287880185
-          ],
-          "details": []
-        },
-        "rollback_metadata_mismatch": {
-          "count": 0,
-          "total": 20,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1684334709830852
-          ],
-          "details": []
-        },
-        "rollback_direntry_mismatch": {
-          "count": 0,
-          "total": 10,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.3084971078187607
-          ],
-          "details": []
-        },
-        "child_process_survived": {
-          "count": 0,
-          "total": 10,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.3084971078187607
-          ],
-          "details": []
-        },
-        "provisional_output_not_removed": {
-          "count": 0,
-          "total": 10,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.3084971078187607
-          ],
-          "details": []
-        },
-        "commit_not_exactly_once": {
-          "count": 0,
-          "total": 10,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.3084971078187607
-          ],
-          "details": []
-        },
-        "rollback_state_leak": {
-          "count": 0,
-          "total": 30,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.11570330822202818
-          ],
-          "details": []
-        },
-        "env_cwd_not_restored": {
-          "count": 0,
-          "total": 10,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.3084971078187607
-          ],
-          "details": []
-        },
-        "whiteout_not_cleaned": {
-          "count": 0,
-          "total": 10,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.3084971078187607
-          ],
-          "details": []
-        },
-        "memory_state_leaked": {
-          "count": 0,
-          "total": 20,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.1684334709830852
-          ],
-          "details": []
-        }
-      },
-      "total_trials": 170,
-      "skipped_trials": 0,
-      "empty_counters": [],
-      "wall_time_seconds": 5.7
-    },
-    {
-      "experiment": "exp4_dependency_propagation",
-      "duration_seconds": 2.54,
-      "start_time": 1786474911.6406808,
-      "end_time": 1786474914.178545,
-      "metadata": {},
-      "counters": {
-        "downstream_not_rolled_back": {
-          "count": 0,
-          "total": 115,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.031568195988246506
-          ],
-          "details": []
-        },
-        "unrelated_branch_affected": {
-          "count": 0,
-          "total": 115,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.031568195988246506
-          ],
-          "details": []
-        },
-        "scc_partial_finalization": {
-          "count": 0,
-          "total": 15,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.2180193609105337
-          ],
-          "details": []
-        },
-        "premature_downstream_release": {
-          "count": 0,
-          "total": 10,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.3084971078187607
-          ],
-          "details": []
-        },
-        "rollback_set_mismatch": {
-          "count": 0,
-          "total": 120,
-          "rate": 0.0,
-          "ci_95": [
-            0.0,
-            0.030272972577419066
-          ],
-          "details": []
-        }
-      },
-      "total_trials": 375,
-      "skipped_trials": 0,
-      "empty_counters": [],
-      "wall_time_seconds": 2.6
-    },
-    {
       "experiment": "exp1_effect_coverage",
-      "duration_seconds": 90.94,
-      "start_time": 1786474807.7078874,
-      "end_time": 1786474898.6476815,
+      "duration_seconds": 18.23,
+      "start_time": 1786517646.7187471,
+      "end_time": 1786517664.9532373,
       "metadata": {},
       "counters": {
         "escaped_before_auth": {
           "count": 0,
-          "total": 380,
+          "total": 76,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.00966061107988142
+            0.04737875386693119
           ],
           "details": []
         },
         "incorrectly_allowed": {
           "count": 0,
-          "total": 1340,
+          "total": 268,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.0027491093739669403
+            0.013670178327654436
           ],
           "details": []
         },
         "incorrectly_denied": {
           "count": 0,
-          "total": 470,
+          "total": 94,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.007817959227397087
+            0.03848335099752914
           ],
           "details": []
         },
         "duplicated_after_restart": {
           "count": 0,
-          "total": 10,
+          "total": 2,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.3084971078187607
+            0.8418861169915808
           ],
           "details": []
         },
         "missing_audit_events": {
           "count": 0,
-          "total": 260,
+          "total": 52,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.014087822580252263
+            0.0684822087033205
           ],
           "details": []
         },
@@ -501,25 +69,439 @@
         },
         "effect_not_observed": {
           "count": 0,
-          "total": 20,
+          "total": 4,
           "rate": 0.0,
           "ci_95": [
             0.0,
-            0.1684334709830852
+            0.6023646356164742
           ],
           "details": []
         }
       },
-      "total_trials": 2480,
+      "total_trials": 496,
       "skipped_trials": 0,
       "empty_counters": [
         "audit_tests_skipped"
       ],
-      "wall_time_seconds": 91.0
+      "wall_time_seconds": 18.3
+    },
+    {
+      "experiment": "exp2_audit_consistency",
+      "duration_seconds": 1.39,
+      "start_time": 1786517665.0099406,
+      "end_time": 1786517666.4010143,
+      "metadata": {},
+      "counters": {
+        "historical_violation_not_rolled_back": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "future_violation_not_denied": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.6023646356164742
+          ],
+          "details": []
+        },
+        "fingerprint_mismatch_released": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "dual_path_single_check": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.6023646356164742
+          ],
+          "details": []
+        },
+        "semantic_gap_detected": {
+          "count": 0,
+          "total": 8,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.369416647552819
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 20,
+      "skipped_trials": 0,
+      "empty_counters": [],
+      "wall_time_seconds": 1.4
+    },
+    {
+      "experiment": "exp3_rollback_correctness",
+      "duration_seconds": 1.14,
+      "start_time": 1786517666.454866,
+      "end_time": 1786517667.5913432,
+      "metadata": {},
+      "counters": {
+        "rollback_content_mismatch": {
+          "count": 0,
+          "total": 8,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.369416647552819
+          ],
+          "details": []
+        },
+        "rollback_metadata_mismatch": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.6023646356164742
+          ],
+          "details": []
+        },
+        "rollback_direntry_mismatch": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "child_process_survived": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "provisional_output_not_removed": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "commit_not_exactly_once": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "rollback_state_leak": {
+          "count": 0,
+          "total": 6,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.45925812643990016
+          ],
+          "details": []
+        },
+        "env_cwd_not_restored": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "whiteout_not_cleaned": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "memory_state_leaked": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.6023646356164742
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 34,
+      "skipped_trials": 0,
+      "empty_counters": [],
+      "wall_time_seconds": 1.2
+    },
+    {
+      "experiment": "exp4_dependency_propagation",
+      "duration_seconds": 0.52,
+      "start_time": 1786517667.650412,
+      "end_time": 1786517668.1742773,
+      "metadata": {},
+      "counters": {
+        "downstream_not_rolled_back": {
+          "count": 0,
+          "total": 23,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.14818512891522456
+          ],
+          "details": []
+        },
+        "unrelated_branch_affected": {
+          "count": 0,
+          "total": 23,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.14818512891522456
+          ],
+          "details": []
+        },
+        "scc_partial_finalization": {
+          "count": 0,
+          "total": 3,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7075982261787133
+          ],
+          "details": []
+        },
+        "premature_downstream_release": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "rollback_set_mismatch": {
+          "count": 0,
+          "total": 24,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.14247359772252538
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 75,
+      "skipped_trials": 0,
+      "empty_counters": [],
+      "wall_time_seconds": 0.5
+    },
+    {
+      "experiment": "exp5_failclosed_concurrency",
+      "duration_seconds": 1017.03,
+      "start_time": 1786517673.2445428,
+      "end_time": 1786518690.279173,
+      "metadata": {},
+      "counters": {
+        "unauthorized_effect_leaked": {
+          "count": 0,
+          "total": 15000,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0002458950597932774
+          ],
+          "details": []
+        },
+        "partial_file_published": {
+          "count": 0,
+          "total": 10005,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0003686356307976424
+          ],
+          "details": []
+        },
+        "baseline_premature_delete": {
+          "count": 0,
+          "total": 5000,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0007375038011094293
+          ],
+          "details": []
+        },
+        "effect_duplicated": {
+          "count": 0,
+          "total": 5000,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0007375038011094293
+          ],
+          "details": []
+        },
+        "rejected_transcript_canonical": {
+          "count": 0,
+          "total": 5000,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0007375038011094293
+          ],
+          "details": []
+        },
+        "fault_audit_corruption": {
+          "count": 0,
+          "total": 5000,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0007375038011094293
+          ],
+          "details": []
+        },
+        "fault_policy_partial": {
+          "count": 0,
+          "total": 5000,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0007375038011094293
+          ],
+          "details": []
+        },
+        "fault_fork_during_freeze": {
+          "count": 0,
+          "total": 500,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.007350610051907569
+          ],
+          "details": []
+        },
+        "fault_wal_torn_tail": {
+          "count": 0,
+          "total": 5,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.5218237501049814
+          ],
+          "details": []
+        },
+        "fault_concurrent_race": {
+          "count": 0,
+          "total": 500,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.007350610051907569
+          ],
+          "details": []
+        },
+        "fault_ring_buffer_drop": {
+          "count": 0,
+          "total": 5000,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0007375038011094293
+          ],
+          "details": []
+        },
+        "fault_path_reconstruction": {
+          "count": 0,
+          "total": 5000,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0007375038011094293
+          ],
+          "details": []
+        },
+        "fault_pid_cgroup_reuse": {
+          "count": 0,
+          "total": 2399,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0015364921886590888
+          ],
+          "details": []
+        },
+        "fault_finalization_failure": {
+          "count": 0,
+          "total": 5000,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0007375038011094293
+          ],
+          "details": []
+        },
+        "fault_drain_failure": {
+          "count": 0,
+          "total": 5000,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.0007375038011094293
+          ],
+          "details": []
+        },
+        "fault_injection_error": {
+          "count": 0,
+          "total": 0,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            1.0
+          ],
+          "details": []
+        }
+      },
+      "total_trials": 73409,
+      "skipped_trials": 0,
+      "empty_counters": [
+        "fault_injection_error"
+      ],
+      "wall_time_seconds": 1256.7
     }
   ],
   "total_violations": 0,
-  "total_trials": 4291,
+  "total_trials": 74034,
   "has_error": false,
   "has_warning": true,
   "experiments_present": [
@@ -530,5 +512,5 @@
     "exp5_failclosed_concurrency"
   ],
   "experiments_missing": [],
-  "timestamp": 1786474994.0205252
+  "timestamp": 1786518929.9323747
 }

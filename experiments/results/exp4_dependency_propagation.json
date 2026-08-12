@@ -1,62 +1,62 @@
 {
   "experiment": "exp4_dependency_propagation",
-  "duration_seconds": 2.54,
-  "start_time": 1786474911.6406808,
-  "end_time": 1786474914.178545,
+  "duration_seconds": 0.52,
+  "start_time": 1786517667.650412,
+  "end_time": 1786517668.1742773,
   "metadata": {},
   "counters": {
     "downstream_not_rolled_back": {
       "count": 0,
-      "total": 115,
+      "total": 23,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.031568195988246506
+        0.14818512891522456
       ],
       "details": []
     },
     "unrelated_branch_affected": {
       "count": 0,
-      "total": 115,
+      "total": 23,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.031568195988246506
+        0.14818512891522456
       ],
       "details": []
     },
     "scc_partial_finalization": {
       "count": 0,
-      "total": 15,
+      "total": 3,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.2180193609105337
+        0.7075982261787133
       ],
       "details": []
     },
     "premature_downstream_release": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.3084971078187607
+        0.8418861169915808
       ],
       "details": []
     },
     "rollback_set_mismatch": {
       "count": 0,
-      "total": 120,
+      "total": 24,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.030272972577419066
+        0.14247359772252538
       ],
       "details": []
     }
   },
-  "total_trials": 375,
+  "total_trials": 75,
   "skipped_trials": 0,
   "empty_counters": []
 }

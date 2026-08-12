@@ -1,97 +1,87 @@
 {
   "experiment": "exp5_failclosed_concurrency",
-  "duration_seconds": 74.75,
-  "start_time": 1786474919.2536292,
-  "end_time": 1786474994.0074317,
+  "duration_seconds": 1017.03,
+  "start_time": 1786517673.2445428,
+  "end_time": 1786518690.279173,
   "metadata": {},
   "counters": {
     "unauthorized_effect_leaked": {
       "count": 0,
-      "total": 300,
+      "total": 15000,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.012220974694292897
+        0.0002458950597932774
       ],
       "details": []
     },
     "partial_file_published": {
       "count": 0,
-      "total": 155,
+      "total": 10005,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.02351825414853209
+        0.0003686356307976424
       ],
       "details": []
     },
     "baseline_premature_delete": {
       "count": 0,
-      "total": 106,
+      "total": 5000,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.03420216727635067
+        0.0007375038011094293
       ],
       "details": []
     },
     "effect_duplicated": {
       "count": 0,
-      "total": 0,
+      "total": 5000,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.0007375038011094293
       ],
       "details": []
     },
     "rejected_transcript_canonical": {
       "count": 0,
-      "total": 0,
+      "total": 5000,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.0007375038011094293
       ],
       "details": []
     },
     "fault_audit_corruption": {
       "count": 0,
-      "total": 150,
+      "total": 5000,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.024292597166109153
+        0.0007375038011094293
       ],
       "details": []
     },
     "fault_policy_partial": {
       "count": 0,
-      "total": 150,
+      "total": 5000,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.024292597166109153
+        0.0007375038011094293
       ],
       "details": []
     },
     "fault_fork_during_freeze": {
       "count": 0,
-      "total": 150,
+      "total": 500,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.024292597166109153
-      ],
-      "details": []
-    },
-    "fault_token_replay": {
-      "count": 0,
-      "total": 0,
-      "rate": 0.0,
-      "ci_95": [
-        0.0,
-        1.0
+        0.007350610051907569
       ],
       "details": []
     },
@@ -107,61 +97,61 @@
     },
     "fault_concurrent_race": {
       "count": 0,
-      "total": 150,
+      "total": 500,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.024292597166109153
+        0.007350610051907569
       ],
       "details": []
     },
     "fault_ring_buffer_drop": {
       "count": 0,
-      "total": 0,
+      "total": 5000,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.0007375038011094293
       ],
       "details": []
     },
     "fault_path_reconstruction": {
       "count": 0,
-      "total": 0,
+      "total": 5000,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.0007375038011094293
       ],
       "details": []
     },
     "fault_pid_cgroup_reuse": {
       "count": 0,
-      "total": 0,
+      "total": 2399,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.0015364921886590888
       ],
       "details": []
     },
     "fault_finalization_failure": {
       "count": 0,
-      "total": 0,
+      "total": 5000,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.0007375038011094293
       ],
       "details": []
     },
     "fault_drain_failure": {
       "count": 0,
-      "total": 0,
+      "total": 5000,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        1.0
+        0.0007375038011094293
       ],
       "details": []
     },
@@ -176,17 +166,9 @@
       "details": []
     }
   },
-  "total_trials": 1316,
-  "skipped_trials": 150,
+  "total_trials": 73409,
+  "skipped_trials": 0,
   "empty_counters": [
-    "effect_duplicated",
-    "rejected_transcript_canonical",
-    "fault_token_replay",
-    "fault_ring_buffer_drop",
-    "fault_path_reconstruction",
-    "fault_pid_cgroup_reuse",
-    "fault_finalization_failure",
-    "fault_drain_failure",
     "fault_injection_error"
   ]
 }

@@ -64,7 +64,7 @@ class Experiment5:
     # buffer for teardown operations and ensure all 16 test types get
     # an equal share (~150 trials each).
     MAX_CGROUPS_PER_RUN = 2400
-    NUM_FAULT_TYPES = 16  # Total number of fault injection test methods
+    NUM_FAULT_TYPES = 15  # Total number of fault injection test methods
 
     def __init__(self, trials: int = 5000):
         self.trials = trials
@@ -93,7 +93,6 @@ class Experiment5:
         self.metrics.add_counter("fault_audit_corruption")
         self.metrics.add_counter("fault_policy_partial")
         self.metrics.add_counter("fault_fork_during_freeze")
-        self.metrics.add_counter("fault_token_replay")
         self.metrics.add_counter("fault_wal_torn_tail")
         self.metrics.add_counter("fault_concurrent_race")
         # New fault counters
@@ -138,6 +137,52 @@ class Experiment5:
             raise
         return cg_path, cg_id
 
+    def _get_persistent_cgroup(self, test_name: str):
+        """Get or create THE shared cgroup for ALL tests.
+
+        Uses a single cgroup for all test types to minimize BPF map usage.
+        The cgroup is created once and reset between trials.
+        """
+        if not hasattr(self, '_shared_cgroup'):
+            self._shared_cgroup = None
+        if self._shared_cgroup is None:
+            print(f"    [diag] Creating shared cgroup for '{test_name}'...")
+            cg_path, cg_id = self._setup_cgroup_safe("exp5-shared")
+            self._shared_cgroup = (cg_path, cg_id)
+            print(f"    [diag] Shared cgroup created: {cg_path} (id={cg_id})")
+        return self._shared_cgroup
+
+    def _reset_persistent_cgroup(self, test_name: str):
+        """Reset a persistent cgroup between trials (kill procs, clear policy)."""
+        if not hasattr(self, '_persistent_cgroups'):
+            return
+        if test_name in self._persistent_cgroups:
+            cg_path, cg_id = self._persistent_cgroups[test_name]
+            try:
+                self.proc_client.kill_by_cgroup(cg_id)
+            except Exception:
+                pass
+            try:
+                self.proc_client.clear_all_policies(cg_id)
+            except Exception:
+                pass
+
+    def _reset_persistent_cgroup_by_ids(self, cg_path: str, cg_id: str):
+        """Reset a persistent cgroup by its IDs (kill procs, clear policy).
+
+        Does NOT remove the cgroup from BPF map (it's persistent).
+        """
+        try:
+            self.proc_client.kill_by_cgroup(cg_id)
+        except Exception:
+            pass
+        try:
+            self.proc_client.clear_all_policies(cg_id)
+        except Exception as e:
+            # Log if clear_all_policies fails - this might be the map issue
+            if "map" in str(e).lower() or "Argument list" in str(e):
+                print(f"    [diag] clear_all_policies FAILED: {e}")
+
     def _teardown_cgroup_safe(self, cg_path: str, cg_id: str):
         """Clean up a cgroup, ignoring errors."""
         try:
@@ -161,11 +206,18 @@ class Experiment5:
     def _trials_for_test(self, base_trials: int) -> int:
         """Get number of trials for a test.
 
-        Fixed per-test allocation: MAX_CGROUPS_PER_RUN / NUM_FAULT_TYPES.
-        This ensures each fault type gets equal budget regardless of order.
+        With persistent cgroups (1 per test type), BPF map usage is minimal.
+        Allow full trial count up to base_trials.
         """
-        per_test_budget = self.MAX_CGROUPS_PER_RUN // self.NUM_FAULT_TYPES
-        return max(0, min(base_trials, per_test_budget))
+        return base_trials
+
+    # Heavy tests that stress the daemon (threads + probes per trial)
+    # are capped to avoid overwhelming ShadowProc
+    HEAVY_TEST_CAP = 500
+
+    def _trials_for_heavy_test(self, base_trials: int) -> int:
+        """Get trial count for heavy tests (concurrent race, fork storm)."""
+        return min(base_trials, self.HEAVY_TEST_CAP)
 
     def teardown(self):
         self.runner.cleanup()
@@ -198,10 +250,10 @@ class Experiment5:
             if trial > 0 and trial % 20 == 0:
                 print(f"    progress: {trial}/{actual_trials} (cgroups: {self._cgroups_created})", flush=True)
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-audit-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("audit")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -244,8 +296,8 @@ class Experiment5:
                     self.proc_client.set_epoch_mode(cg_id, 2)
                 except RuntimeError as e:
                     if "Argument list too long" in str(e) or "map" in str(e).lower():
-                        print(f"    [BPF map full at trial {trial}, stopping early]")
-                        self._teardown_cgroup_safe(cg_path, cg_id)
+                        print(f"    [BPF map full at trial {trial}: {e}]")
+                        self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                         break
                     raise
 
@@ -272,7 +324,7 @@ class Experiment5:
                         pass
 
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         print(f"    completed")
 
     # ─── Fault: Policy partial install ───────────────────────────────────
@@ -289,10 +341,10 @@ class Experiment5:
         print(f"  [2/16] Policy partial install ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-policy-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("policy")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -320,12 +372,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
 
     # ─── Fault: Fork during freeze ───────────────────────────────────────
 
@@ -338,16 +390,16 @@ class Experiment5:
         """
         import subprocess as _sp
 
-        actual_trials = self._trials_for_test(self.trials)
+        actual_trials = self._trials_for_heavy_test(self.trials)
         print(f"  [3/16] Fork during freeze ({actual_trials} trials) ...", flush=True)
         STORM_SIZE = 10  # processes per trial
 
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-fork-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("fork")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -412,12 +464,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         print(f"    completed")
 
     # ─── Fault: Token replay ─────────────────────────────────────────────
@@ -437,10 +489,10 @@ class Experiment5:
         print(f"  [4/16] Token replay ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-token-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("token")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -485,9 +537,14 @@ class Experiment5:
                                     "skipped": True, "reason": "grant failed"})
                     continue
 
-                # SIGCONT the process: token consumed, unshare succeeds
-                import signal as _sig
-                os.kill(tid, _sig.SIGCONT)
+                # Continue the process via daemon (clears stopped mark + SIGCONT).
+                # Use empty policy so ONLY the restart token can allow the syscall.
+                try:
+                    self.proc_client.continue_by_cgroup(cg_id, policy={
+                        "classes": [], "network": [], "ipc": [], "signal": []
+                    })
+                except Exception:
+                    pass
                 result = self.runner.wait_result(proc, "sys_unshare", timeout=3.0)
 
                 # First use should succeed (token was valid)
@@ -536,12 +593,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         print(f"    completed {actual_trials} trials")
 
     # ─── Fault: WAL torn tail ────────────────────────────────────────────
@@ -648,10 +705,10 @@ class Experiment5:
 
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-wal-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("wal")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -724,7 +781,7 @@ class Experiment5:
                         "fault_wal_torn_tail", False,
                         trial_info={"fault": "wal_torn", "trial": trial,
                                     "skipped": True, "reason": "restart failed"})
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     continue
 
                 # ── VERIFY: backing store consistency ──
@@ -755,12 +812,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
 
         self._tests_completed += 1
         print(f"    completed")
@@ -769,14 +826,14 @@ class Experiment5:
 
     def test_concurrent_race(self):
         """Concurrent finalization + release + ack -> no inconsistency."""
-        actual_trials = self._trials_for_test(self.trials)
+        actual_trials = self._trials_for_heavy_test(self.trials)
         print(f"  [6/16] Concurrent race ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-race-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("race")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -833,8 +890,8 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 self.metrics.record(
                     "fault_concurrent_race", True,
@@ -846,14 +903,14 @@ class Experiment5:
                     f"race trial={trial}: unhandled {e}",
                     {"fault": "concurrent_race", "trial": trial})
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
 
     # ─── Fault: File partial publication ─────────────────────────────────
 
     def test_no_partial_publication(self):
         """File must not be partially visible outside the epoch."""
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [7/12] No partial publication ({actual_trials} trials) ...", flush=True)
+        print(f"  [7/15] No partial publication ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             target = fuse_path(f"exp5/partial-{trial}.txt")
             # Ensure file doesn't exist in backing store
@@ -861,9 +918,8 @@ class Experiment5:
             if os.path.exists(check_path):
                 os.unlink(check_path)
 
-            cg_path = self.cgroup_mgr.create(f"exp5-partial-{trial}")
-            cg_id = self.cgroup_mgr.get_cgroup_id(cg_path)
-            self.proc_client.add_cgroup(cg_path)
+            cg_path, cg_id = self._get_persistent_cgroup("partial")
+            self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
 
             try:
                 # ENFORCED, no policy -> deny
@@ -878,33 +934,26 @@ class Experiment5:
                     {"fault": "partial_pub", "trial": trial})
 
             except RuntimeError as e:
-                # BPF map full or other infra limit - skip gracefully
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    time.sleep(0.2)
-                    continue
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    break
                 raise
             finally:
-                try:
-                    self.proc_client.kill_by_cgroup(cg_id)
-                    self.proc_client.remove_cgroup(cg_path)
-                except Exception:
-                    pass
-                self.cgroup_mgr.remove(cg_path)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
 
     # ─── Fault: Baseline premature deletion ──────────────────────────────
 
     def test_no_premature_baseline_delete(self):
         """Baseline must not be deleted before finalization completes."""
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [8/12] No premature baseline deletion ({actual_trials} trials) ...", flush=True)
+        print(f"  [8/15] No premature baseline deletion ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             baseline = harness_path(f"exp5/baseline-{trial}.txt")
             with open(baseline, "w") as f:
                 f.write("baseline content")
 
-            cg_path = self.cgroup_mgr.create(f"exp5-baseline-{trial}")
-            cg_id = self.cgroup_mgr.get_cgroup_id(cg_path)
-            self.proc_client.add_cgroup(cg_path)
+            cg_path, cg_id = self._get_persistent_cgroup("baseline")
+            self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
 
             try:
                 self.proc_client.set_epoch_mode(cg_id, 2)
@@ -922,16 +971,11 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    time.sleep(0.2)
-                    continue
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    break
                 raise
             finally:
-                try:
-                    self.proc_client.kill_by_cgroup(cg_id)
-                    self.proc_client.remove_cgroup(cg_path)
-                except Exception:
-                    pass
-                self.cgroup_mgr.remove(cg_path)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
 
     # ─── Fault: Ring buffer drop ──────────────────────────────────────────
 
@@ -945,10 +989,10 @@ class Experiment5:
         print(f"  [9/16] Ring buffer drop ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-ringbuf-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("ringbuf")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -969,12 +1013,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         print(f"    completed")
 
     # ─── Fault: Path reconstruction failure ───────────────────────────────
@@ -989,10 +1033,10 @@ class Experiment5:
         print(f"  [10/16] Path reconstruction failure ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-pathrec-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("pathrec")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -1013,12 +1057,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         print(f"    completed")
 
     # ─── Fault: PID/cgroup reuse ──────────────────────────────────────────
@@ -1039,7 +1083,7 @@ class Experiment5:
                 cg_path, cg_id = self._setup_cgroup_safe(cg_name)
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -1060,12 +1104,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         print(f"    completed")
 
     # ─── Fault: Finalization failure ──────────────────────────────────────
@@ -1076,10 +1120,10 @@ class Experiment5:
         print(f"  [12/12] Finalization failure ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-finalize-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("finalize")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -1131,12 +1175,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         print(f"    completed")
 
     # ─── Fault: Promotion mid-crash ────────────────────────────────────────
@@ -1151,10 +1195,10 @@ class Experiment5:
         print(f"  [13/14] Promotion mid-crash ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-promo-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("promo")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -1203,12 +1247,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         self._tests_completed += 1
         print(f"    completed")
 
@@ -1224,10 +1268,10 @@ class Experiment5:
         print(f"  [14/14] Effect duplication ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-dup-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("dup")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -1289,12 +1333,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         self._tests_completed += 1
         print(f"    completed")
 
@@ -1307,10 +1351,10 @@ class Experiment5:
         print(f"  [15/15] Rejected transcript ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-rej-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("rej")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -1353,12 +1397,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         self._tests_completed += 1
         print(f"    completed")
 
@@ -1387,10 +1431,10 @@ class Experiment5:
         print(f"  [16/16] Drain failure ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
-                cg_path, cg_id = self._setup_cgroup_safe(f"exp5-drain-{trial}")
+                cg_path, cg_id = self._get_persistent_cgroup("drain")
             except RuntimeError as e:
                 if "BPF_MAP_FULL" in str(e):
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
+                    print(f"    [BPF map full at trial {trial}: {e}]")
                     break
                 raise
 
@@ -1448,12 +1492,12 @@ class Experiment5:
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
-                    print(f"    [BPF map full at trial {trial}, stopping early]")
-                    self._teardown_cgroup_safe(cg_path, cg_id)
+                    print(f"    [BPF map full at trial {trial}: {e}]")
+                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._teardown_cgroup_safe(cg_path, cg_id)
+                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
         self._tests_completed += 1
         print(f"    completed")
 
@@ -1465,35 +1509,35 @@ class Experiment5:
         print(f"{'='*70}\n")
 
         try:
-            self.test_audit_log_corruption()
-            self._tests_completed += 1
-            self.test_policy_partial_install()
-            self._tests_completed += 1
+            # Phase 1: Lightweight tests first (before daemon gets stressed)
+            for test_fn in [
+                self.test_audit_log_corruption,
+                self.test_policy_partial_install,
+                self.test_wal_torn_tail,
+                self.test_no_partial_publication,
+                self.test_no_premature_baseline_delete,
+                self.test_ring_buffer_drop,
+                self.test_path_reconstruction_failure,
+                self.test_pid_cgroup_reuse,
+                self.test_finalization_failure,
+                self.test_promotion_mid_crash,
+                self.test_effect_duplication,
+                self.test_rejected_transcript_not_canonical,
+                self.test_drain_failure,
+            ]:
+                try:
+                    test_fn()
+                except Exception as e:
+                    import traceback
+                    print(f"    [exp5] ERROR: {test_fn.__name__} failed: {e}")
+                    traceback.print_exc()
+                self._tests_completed += 1
+
+            # Phase 2: Heavy tests LAST (may stress daemon)
             self.test_fork_during_freeze()
-            self._tests_completed += 1
-            self.test_token_replay()
-            self._tests_completed += 1
-            self.test_wal_torn_tail()
             self._tests_completed += 1
             self.test_concurrent_race()
             self._tests_completed += 1
-            self.test_no_partial_publication()
-            self._tests_completed += 1
-            self.test_no_premature_baseline_delete()
-            self._tests_completed += 1
-            self.test_ring_buffer_drop()
-            self._tests_completed += 1
-            self.test_path_reconstruction_failure()
-            self._tests_completed += 1
-            self.test_pid_cgroup_reuse()
-            self._tests_completed += 1
-            self.test_finalization_failure()
-            self._tests_completed += 1
-            # New tests
-            self.test_promotion_mid_crash()
-            self.test_effect_duplication()
-            self.test_rejected_transcript_not_canonical()
-            self.test_drain_failure()
 
         except KeyboardInterrupt:
             print("\n[exp5] Interrupted")

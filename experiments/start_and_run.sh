@@ -17,6 +17,7 @@ echo "[2/6] 准备目录..."
 # 清理旧的 staging/WAL 数据，避免历史 epoch 状态干扰新运行
 rm -rf /tmp/shadow-rq2-test/staging
 rm -rf /tmp/shadow-rq2-test/orig
+rm -f "$EXP/results/combined_results.json"
 mkdir -p /tmp/shadow-rq2-test/{orig,staging,mnt}
 mkdir -p /sys/fs/cgroup/shadow-rq2 2>/dev/null || true
 echo "test-content" > /tmp/shadow-rq2-test/orig/test.txt

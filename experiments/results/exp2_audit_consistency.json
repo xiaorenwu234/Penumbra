@@ -1,62 +1,62 @@
 {
   "experiment": "exp2_audit_consistency",
-  "duration_seconds": 7.09,
-  "start_time": 1786474898.7169354,
-  "end_time": 1786474905.808939,
+  "duration_seconds": 1.39,
+  "start_time": 1786517665.0099406,
+  "end_time": 1786517666.4010143,
   "metadata": {},
   "counters": {
     "historical_violation_not_rolled_back": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.3084971078187607
+        0.8418861169915808
       ],
       "details": []
     },
     "future_violation_not_denied": {
       "count": 0,
-      "total": 20,
+      "total": 4,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.1684334709830852
+        0.6023646356164742
       ],
       "details": []
     },
     "fingerprint_mismatch_released": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.3084971078187607
+        0.8418861169915808
       ],
       "details": []
     },
     "dual_path_single_check": {
       "count": 0,
-      "total": 20,
+      "total": 4,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.1684334709830852
+        0.6023646356164742
       ],
       "details": []
     },
     "semantic_gap_detected": {
       "count": 0,
-      "total": 40,
+      "total": 8,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.08809730287880185
+        0.369416647552819
       ],
       "details": []
     }
   },
-  "total_trials": 100,
+  "total_trials": 20,
   "skipped_trials": 0,
   "empty_counters": []
 }

@@ -1,112 +1,112 @@
 {
   "experiment": "exp3_rollback_correctness",
-  "duration_seconds": 5.72,
-  "start_time": 1786474905.864025,
-  "end_time": 1786474911.5800989,
+  "duration_seconds": 1.14,
+  "start_time": 1786517666.454866,
+  "end_time": 1786517667.5913432,
   "metadata": {},
   "counters": {
     "rollback_content_mismatch": {
       "count": 0,
-      "total": 40,
+      "total": 8,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.08809730287880185
+        0.369416647552819
       ],
       "details": []
     },
     "rollback_metadata_mismatch": {
       "count": 0,
-      "total": 20,
+      "total": 4,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.1684334709830852
+        0.6023646356164742
       ],
       "details": []
     },
     "rollback_direntry_mismatch": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.3084971078187607
+        0.8418861169915808
       ],
       "details": []
     },
     "child_process_survived": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.3084971078187607
+        0.8418861169915808
       ],
       "details": []
     },
     "provisional_output_not_removed": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.3084971078187607
+        0.8418861169915808
       ],
       "details": []
     },
     "commit_not_exactly_once": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.3084971078187607
+        0.8418861169915808
       ],
       "details": []
     },
     "rollback_state_leak": {
       "count": 0,
-      "total": 30,
+      "total": 6,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.11570330822202818
+        0.45925812643990016
       ],
       "details": []
     },
     "env_cwd_not_restored": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.3084971078187607
+        0.8418861169915808
       ],
       "details": []
     },
     "whiteout_not_cleaned": {
       "count": 0,
-      "total": 10,
+      "total": 2,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.3084971078187607
+        0.8418861169915808
       ],
       "details": []
     },
     "memory_state_leaked": {
       "count": 0,
-      "total": 20,
+      "total": 4,
       "rate": 0.0,
       "ci_95": [
         0.0,
-        0.1684334709830852
+        0.6023646356164742
       ],
       "details": []
     }
   },
-  "total_trials": 170,
+  "total_trials": 34,
   "skipped_trials": 0,
   "empty_counters": []
 }

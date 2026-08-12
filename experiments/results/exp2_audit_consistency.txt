@@ -1,15 +1,15 @@
 ========================================================================
   EXPERIMENT: exp2_audit_consistency
-  Duration: 7.1s
+  Duration: 1.4s
 ========================================================================
 
   Metric                                       Count        Rate                95% CI
   ------------------------------------  ------------  ----------  --------------------
-  historical_violation_not_rolled_back          0/10    0.000000  [0.000000, 0.308497]
-  future_violation_not_denied                   0/20    0.000000  [0.000000, 0.168433]
-  fingerprint_mismatch_released                 0/10    0.000000  [0.000000, 0.308497]
-  dual_path_single_check                        0/20    0.000000  [0.000000, 0.168433]
-  semantic_gap_detected                         0/40    0.000000  [0.000000, 0.088097]
+  historical_violation_not_rolled_back           0/2    0.000000  [0.000000, 0.841886]
+  future_violation_not_denied                    0/4    0.000000  [0.000000, 0.602365]
+  fingerprint_mismatch_released                  0/2    0.000000  [0.000000, 0.841886]
+  dual_path_single_check                         0/4    0.000000  [0.000000, 0.602365]
+  semantic_gap_detected                          0/8    0.000000  [0.000000, 0.369417]
 
 ========================================================================
 
