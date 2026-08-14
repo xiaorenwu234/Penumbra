@@ -229,6 +229,10 @@ struct {
 
 // Operation policy: per (cgroup, effect_class, operation) -> allow/fine/deny.
 // Only consulted in MODE_ENFORCED.
+// SIZING: one enforce_allow_all installs ~40 entries per cgroup (12 FS + 3
+// NET + 7 IPC + 2 SIG + 5 PRIV + 4 OUT + 7 SYS). Entries are reclaimed when
+// the cgroup is removed; 4096 headroom keeps a long-lived daemon healthy even
+// if a few sessions leak entries through cleanup races.
 struct class_policy_key {
     __u64 cgroup_id;
     __u8  effect_class;
@@ -237,7 +241,7 @@ struct class_policy_key {
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
+    __uint(max_entries, 4096);
     __type(key, struct class_policy_key);
     __type(value, __u8);  // 1=allow, 0=deny
 } class_policy SEC(".maps");
@@ -252,7 +256,7 @@ struct net_policy_key {
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
+    __uint(max_entries, 4096);
     __type(key, struct net_policy_key);
     __type(value, __u8);
 } network_policy SEC(".maps");
@@ -267,7 +271,7 @@ struct ipc_policy_key {
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
+    __uint(max_entries, 4096);
     __type(key, struct ipc_policy_key);
     __type(value, __u8);
 } ipc_policy SEC(".maps");
@@ -281,7 +285,7 @@ struct sig_policy_key {
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 512);
+    __uint(max_entries, 2048);
     __type(key, struct sig_policy_key);
     __type(value, __u8);
 } signal_policy SEC(".maps");

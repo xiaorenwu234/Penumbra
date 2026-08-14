@@ -487,12 +487,30 @@ class _Session:
         # tag — not a separate buffer, and not an external index — is what lets
         # the two duties the old epoch_buffer served still be met:
         #   - reject drops exactly the entries tagged with the rejected epoch;
-        #   - peek_epoch_output() still returns "committed + in-flight", so the
-        #     orchestrator can journal a deterministic committed result at the
-        #     file-layer decision point (crash recovery depends on it).
+        #   - snapshot_epoch_output() returns ONLY the entries appended since
+        #     the previous snapshot, so the orchestrator can journal the
+        #     incremental committed result at the file-layer decision point
+        #     (crash recovery depends on it) without re-serializing the whole
+        #     transcript on every commit — the full-transcript snapshot of the
+        #     k-th epoch is k times the size of the first, and the accumulated
+        #     copies alone exhausted the orchestrator's memory on large-output
+        #     workloads (W10: 1 MiB/epoch x ~200 epochs -> OOM).
         # Tagging beats an index because it survives any other mutation of the
         # list and cannot silently truncate the wrong range.
         self.transcript = []
+        # Incremental-snapshot cursor: transcript entries at index
+        # _snap_cursor and beyond have not been handed to the orchestrator
+        # yet. reject() only ever drops entries tagged with the in-flight
+        # epoch (which commit never snapshots), so the cursor never skips
+        # canonical output; it can only overrun the list after a reject
+        # shrank it, which snapshot_epoch_output() clamps.
+        self._snap_cursor = 0
+        # Idempotence key for snapshot_epoch_output(): the epoch the cursor
+        # was last advanced for. A retried commit of the SAME epoch (deferred
+        # sibling release) must return the already-captured increment instead
+        # of an empty string that would overwrite the journaled output.
+        self._snap_epoch = None
+        self._snap_text = ""
 
 
 # ──────────────────────────── The proxy ────────────────────────────────────
@@ -1012,6 +1030,57 @@ class SessionProxy:
             except OSError:
                 return True
 
+        def _rmtree_skip_mounts(path):
+            """Recursively delete `path` WITHOUT descending into nested mount
+            points, which shutil.rmtree cannot do.
+
+            The candidate/baseline /tmp is a per-candidate tmpfs with the
+            ShadowFS FUSE mount bind-mounted back into it (at
+            /tmp/shadow-rq2-test/mnt). rmtree() recurses into that mount and
+            aborts with EIO from the orchestrator's cgroup -- after possibly
+            having deleted sibling data (the backing/staging dirs) first,
+            depending on directory-entry order. An entry that cannot be
+            stat'd is treated as a fail-closed mount and skipped entirely.
+            """
+            try:
+                st = os.lstat(path)
+            except OSError:
+                return  # fail-closed mount (EIO): skip entirely
+            if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                return
+            try:
+                names = os.listdir(path)
+            except OSError:
+                return  # unreadable dir == fail-closed mount: skip entirely
+            for name in names:
+                child = os.path.join(path, name)
+                if _skip_entry(path, name):
+                    continue
+                _rmtree_skip_mounts(child)
+            try:
+                os.rmdir(path)
+            except OSError:
+                pass  # non-empty only because of a skipped mount: keep it
+
+        def _skip_mounts(dirpath, names):
+            """Skip nested mount points at any depth. Critical for the ShadowFS
+            FUSE mount when it lives under /tmp: ShadowFS is fail-closed and
+            attributes access by cgroup, and this worker runs in the
+            ORCHESTRATOR's cgroup, which has no active epoch -- so recursing
+            into it returns EIO and the whole snapshot (hence begin_epoch)
+            fails. Snapshotting it would be wrong anyway: ShadowFS versions
+            its own content per epoch, so copying it here would be duplicate,
+            conflicting bookkeeping. Defined once above BOTH branches: restore
+            must merge with the same skip set so the two directions stay
+            symmetric (an entry skipped here is absent from the snapshot and
+            must also survive the restore untouched).
+            """
+            return {n for n in names if _skip_entry(dirpath, n)}
+
         if restore:
             for p in tmp_paths:
                 src = p.lstrip("/")          # relative -> host snapshot
@@ -1022,32 +1091,23 @@ class SessionProxy:
                     target = os.path.join(p, name)
                     if _skip_entry(p, name):
                         continue
-                    if os.path.isdir(target) and not os.path.islink(target):
-                        shutil.rmtree(target)
-                    else:
-                        try:
-                            os.unlink(target)
-                        except FileNotFoundError:
-                            pass
+                    _rmtree_skip_mounts(target)
                 for name in os.listdir(src):
                     s = os.path.join(src, name)
                     d = os.path.join(p, name)
                     if os.path.isdir(s) and not os.path.islink(s):
-                        shutil.copytree(s, d, symlinks=True)
+                        # dirs_exist_ok + ignore: merge the snapshot back in
+                        # without touching mount points that survived the
+                        # deletion phase (the snapshot never contains them, so
+                        # a source-driven copy cannot either). Before this
+                        # fix the restore aborted on the mount instead and the
+                        # tmp state was never actually restored.
+                        shutil.copytree(s, d, symlinks=True,
+                                        dirs_exist_ok=True,
+                                        ignore=_skip_mounts)
                     else:
                         shutil.copy2(s, d, follow_symlinks=False)
         else:
-            # Skip nested mount points at any depth. Critical for the ShadowFS
-            # FUSE mount when it lives under /tmp: ShadowFS is fail-closed and
-            # attributes access by cgroup, and this worker runs in the
-            # ORCHESTRATOR's cgroup, which has no active epoch -- so recursing
-            # into it returns EIO and the whole snapshot (hence begin_epoch)
-            # fails. Snapshotting it would be wrong anyway: ShadowFS versions
-            # its own content per epoch, so copying it here would be duplicate,
-            # conflicting bookkeeping.
-            def _skip_mounts(dirpath, names):
-                return {n for n in names if _skip_entry(dirpath, n)}
-
             for p in tmp_paths:
                 if not os.path.isdir(p):
                     continue
@@ -1343,7 +1403,7 @@ class SessionProxy:
                 # straight back to the caller.
                 sess.transcript.append((sess.epoch_id, out))
                 return out
-            time.sleep(0.05)
+            time.sleep(0.001)
         self._recover_from_timeout(sess)
         raise TimeoutError(f"command timed out: {command!r}")
 
@@ -1361,19 +1421,56 @@ class SessionProxy:
     def peek_epoch_output(self, sid):
         """Return the transcript that WOULD become committed for the currently
         active epoch: everything recorded so far, including the in-flight
-        epoch's entries. Used by the orchestrator to snapshot the committed
-        result durably at the file-layer commit decision point (so a crash
-        before finalize_commit still yields a deterministic result on recovery).
-        Returns "" for an unknown session.
+        epoch's entries.
 
-        Value-identical to the pre-optimistic-release version, which computed
-        committed_output + epoch_buffer: the in-flight epoch's output is now
-        recorded in place and tagged instead of held in a side buffer.
+        LEGACY: the orchestrator's commit path now uses
+        snapshot_epoch_output(), which is incremental; this full-transcript
+        view is O(n) per call and must not be used on hot paths. Kept for
+        compatibility with unit tests and callers that genuinely need the
+        whole transcript.
         """
         sess = self.sessions.get(sid)
         if sess is None:
             return ""
         return "\n".join(text for _epoch, text in sess.transcript)
+
+    def snapshot_epoch_output(self, sid):
+        """Return ONLY the transcript entries appended since the previous
+        snapshot (incremental), and advance the snapshot cursor. Used by the
+        orchestrator to journal the committed result durably at the file-layer
+        commit decision point (so a crash before finalize_commit still yields a
+        deterministic result on recovery).
+
+        Per-epoch incremental capture keeps memory and journal growth O(n) in
+        total output volume instead of O(n^2): snapshotting the whole
+        transcript on the k-th epoch copies k times the first epoch's output,
+        and the accumulated copies exhausted the orchestrator's memory on
+        large-output workloads (W10: 1 MiB/epoch x ~200 epochs -> OOM).
+
+        Idempotent per epoch: a retried commit of the SAME epoch (e.g. a
+        deferred sibling release) returns the already-captured increment
+        rather than an empty string, so the journaled output is not
+        overwritten with "".
+
+        Returns "" for an unknown session.
+        """
+        sess = self.sessions.get(sid)
+        if sess is None:
+            return ""
+        # Retry of the same epoch: the increment was already captured; the
+        # cursor must not advance past it (that would journal "" next time).
+        if sess._snap_epoch is not None and sess._snap_epoch == sess.epoch_id:
+            return sess._snap_text
+        # A reject can only drop entries tagged with the in-flight epoch,
+        # which commit never snapshots; even so, clamp a cursor that a
+        # rejected (then retagged) list shrank past.
+        if sess._snap_cursor > len(sess.transcript):
+            sess._snap_cursor = len(sess.transcript)
+        text = "\n".join(t for _epoch, t in sess.transcript[sess._snap_cursor:])
+        sess._snap_text = text
+        sess._snap_epoch = sess.epoch_id
+        sess._snap_cursor = len(sess.transcript)
+        return text
 
     # ---- speculative epoch -------------------------------------------------
     def begin_epoch(self, sid, retries=3):
@@ -1600,6 +1697,16 @@ class SessionProxy:
         if sess.epoch_id is not None:
             sess.transcript = [(epoch, text) for epoch, text in sess.transcript
                                if epoch != sess.epoch_id]
+            # The rejected epoch's entries (all after the snapshot cursor —
+            # commit never snapshots an in-flight epoch) are gone. Re-anchor
+            # the cursor to the shrunken list HERE: deferring it to the next
+            # snapshot could let later appends grow len() back past the stale
+            # cursor and silently skip the post-reject increment.
+            sess._snap_cursor = min(sess._snap_cursor, len(sess.transcript))
+            # The rejected epoch can never be committed, so its incremental
+            # snapshot (if any) is void; clear the idempotence key so no
+            # later epoch can be mistaken for it.
+            sess._snap_epoch = None
             sess.epoch_id = None
         self._discard_epoch_tmp_snapshot(sess)
         # Wait for the baseline to settle back into read() (was 200ms blind).

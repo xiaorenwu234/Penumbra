@@ -147,7 +147,15 @@ class _OrchestratorJournal:
       op=commit_intent  {sid, cgroup}          commit started; FS not yet confirmed
       op=fs_committed   {sid, cgroup, output}  DECISION POINT: the file layer
                         finalized durably, so the canonical outcome is COMMITTED
-                        and the committed transcript is captured here.
+                        and the committed transcript is captured here. The
+                        captured output is INCREMENTAL — this epoch's entries
+                        only (see SessionProxy.snapshot_epoch_output) — so
+                        memory and journal growth stay O(n) in total output
+                        volume instead of O(n^2). Recovery needs only the last
+                        FS-committed-but-unreleased epoch's output, which the
+                        incremental record provides (a later fs_committed for
+                        the same sid overwrites it, and by then the earlier
+                        epoch's output was already released to the caller).
       op=commit_done    {sid, cgroup}          process committed + output released
       op=release_intent {sid, cgroup,          group-level release intent (Phase 3):
                         group_id, members,     the group was finalized and the
@@ -2159,7 +2167,13 @@ class ShadowOrchestrator:
             # canonical outcome is now COMMITTED. Snapshot the committed
             # transcript into the journal BEFORE any externally-visible process
             # release, so recovery can deterministically resume the release.
-            committed_output = proxy.peek_epoch_output(session_id)
+            # The snapshot is INCREMENTAL (this epoch's output only): the
+            # whole-transcript snapshot of the k-th epoch is k times the size
+            # of the first, and the accumulated copies exhausted the
+            # orchestrator's memory on large-output workloads. Recovery only
+            # ever needs the last FS-committed-but-unreleased epoch's output,
+            # which the incremental record provides.
+            committed_output = proxy.snapshot_epoch_output(session_id)
             member_policies = self._member_policies(fs_result["members"])
             self._journal.append("fs_committed", sid=session_id, cgroup=cgroup_id,
                                  output=committed_output,

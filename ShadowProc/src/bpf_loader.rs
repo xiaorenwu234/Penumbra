@@ -121,11 +121,15 @@ pub struct ProcPolicy {
 
 /// Fine-grained keys installed for a cgroup, tracked so clear_all_policies()
 /// can delete them (BPF hash maps have no "delete by prefix" operation).
+/// `cls` covers class_policy entries installed via `enforce_policy`, which may
+/// use (effect_class, operation) pairs outside the standard 40-combination set
+/// enumerated by `all_policy_operations()` — those would otherwise leak.
 #[derive(Default)]
 struct FinePolicyKeys {
     net: Vec<NetPolicyKey>,
     ipc: Vec<IpcPolicyKey>,
     sig: Vec<SigPolicyKey>,
+    cls: Vec<ClassPolicyKey>,
 }
 
 fn all_policy_operations() -> Vec<(u8, Vec<u8>)> {
@@ -299,6 +303,10 @@ struct CgroupSlots {
     used: HashMap<u32, File>,
     /// cgroup path -> idx, so a cgroup can be removed by path.
     by_path: HashMap<String, u32>,
+    /// cgroup path -> kernel cgroup id (inode), resolved at add time so
+    /// remove_cgroup can always clean this cgroup's policy entries even if
+    /// the directory is already gone (path re-resolution would fail).
+    id_by_path: HashMap<String, u64>,
     /// Freed indices, reused before growing high_water.
     free: Vec<u32>,
     /// Next never-used index.
@@ -418,6 +426,7 @@ impl BpfManager {
             cgroup_slots: Mutex::new(CgroupSlots {
                 used: HashMap::new(),
                 by_path: HashMap::new(),
+                id_by_path: HashMap::new(),
                 free: Vec::new(),
                 high_water: 0,
             }),
@@ -469,6 +478,11 @@ impl BpfManager {
             return Ok(idx);
         }
 
+        // Resolve and cache the kernel cgroup id (inode) up front so
+        // remove_cgroup can clean this cgroup's policy entries even after
+        // the directory is gone (path re-resolution would silently fail).
+        let cg_id = self.cgroup_id_from_path(&path_key)?;
+
         // Allocate a slot: reuse a freed index first, else grow the high-water
         // mark. Only the number of *live* cgroups is bounded by 64, not the
         // total ever added over the daemon's lifetime.
@@ -497,7 +511,8 @@ impl BpfManager {
 
         // Keep the fd alive (dropping it would invalidate the map entry).
         slots.used.insert(idx, cgroup_fd);
-        slots.by_path.insert(path_key, idx);
+        slots.by_path.insert(path_key.clone(), idx);
+        slots.id_by_path.insert(path_key, cg_id);
 
         // Keep cgroup_count at (highest occupied index + 1).
         Self::sync_cgroup_count(self.cgroup_count_fd, &slots)?;
@@ -517,15 +532,43 @@ impl BpfManager {
     /// 1024-entry map that wedged the daemon after ~25 sessions: the next
     /// commit's map update failed E2BIG, epoch setup failed, and callers
     /// silently degraded to dry-run. Policies must die with the cgroup.
+    ///
+    /// Cleanup uses the cgroup id cached at add time so it survives the
+    /// directory being removed first; failures are logged, never swallowed.
     pub fn remove_cgroup(&self, cgroup_path: &Path) -> Result<()> {
-        // Resolve the id before the cgroup dir goes away (callers rmdir right
-        // after this returns). Best-effort: a caller that already removed the
-        // dir still gets its slot released below.
-        if let Ok(cg_id) = self.cgroup_id_from_path(&cgroup_path.to_string_lossy()) {
-            let _ = self.clear_all_policies(cg_id);
+        let path_key = cgroup_path.to_string_lossy().to_string();
+
+        // Clean policy entries for this cgroup. Prefer the id cached at add
+        // time (works even if the directory is gone); fall back to resolving
+        // the path. Never skip silently — leftover entries exhaust the
+        // class_policy map after ~25 sessions (E2BIG on the next commit).
+        let cached_id = {
+            let slots = self.cgroup_slots.lock().unwrap();
+            slots.id_by_path.get(&path_key).copied()
+        };
+        let cg_id = match cached_id {
+            Some(id) => Some(id),
+            None => match self.cgroup_id_from_path(&path_key) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    eprintln!(
+                        "[bpf] remove_cgroup: cannot resolve cgroup id for {:?} ({}) \
+                         — policy entries may leak",
+                        cgroup_path, e
+                    );
+                    None
+                }
+            },
+        };
+        if let Some(cg_id) = cg_id {
+            if let Err(e) = self.clear_all_policies(cg_id) {
+                eprintln!(
+                    "[bpf] remove_cgroup: clear_all_policies failed for {:?}: {}",
+                    cgroup_path, e
+                );
+            }
         }
 
-        let path_key = cgroup_path.to_string_lossy().to_string();
         let mut slots = self.cgroup_slots.lock().unwrap();
 
         let idx = slots
@@ -539,6 +582,7 @@ impl BpfManager {
             libc_bpf_map_delete_elem(self.cgroup_map_fd, key_bytes.as_ptr() as *const _);
         }
         slots.used.remove(&idx); // drops File -> closes the held fd
+        slots.id_by_path.remove(&path_key);
 
         // Recycle the index and tighten cgroup_count so check_cgroup() stops
         // scanning past the highest live slot.
@@ -860,6 +904,7 @@ impl BpfManager {
                     )?;
                 }
                 classes_done.push((cls, op));
+                keys.cls.push(ckey);
             }
             self.set_epoch_mode(cgroup_id, crate::policy_generated::MODE_ENFORCED)?;
             Ok(())
@@ -919,6 +964,11 @@ impl BpfManager {
                 libc_bpf_map_delete_elem(self.signal_policy_fd, k as *const _ as *const _);
             }
         }
+        for k in &keys.cls {
+            unsafe {
+                libc_bpf_map_delete_elem(self.class_policy_fd, k as *const _ as *const _);
+            }
+        }
         Ok(())
     }
 
@@ -940,12 +990,18 @@ impl BpfManager {
     /// Resolve a cgroup path to its kernel cgroup_id (inode number).
     /// This is what bpf_get_current_cgroup_id() returns in BPF, and what
     /// the epoch_mode/class_policy maps are keyed by.
+    ///
+    /// Accepts both cgroup-relative ("/shadow-session-x", as read from
+    /// /proc/pid/cgroup) and absolute ("/sys/fs/cgroup/shadow-session-x",
+    /// as the orchestrator passes over the socket) forms. Blindly re-prefixing
+    /// an already-absolute path produced a non-existent path, so remove_cgroup
+    /// silently skipped its policy cleanup and class_policy exhausted after
+    /// ~25 sessions (E2BIG on every subsequent commit/rollback).
     pub fn cgroup_id_from_path(&self, cgroup_path: &str) -> Result<u64> {
-        let path = if cgroup_path.starts_with('/') {
-            format!("/sys/fs/cgroup{}", cgroup_path)
-        } else {
-            format!("/sys/fs/cgroup/{}", cgroup_path)
-        };
+        let rel = cgroup_path
+            .strip_prefix("/sys/fs/cgroup")
+            .unwrap_or(cgroup_path);
+        let path = format!("/sys/fs/cgroup{}", rel);
         use std::os::unix::fs::MetadataExt;
         std::fs::metadata(&path)
             .with_context(|| format!("Failed to stat cgroup path: {}", path))

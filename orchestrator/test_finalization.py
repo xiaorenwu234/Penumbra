@@ -142,6 +142,10 @@ class FakeProxy:
         self.calls.append("peek_epoch_output")
         return self._output
 
+    def snapshot_epoch_output(self, sid):
+        self.calls.append("snapshot_epoch_output")
+        return self._output
+
     def run(self, sid, command):
         raise AssertionError("run() not exercised in these tests")
 
