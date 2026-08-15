@@ -511,6 +511,12 @@ class _Session:
         # of an empty string that would overwrite the journaled output.
         self._snap_epoch = None
         self._snap_text = ""
+        # Byte offset of the last fully-consumed line of the session log.
+        # run() reads INCREMENTALLY from here instead of re-reading the whole
+        # (ever-growing) file on every poll: a session whose transcript is
+        # large (W10: 1 MiB per epoch) would otherwise cost O(total log) per
+        # poll, i.e. quadratic over a repeat loop.
+        self._log_pos = 0
 
 
 # ──────────────────────────── The proxy ────────────────────────────────────
@@ -635,17 +641,87 @@ class SessionProxy:
                 return  # reaped
             time.sleep(0.02)
 
-    def _loglines(self, sess):
-        try:
-            with open(sess.log_path, "r", errors="replace") as fh:
-                return fh.read().splitlines()
-        except OSError:
-            return []
-
     def _feed(self, sess, line):
         os.write(sess.fifo_wfd, (line + "\n").encode())
 
-    # ---- Phase 4: admission / snapshot / restore ---------------------------
+    def _loglines_from(self, sess, pos):
+        """Read the session log from byte offset `pos`, returning the
+        complete lines that ended at or after it.  A trailing partial line
+        (command still writing) is NOT consumed: the offset is left at the
+        start of that line so the next poll re-reads it in full.
+
+        The cursor is a BYTE offset (seek() is byte-based); the line
+        splitting is done after decoding, so multibyte output (e.g. bash's
+        localized "killed" notices) cannot shift the cursor.
+        """
+        try:
+            with open(sess.log_path, "rb") as fh:
+                fh.seek(pos)
+                data = fh.read()
+        except OSError:
+            return []
+        if not data:
+            return []
+        idx = data.rfind(b"\n")
+        if idx == -1:
+            return []  # no complete line yet
+        sess._log_pos = pos + idx + 1
+        text = data[:idx + 1].decode("utf-8", errors="replace")
+        return text.splitlines()
+
+    def run(self, sid, command, timeout=10.0):
+        """Feed one command to the current live shell; return (stdout, rc).
+
+        `rc` is the shell exit status of the command, captured via a
+        randomized marker line (`echo __SHADOW_RC_<sentinel>__$?`) fed right
+        after the command and stripped from the returned output.  Callers
+        must check it: a non-zero exit (tool failure) is otherwise
+        indistinguishable from a successful fast return, which would pollute
+        performance samples with failed runs.
+
+        Works both between epochs (on the committed shell) and inside an epoch
+        (on the speculative candidate) — the caller doesn't need to care which.
+
+        Output is released IMMEDIATELY in both cases, including for speculative
+        in-epoch commands. The agent may therefore act on speculative output
+        before the epoch is finalized; that is deliberate (external synchrony):
+        the agent's context is INTERNAL state and may advance optimistically,
+        while externally-visible effects stay gated by the epoch. If the epoch
+        is later rejected, reject() drops the segment from the canonical
+        transcript and the agent's turn is wasted — the misspeculation cost.
+        """
+        sess = self.sessions[sid]
+        sentinel = f"__SHADOW_DONE_{next(self._sentinel_ids)}__"
+        rc_marker = f"__SHADOW_RC_{sentinel}__"
+        n0 = sess._log_pos
+        self._feed(sess, command)
+        self._feed(sess, f"echo {rc_marker}$?")
+        self._feed(sess, f"echo {sentinel}")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            lines = self._loglines_from(sess, n0)
+            if sentinel in lines:
+                idx = lines.index(sentinel)
+                out_lines = lines[:idx]
+                rc = 0
+                for i, ln in enumerate(out_lines):
+                    if ln.startswith(rc_marker):
+                        try:
+                            rc = int(ln[len(rc_marker):] or "0")
+                        except ValueError:
+                            rc = 0
+                        del out_lines[i]
+                        break
+                out = "\n".join(out_lines)
+                # Same path in and out of an epoch: record the output tagged with
+                # the epoch that produced it (None outside an epoch) and hand it
+                # straight back to the caller.
+                sess.transcript.append((sess.epoch_id, out))
+                return out, rc
+            time.sleep(0.001)
+        self._recover_from_timeout(sess, sentinel)
+        raise TimeoutError(f"command timed out: {command!r}")
+
     def _admit_for_versioning(self, pid: int) -> None:
         """Pre-fork admission control: verify the baseline process is in a
         snapshot-safe state.  Raises NotAdmissibleError if any check fails so
@@ -1350,7 +1426,7 @@ class SessionProxy:
         self._log(f"session {sid}: closed")
 
     # ---- command execution -------------------------------------------------
-    def _recover_from_timeout(self, sess) -> None:
+    def _recover_from_timeout(self, sess, sentinel=None) -> None:
         """Restore the session shell to a clean read() boundary after a
         command timeout.
 
@@ -1363,6 +1439,12 @@ class SessionProxy:
         (the timed-out command and anything it spawned), then wait for
         bash to reap it, execute the queued sentinel echo, and settle
         back into pipe_read.
+
+        `sentinel` is the timed-out run's completion marker: after the
+        shell settles, its queued rc-marker/sentinel echoes land in the
+        log AFTER the cursor. Without discarding them the NEXT run()
+        re-reads the residue ("killed" notices, rc-marker, sentinel) and
+        pollutes its output.
         """
         live = sess.live_pid
         self._kill_descendants(live)
@@ -1372,40 +1454,38 @@ class SessionProxy:
         if not self._wait_wchan_read(live, timeout=2.0):
             self._log(f"session {sess.id}: WARNING — shell did not settle "
                       f"after timeout recovery (pid {live})")
+        self._discard_timed_out_output(sess, sentinel)
 
-    def run(self, sid, command, timeout=10.0):
-        """Feed one command to the current live shell and return its stdout.
+    def _discard_timed_out_output(self, sess, sentinel=None) -> None:
+        """Advance the session log cursor past the residue a timed-out run
+        left behind (the killed command's final lines plus the queued
+        rc-marker/sentinel echoes bash emits after the kill).
 
-        Works both between epochs (on the committed shell) and inside an epoch
-        (on the speculative candidate) — the caller doesn't need to care which.
-
-        Output is released IMMEDIATELY in both cases, including for speculative
-        in-epoch commands. The agent may therefore act on speculative output
-        before the epoch is finalized; that is deliberate (external synchrony):
-        the agent's context is INTERNAL state and may advance optimistically,
-        while externally-visible effects stay gated by the epoch. If the epoch
-        is later rejected, reject() drops the segment from the canonical
-        transcript and the agent's turn is wasted — the misspeculation cost.
+        Best effort with a bounded wait: normally the sentinel appears
+        within a few poll cycles; if the shell never settles, fall back to
+        advancing past the last complete line of the file so the next
+        run() does not re-read stale output.
         """
-        sess = self.sessions[sid]
-        sentinel = f"__SHADOW_DONE_{next(self._sentinel_ids)}__"
-        n0 = len(self._loglines(sess))
-        self._feed(sess, command)
-        self._feed(sess, f"echo {sentinel}")
-        deadline = time.time() + timeout
+        deadline = time.time() + 2.0
         while time.time() < deadline:
-            lines = self._loglines(sess)
-            if sentinel in lines[n0:]:
-                idx = lines.index(sentinel, n0)
-                out = "\n".join(lines[n0:idx])
-                # Same path in and out of an epoch: record the output tagged with
-                # the epoch that produced it (None outside an epoch) and hand it
-                # straight back to the caller.
-                sess.transcript.append((sess.epoch_id, out))
-                return out
-            time.sleep(0.001)
-        self._recover_from_timeout(sess)
-        raise TimeoutError(f"command timed out: {command!r}")
+            lines = self._loglines_from(sess, sess._log_pos)
+            if sentinel is not None and sentinel in lines:
+                return  # cursor is now past all residue
+            if not lines:
+                time.sleep(0.02)
+        # Fallback: cursor to the end of the last complete line.  Binary
+        # mode + byte offset, same discipline as _loglines_from(): the
+        # cursor is a BYTE offset (seek() is byte-based), so a multibyte
+        # line (e.g. bash's localized "killed" notice) must never be
+        # measured in characters.
+        try:
+            with open(sess.log_path, "rb") as fh:
+                data = fh.read()
+            idx = data.rfind(b"\n")
+            if idx != -1:
+                sess._log_pos = idx + 1
+        except OSError:
+            pass
 
     def get_output(self, sid):
         """Return the session's transcript.
@@ -1753,21 +1833,22 @@ def _demo(proxy):
     sid = proxy.open_session()
     try:
         proxy.run(sid, "export SHADOW_VAR=ORIGINAL")
-        base = proxy.run(sid, "echo VAL=$SHADOW_VAR")
+        base, _ = proxy.run(sid, "echo VAL=$SHADOW_VAR")
         print(f"  baseline state:        {base}")
 
         # ── Epoch 1: speculative mutation → REJECT (expect lossless rollback) ──
         print("\n  ── Epoch 1: mutate speculatively, then REJECT ──")
         proxy.begin_epoch(sid)
         proxy.run(sid, "export SHADOW_VAR=MODIFIED_BY_AGENT")
-        in_epoch = proxy.run(sid, "echo VAL=$SHADOW_VAR")
-        print(f"  inside epoch (candidate): {in_epoch!r} (pending, not released)")
+        in_epoch, _ = proxy.run(sid, "echo VAL=$SHADOW_VAR")
+        print(f"  inside epoch (candidate): {in_epoch!r} (released optimistically)")
         proxy.reject(sid)
-        after_reject = proxy.run(sid, "echo VAL=$SHADOW_VAR")
+        after_reject, _ = proxy.run(sid, "echo VAL=$SHADOW_VAR")
         print(f"  after REJECT:          {after_reject}")
-        # Speculative output is held pending: in-epoch run() returns None (the
-        # agent must not read speculative output before finalization).
-        ok &= (in_epoch is None
+        # Output is released optimistically in-epoch, but reject() drops the
+        # segment from the canonical transcript: the baseline state must be
+        # losslessly restored.
+        ok &= (in_epoch.strip() == "VAL=MODIFIED_BY_AGENT"
                and after_reject.strip() == "VAL=ORIGINAL")
 
         # ── Epoch 2: speculative mutation → COMMIT (expect state persists) ──
@@ -1775,7 +1856,7 @@ def _demo(proxy):
         proxy.begin_epoch(sid)
         proxy.run(sid, "export SHADOW_VAR=COMMITTED_VALUE")
         proxy.commit(sid)
-        after_commit = proxy.run(sid, "echo VAL=$SHADOW_VAR")
+        after_commit, _ = proxy.run(sid, "echo VAL=$SHADOW_VAR")
         print(f"  after COMMIT:          {after_commit}")
         ok &= (after_commit.strip() == "VAL=COMMITTED_VALUE")
 

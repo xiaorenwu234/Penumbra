@@ -265,13 +265,14 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
 
 
 class RunProxy:
-    """Minimal proxy whose run() returns a programmable value."""
+    """Minimal proxy whose run() returns a programmable (output, exit_code)."""
 
-    def __init__(self, value):
+    def __init__(self, value, rc=0):
         self._value = value
+        self._rc = rc
 
     def run(self, sid, command):
-        return self._value
+        return self._value, self._rc
 
 
 class TestSessionRunOptimisticRelease(unittest.TestCase):
@@ -295,6 +296,7 @@ class TestSessionRunOptimisticRelease(unittest.TestCase):
         resp = orch.session_run("sid1", "echo hi")
         self.assertEqual(resp["status"], "ok")
         self.assertEqual(resp["output"], "spec out")
+        self.assertEqual(resp["exit_code"], 0)
 
     def test_never_returns_pending(self):
         """Even a None from the proxy must not resurrect the pending path."""
@@ -302,6 +304,7 @@ class TestSessionRunOptimisticRelease(unittest.TestCase):
         resp = orch.session_run("sid1", "echo hi")
         self.assertEqual(resp["status"], "ok")
         self.assertEqual(resp["output"], "")
+        self.assertEqual(resp["exit_code"], 0)
 
     def test_out_of_epoch_output_returned(self):
         """Canonical output (a string, even empty) is returned immediately."""
@@ -309,11 +312,19 @@ class TestSessionRunOptimisticRelease(unittest.TestCase):
         resp = orch.session_run("sid1", "echo hi")
         self.assertEqual(resp["status"], "ok")
         self.assertEqual(resp["output"], "hi\n")
+        self.assertEqual(resp["exit_code"], 0)
 
         orch_empty = self._orch(RunProxy(""))
         resp2 = orch_empty.session_run("sid1", ":")
         self.assertEqual(resp2["status"], "ok")
         self.assertEqual(resp2["output"], "")
+
+    def test_nonzero_exit_code_propagated(self):
+        """A failing command's shell status is returned to the caller."""
+        orch = self._orch(RunProxy("", rc=127))
+        resp = orch.session_run("sid1", "nosuchcmd")
+        self.assertEqual(resp["status"], "ok")
+        self.assertEqual(resp["exit_code"], 127)
 
 
 class TestAgentBarrier(unittest.TestCase):

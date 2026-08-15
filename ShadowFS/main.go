@@ -634,7 +634,21 @@ func (n *OverlayNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 		onStage = res.Version != 0
 	}
 
-	fd, err := syscall.Open(openPath, int(flags), 0)
+	openFlags := int(flags)
+	if isWrite {
+		// The kernel may issue FUSE_OPEN for a path whose positive dentry
+		// is still cached while the underlying object vanished between
+		// epochs (e.g. the harness removed the orig file after the previous
+		// commit). Resolve treats "no version" as existing (the lookup-based
+		// view), so a fresh create may not have materialized the stage file
+		// yet; FUSE_OPEN never carries O_CREAT even though the user's
+		// open(2) had it. Create the stage file here instead of failing
+		// ENOENT — write access implies creation intent.
+		if _, serr := os.Lstat(openPath); serr != nil && os.IsNotExist(serr) {
+			openFlags |= syscall.O_CREAT
+		}
+	}
+	fd, err := syscall.Open(openPath, openFlags, 0o666)
 	if err != nil {
 		return nil, 0, fs.ToErrno(err)
 	}

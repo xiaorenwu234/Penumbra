@@ -1983,6 +1983,11 @@ class ShadowOrchestrator:
     def session_run(self, session_id: str, command: str) -> dict:
         """Feed one command to the session's current live shell.
 
+        Returns the command's shell exit status in ``exit_code`` so callers
+        can distinguish a genuinely successful run from a fast-returning
+        failure (a non-zero status otherwise looks like a fast success and
+        pollutes performance samples with failed runs).
+
         Output is released IMMEDIATELY, in or out of an epoch. Speculative
         in-epoch output is handed straight back to the caller: the agent's
         context is INTERNAL state and may advance optimistically, while
@@ -1992,10 +1997,11 @@ class ShadowOrchestrator:
         """
         proxy = self._get_proxy()
         try:
-            out = proxy.run(session_id, command)
+            out, rc = proxy.run(session_id, command)
         except KeyError:
             return {"status": "error", "message": f"unknown session {session_id}"}
-        return {"status": "ok", "output": out if out is not None else ""}
+        return {"status": "ok", "output": out if out is not None else "",
+                "exit_code": rc}
 
     def _session_cgroup(self, session_id: str) -> Optional[str]:
         with self._sessions_lock:
