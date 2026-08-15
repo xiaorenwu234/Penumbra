@@ -37,6 +37,14 @@ CPU_PIN = int(os.environ.get("RQ3_CPU_PIN", "2")) if os.environ.get(
     "RQ3_CPU_PIN", "2") != "off" else None
 
 
+class SpecCommandError(RuntimeError):
+    """A speculative command failed: non-zero exit or output verification.
+
+    Raised mid-epoch so the measurement is excluded (and the epoch rolled
+    back) instead of being silently counted as a fast success.
+    """
+
+
 @dataclass
 class EpochMeasurement:
     """One complete epoch measurement (begin + run + finalize)."""
@@ -77,6 +85,8 @@ class WorkloadResult:
     spec_total_commit_ns: List[float] = field(default_factory=list)
     spec_total_rollback_ns: List[float] = field(default_factory=list)
     spec_excluded: int = 0
+    # Why samples were excluded (SpecCommandError details), capped in to_dict
+    spec_errors: List[str] = field(default_factory=list)
 
     # Metadata
     warmup_count: int = 0
@@ -122,6 +132,9 @@ class WorkloadResult:
             "wall_time_s": round(self.wall_time_s, 2),
             "raw_excluded": self.raw_excluded,
             "spec_excluded": self.spec_excluded,
+            # Cap error details (they can be long); the first few are enough
+            # to diagnose why samples were excluded.
+            "spec_errors": [e[:300] for e in self.spec_errors[:10]],
             "stats": {k: v.to_dict() for k, v in stats.items()},
         }
 
@@ -186,19 +199,35 @@ class WorkloadHarness:
             return RawMeasurement(success=False, error=str(e))
 
     def measure_raw(self, cmd: List[str], repeats: int,
-                    timeout: float = 60.0, cwd: str = None
+                    timeout: float = 60.0, cwd: str = None,
+                    setup_fn: Callable = None,
+                    teardown_fn: Callable = None
                     ) -> Tuple[List[float], int]:
-        """Run raw measurement loop. Returns (samples_ns, excluded_count)."""
+        """Run raw measurement loop. Returns (samples_ns, excluded_count).
+
+        setup_fn/teardown_fn run around EACH invocation (warmup and measured)
+        exactly as in the speculative loop, so the raw baseline exercises the
+        same fresh-file state transitions instead of repeatedly re-using
+        leftover state (e.g. O_TRUNC on an existing file vs. true creation).
+        """
         samples = []
         excluded = 0
         # Warm-up
         for i in range(self.warmup):
+            if setup_fn:
+                setup_fn()
             m = self.run_raw(cmd, timeout, cwd)
+            if teardown_fn:
+                teardown_fn()
             if not m.success:
                 excluded += 1
         # Measurement
         for i in range(repeats):
+            if setup_fn:
+                setup_fn()
             m = self.run_raw(cmd, timeout, cwd)
+            if teardown_fn:
+                teardown_fn()
             if m.success:
                 samples.append(float(m.elapsed_ns))
             else:
@@ -211,19 +240,47 @@ class WorkloadHarness:
 
     def measure_spec_epoch(self, session_id: str, command: str,
                            finalize: str = "commit",
-                           agent_id: str = "rq3-bench"
+                           agent_id: str = "rq3-bench",
+                           verify_fn: Callable = None
                            ) -> EpochMeasurement:
-        """Run one full epoch: begin → run → commit/rollback. Timed."""
+        """Run one full epoch: begin → run → commit/rollback. Timed.
+
+        `command` may be a single shell command or a LIST of commands run
+        sequentially INSIDE the same epoch (one transcript entry each, e.g.
+        W10-b's N tool invocations); run_ns is the sum of all commands.
+
+        The run phase FAILS the measurement (and rolls back) when a command
+        exits non-zero or `verify_fn` rejects its output — a failed run must
+        never be silently counted as a fast success. verify_fn receives the
+        command output and returns None on success or a reason string.
+        """
         client = self.get_client()
         m = EpochMeasurement(finalize_mode=finalize)
+        commands = [command] if isinstance(command, str) else list(command)
         try:
             # Begin epoch
             _, begin_ns = client.timed_begin_epoch(session_id, agent_id)
             m.begin_ns = begin_ns
 
-            # Run command
-            _, run_ns = client.timed_run(session_id, command)
-            m.run_ns = run_ns
+            # Run command(s)
+            total_run = 0
+            for cmd in commands:
+                # Pin the speculative command to the same CPU as raw runs so
+                # the two baselines are comparable.
+                if CPU_PIN is not None:
+                    cmd = f"taskset -c {CPU_PIN} {cmd}"
+                run_resp, run_ns = client.timed_run(session_id, cmd)
+                total_run += run_ns
+                rc = run_resp.get("exit_code", 0)
+                if rc != 0:
+                    raise SpecCommandError(
+                        f"command exited {rc}: "
+                        f"{run_resp.get('output', '')[:200]!r}")
+                if verify_fn is not None:
+                    reason = verify_fn(run_resp.get("output", ""))
+                    if reason:
+                        raise SpecCommandError(reason)
+            m.run_ns = total_run
 
             # Finalize
             if finalize == "commit":
@@ -231,7 +288,7 @@ class WorkloadHarness:
             else:
                 _, fin_ns = client.timed_rollback(session_id, agent_id)
             m.finalize_ns = fin_ns
-            m.total_ns = begin_ns + run_ns + fin_ns
+            m.total_ns = begin_ns + total_run + fin_ns
             m.success = True
         except Exception as e:
             m.success = False
@@ -248,7 +305,9 @@ class WorkloadHarness:
                      agent_id: str = "rq3-bench",
                      setup_fn: Callable = None,
                      teardown_fn: Callable = None,
-                     new_session_per_run: bool = False
+                     new_session_per_run: bool = False,
+                     verify_fn: Callable = None,
+                     error_sink: List[str] = None
                      ) -> Tuple[Dict[str, List[float]], int]:
         """Run speculative measurement loop.
 
@@ -259,6 +318,8 @@ class WorkloadHarness:
             setup_fn: Called before each epoch (e.g., create input files).
             teardown_fn: Called after each epoch (e.g., cleanup).
             new_session_per_run: If True, open/close session each iteration.
+            error_sink: If given, excluded samples' reasons are appended
+                (diagnostics: exit code, verify mismatch, commit failure).
 
         Returns:
             (dict of sample lists keyed by phase, excluded_count)
@@ -268,6 +329,8 @@ class WorkloadHarness:
             "begin": [], "run": [], "finalize": [], "total": [],
         }
         excluded = 0
+        if error_sink is None:
+            error_sink = []
 
         # Open session
         if not new_session_per_run:
@@ -284,7 +347,13 @@ class WorkloadHarness:
                     sid = session_id
                 if setup_fn:
                     setup_fn()
-                m = self.measure_spec_epoch(sid, command, finalize, agent_id)
+                m = self.measure_spec_epoch(sid, command, finalize, agent_id,
+                                             verify_fn)
+                if not m.success:
+                    # Warm-up failures also matter for diagnostics: they
+                    # reveal whether the failure is systematic or starts
+                    # later (e.g. only once the session has been reused).
+                    error_sink.append(f"[warmup] {m.error}")
                 if teardown_fn:
                     teardown_fn()
                 if new_session_per_run:
@@ -302,7 +371,8 @@ class WorkloadHarness:
                     sid = session_id
                 if setup_fn:
                     setup_fn()
-                m = self.measure_spec_epoch(sid, command, finalize, agent_id)
+                m = self.measure_spec_epoch(sid, command, finalize, agent_id,
+                                             verify_fn)
                 if teardown_fn:
                     teardown_fn()
                 if new_session_per_run:
@@ -318,6 +388,9 @@ class WorkloadHarness:
                     samples["total"].append(float(m.total_ns))
                 else:
                     excluded += 1
+                    error_sink.append(m.error)
+                    if self.verbose and m.error:
+                        self.log(f"    [EXCLUDED] {m.error}")
 
                 if self.verbose and (i + 1) % max(1, repeats // 5) == 0:
                     self.log(f"  spec({finalize}) progress: {i+1}/{repeats}")
@@ -339,11 +412,16 @@ class WorkloadHarness:
                      setup_fn: Callable = None,
                      teardown_fn: Callable = None,
                      raw_timeout: float = 60.0,
-                     new_session_per_run: bool = False
+                     new_session_per_run: bool = False,
+                     verify_fn: Callable = None
                      ) -> WorkloadResult:
         """Run a complete workload measurement (raw + spec commit + rollback).
 
         This is the main entry point for workload scripts.
+
+        verify_fn, if given, rejects speculative samples whose command output
+        does not match the expected benchmark report (e.g. "created=N"), so
+        silently-failed runs never pollute the samples.
         """
         if finalize_modes is None:
             finalize_modes = ["commit", "rollback"]
@@ -363,7 +441,8 @@ class WorkloadHarness:
         if raw_cmd:
             self.log(f"  Measuring raw execution ...")
             raw_samples, raw_excl = self.measure_raw(
-                raw_cmd, repeats, raw_timeout)
+                raw_cmd, repeats, raw_timeout, setup_fn=setup_fn,
+                teardown_fn=teardown_fn)
             result.raw_samples_ns = raw_samples
             result.raw_excluded = raw_excl
 
@@ -373,7 +452,9 @@ class WorkloadHarness:
             spec_samples, spec_excl = self.measure_spec(
                 spec_command, repeats, finalize=mode,
                 setup_fn=setup_fn, teardown_fn=teardown_fn,
-                new_session_per_run=new_session_per_run)
+                new_session_per_run=new_session_per_run,
+                verify_fn=verify_fn,
+                error_sink=result.spec_errors)
             result.spec_excluded = max(result.spec_excluded, spec_excl)
 
             if mode == "commit":

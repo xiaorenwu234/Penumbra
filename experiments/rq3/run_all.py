@@ -2,7 +2,7 @@
 """
 RQ3 Experiment Runner — Performance overhead measurement for Penumbra.
 
-Measures the overhead of speculative execution across 10 workload categories:
+Measures the overhead of speculative execution across 9 workload categories:
   W1:  No-op (fixed epoch management cost)
   W2:  CPU-only computation (process versioning overhead)
   W3:  Sequential file read (ShadowFS read path)
@@ -11,15 +11,19 @@ Measures the overhead of speculative execution across 10 workload categories:
   W6:  Repeated writes to same file (epoch-owned head reuse)
   W7:  Multi-file creation (finalization scaling)
   W8:  Rename operations (namespace versioning)
-  W9:  Process memory modification (COW memory cost)
   W10: Tool output (transcript management)
+
+(Note: W9 — process memory COW — was removed: the worker allocated its
+working set AFTER begin_epoch inside a fresh child, so no baseline pages
+were ever COW-forked; the measurements reflected allocation/touch time
+only and did not support the claimed COW overhead.)
 
 Usage:
     SHADOW_RUN_RQ3_EXPERIMENTS=1 python3 run_all.py [options]
 
 Options:
     --output-dir DIR   Output directory (default: ./results)
-    --workload W       Run only workload W (1-10) or "all" (default: all)
+    --workload W       Run only workload W (1-8,10) or "all" (default: all)
     --skip-build       Skip benchmark compilation
     --quick            Use reduced repeat counts for quick testing
 
@@ -37,6 +41,7 @@ Environment:
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -61,13 +66,29 @@ WORK_DIR_ORIG = os.path.join(SHADOWFS_ORIG, "rq3-work")
 # Default repeat counts per workload
 DEFAULT_REPEATS = {
     1: 1000, 2: 1000, 3: 200, 4: 200, 5: 200,
-    6: 200, 7: 100, 8: 100, 9: 30, 10: 200,
+    6: 200, 7: 100, 8: 100, 10: 200,
 }
 QUICK_REPEATS = {
     1: 50, 2: 50, 3: 20, 4: 20, 5: 20,
-    6: 20, 7: 10, 8: 10, 9: 5, 10: 20,
+    6: 20, 7: 10, 8: 10, 10: 20,
 }
 WARMUP = 10
+
+
+def make_verify(pattern: str):
+    """Build a verify_fn for WorkloadHarness: the speculative command's
+    output must match `pattern` (regex), otherwise the sample is excluded.
+    Guards against silently-failed runs (non-zero exit is checked separately
+    via session_run's exit_code; this catches tools that exit 0 with a
+    truncated/partial report, e.g. `written=N` with N < requested).
+    """
+    rx = re.compile(pattern)
+
+    def verify(output: str):
+        if not rx.search(output or ""):
+            return (f"output {output[:120]!r} does not match {pattern!r}")
+        return None
+    return verify
 
 
 def bin_path(name: str) -> str:
@@ -154,6 +175,7 @@ def run_w2(harness: WorkloadHarness, repeats: int) -> list:
             spec_command=f"{cpu_bin} {target_ms}",
             repeats=repeats,
             params={"target_ms": target_ms},
+            verify_fn=make_verify(r"iterations=\d+ checksum=\d+"),
         )
         results.append(r)
     return results
@@ -184,6 +206,8 @@ def run_w3(harness: WorkloadHarness, repeats: int) -> list:
             spec_command=f"{read_bin} {fpath}",
             repeats=repeats,
             params={"file_size": size_bytes, "variant": "single_read"},
+            verify_fn=make_verify(
+                rf"bytes={size_bytes} checksum=\d+ repeats=1"),
         )
         results.append(r)
 
@@ -200,6 +224,9 @@ def run_w3(harness: WorkloadHarness, repeats: int) -> list:
         repeats=repeats,
         params={"file_size": 1048576, "repeat_count": 100,
                 "variant": "repeated_read"},
+        # w3_read reports TOTAL bytes across all repeats (1 MiB × 100),
+        # not the single-pass size.
+        verify_fn=make_verify(r"bytes=104857600 checksum=\d+ repeats=100"),
     )
     results.append(r)
     return results
@@ -238,6 +265,7 @@ def run_w4(harness: WorkloadHarness, repeats: int) -> list:
             repeats=repeats,
             params={"file_size": size_bytes},
             teardown_fn=teardown,
+            verify_fn=make_verify(rf"written={size_bytes}"),
         )
         results.append(r)
     return results
@@ -274,6 +302,7 @@ def run_w5(harness: WorkloadHarness, repeats: int) -> list:
             repeats=repeats,
             params={"orig_size": orig_size, "write_size": 4096, "offset": 0},
             setup_fn=setup,
+            verify_fn=make_verify(r"written=4096 offset=0"),
         )
         results.append(r)
     return results
@@ -311,6 +340,8 @@ def run_w6(harness: WorkloadHarness, repeats: int) -> list:
             params={"write_count": count, "write_size": 4096,
                     "file_size": 1048576},
             setup_fn=setup,
+            verify_fn=make_verify(
+                rf"writes={count} total_bytes={count * 4096}"),
         )
         results.append(r)
     return results
@@ -352,6 +383,7 @@ def run_w7(harness: WorkloadHarness, repeats: int) -> list:
             params={"file_count": count, "write_size": 4096},
             setup_fn=setup,
             teardown_fn=teardown,
+            verify_fn=make_verify(rf"created={count} write_size=4096"),
         )
         results.append(r)
     return results
@@ -388,50 +420,16 @@ def run_w8(harness: WorkloadHarness, repeats: int) -> list:
         r = harness.run_workload(
             workload_id="W8",
             config=config,
-            raw_cmd=None,  # Raw rename needs fresh files each time
+            raw_cmd=[rename_bin, subdir_orig, str(count)],
             spec_command=f"{rename_bin} {subdir_fuse} {count}",
             repeats=repeats,
             params={"file_count": count},
             setup_fn=setup,
             teardown_fn=teardown,
             finalize_modes=["commit", "rollback"],
+            verify_fn=make_verify(rf"renamed={count}"),
         )
         results.append(r)
-    return results
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# W9: Process memory modification
-# ═══════════════════════════════════════════════════════════════════════════
-
-def run_w9(harness: WorkloadHarness, repeats: int) -> list:
-    """W9: Memory modification (64/256/1024 MiB × dirty 0/1/10/50/100%).
-
-    Uses a one-shot command that allocates memory, modifies pages, and exits.
-    The speculative overhead includes begin_epoch (COW fork of session bash)
-    plus the tool execution in the candidate.
-    """
-    print("\n[W9] Process memory modification")
-    results = []
-    mem_bin = bin_path("w9_mem_worker")
-
-    for ws_mib in [64, 256, 1024]:
-        for dirty_pct in [0, 1, 10, 50, 100]:
-            config = f"ws{ws_mib}MiB_dirty{dirty_pct}pct"
-            # One-shot: pipe modify+quit to the worker
-            spec_cmd = (f"printf 'modify {dirty_pct}\\nquit\\n' | "
-                        f"{mem_bin} {ws_mib}")
-
-            r = harness.run_workload(
-                workload_id="W9",
-                config=config,
-                raw_cmd=None,  # Raw uses shell pipe, measured via spec only
-                spec_command=spec_cmd,
-                repeats=repeats,
-                params={"working_set_mib": ws_mib, "dirty_pct": dirty_pct},
-                finalize_modes=["commit", "rollback"],
-            )
-            results.append(r)
     return results
 
 
@@ -440,12 +438,20 @@ def run_w9(harness: WorkloadHarness, repeats: int) -> list:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def run_w10(harness: WorkloadHarness, repeats: int) -> list:
-    """W10: Tool output (1/10/100/1024 KiB)."""
+    """W10: Tool output — W10a: single output of increasing size;
+    W10b: N separate tool invocations in ONE epoch (N transcript entries).
+
+    W10a uses a FRESH session per run so its samples isolate the per-epoch
+    output cost; W10b runs N commands inside the same epoch, so each
+    command appends exactly one transcript entry (the entry-count axis).
+    """
     print("\n[W10] Tool output")
     output_bin = bin_path("w10_output")
     results = []
 
-    # W10-a: Single large output
+    # W10-a: Single large output (one transcript entry), fresh session each
+    # run so the measurement is not contaminated by earlier epochs' output
+    # accumulated in the same session.
     for size_label, size_bytes in [("1KiB", 1024), ("10KiB", 10240),
                                     ("100KiB", 102400), ("1MiB", 1048576)]:
         config = f"single_{size_label}"
@@ -456,22 +462,29 @@ def run_w10(harness: WorkloadHarness, repeats: int) -> list:
             spec_command=f"{output_bin} {size_bytes}",
             repeats=repeats,
             params={"total_bytes": size_bytes, "variant": "single"},
+            new_session_per_run=True,
+            verify_fn=make_verify(rf"total={size_bytes} writes=1"),
         )
         results.append(r)
 
-    # W10-b: Multiple small outputs (total = 1 MiB)
-    total = 1048576
-    for entries, chunk in [(1, 1048576), (10, 102400),
-                           (100, 10240), (1000, 1024)]:
-        config = f"multi_{entries}x{chunk}B"
+    # W10-b: N tool invocations inside ONE epoch — each invocation is a
+    # separate session_run and appends one transcript entry. Total output
+    # grows with N (1 KiB per entry); the entry-count axis is what differs
+    # from W10a (which varies the per-entry size).
+    for entries in [10, 100, 1000]:
+        config = f"entries_x{entries}"
         r = harness.run_workload(
             workload_id="W10b",
             config=config,
-            raw_cmd=[output_bin, str(total), str(chunk)],
-            spec_command=f"{output_bin} {total} {chunk}",
+            raw_cmd=["bash", "-c",
+                     f"for i in $(seq 1 {entries}); do "
+                     f"{output_bin} 1024; done"],
+            spec_command=[f"{output_bin} 1024"] * entries,
             repeats=repeats,
-            params={"total_bytes": total, "chunk_size": chunk,
-                    "entries": entries, "variant": "multi"},
+            params={"entries": entries, "per_entry_bytes": 1024,
+                    "variant": "multi"},
+            new_session_per_run=True,
+            verify_fn=make_verify(r"total=1024 writes=1"),
         )
         results.append(r)
     return results
@@ -512,7 +525,7 @@ def build_benchmarks():
 
 WORKLOAD_FUNCS = {
     1: run_w1, 2: run_w2, 3: run_w3, 4: run_w4, 5: run_w5,
-    6: run_w6, 7: run_w7, 8: run_w8, 9: run_w9, 10: run_w10,
+    6: run_w6, 7: run_w7, 8: run_w8, 10: run_w10,
 }
 
 
@@ -581,9 +594,9 @@ def main():
 
     # Determine workloads
     if args.workload == "all":
-        wl_nums = list(range(1, 11))
+        wl_nums = [1, 2, 3, 4, 5, 6, 7, 8, 10]  # W9 removed (no COW measured)
     else:
-        # Comma-separated subset, e.g. "5,6,7,8,9,10"
+        # Comma-separated subset, e.g. "5,6,7,8,10"
         wl_nums = [int(x) for x in args.workload.split(",")]
 
     repeats_map = QUICK_REPEATS if args.quick else DEFAULT_REPEATS
