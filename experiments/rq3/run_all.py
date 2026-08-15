@@ -484,6 +484,11 @@ def run_w10(harness: WorkloadHarness, repeats: int) -> list:
             params={"entries": entries, "per_entry_bytes": 1024,
                     "variant": "multi"},
             new_session_per_run=True,
+            # Pin the candidate ONCE per epoch instead of wrapping each of
+            # the N runs in `taskset`: the raw baseline pays one wrapper for
+            # its whole bash loop, so per-run taskset would add N× ~1.3 ms
+            # of startup that has no raw counterpart (skews the entry axis).
+            pin_once=True,
             verify_fn=make_verify(r"total=1024 writes=1"),
         )
         results.append(r)

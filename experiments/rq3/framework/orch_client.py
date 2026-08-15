@@ -116,6 +116,19 @@ class OrchClient:
             "command": command,
         })
 
+    def session_pin_epoch_cpu(self, session_id: str, cpu: int) -> Dict:
+        """Pin the session's live speculative shell to one CPU.
+
+        One call covers every command the epoch runs (the candidate shell
+        is long-lived), matching the raw baseline's single `taskset`
+        wrapper without paying the taskset startup once per run.
+        """
+        return self.request_ok({
+            "action": "session_pin_epoch_cpu",
+            "session_id": session_id,
+            "cpu": cpu,
+        })
+
     def session_commit_epoch(self, session_id: str,
                              agent_id: str = "rq3-bench") -> Dict:
         """Commit the current epoch (finalize + release)."""
@@ -147,6 +160,13 @@ class OrchClient:
         """Run command and return (response, elapsed_ns)."""
         with Timer() as t:
             resp = self.session_run(session_id, command)
+        return resp, t.elapsed_ns
+
+    def timed_pin_epoch_cpu(self, session_id: str,
+                            cpu: int) -> Tuple[Dict, int]:
+        """Pin epoch candidate and return (response, elapsed_ns)."""
+        with Timer() as t:
+            resp = self.session_pin_epoch_cpu(session_id, cpu)
         return resp, t.elapsed_ns
 
     def timed_commit(self, session_id: str,

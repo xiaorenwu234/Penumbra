@@ -2003,6 +2003,23 @@ class ShadowOrchestrator:
         return {"status": "ok", "output": out if out is not None else "",
                 "exit_code": rc}
 
+    def session_pin_epoch_cpu(self, session_id: str, cpu: int) -> dict:
+        """Pin the session's current speculative candidate shell to one CPU.
+
+        The candidate shell stays live for the whole epoch, so a single
+        affinity change here covers every command the epoch runs — the
+        multi-run equivalent of wrapping one raw command in `taskset`,
+        without paying the taskset startup per run.
+        """
+        proxy = self._get_proxy()
+        try:
+            proxy.pin_epoch_cpu(session_id, int(cpu))
+        except KeyError:
+            return {"status": "error", "message": f"unknown session {session_id}"}
+        except (RuntimeError, ValueError) as e:
+            return {"status": "error", "message": str(e)}
+        return {"status": "ok"}
+
     def _session_cgroup(self, session_id: str) -> Optional[str]:
         with self._sessions_lock:
             return self._sessions.get(session_id)
@@ -3018,6 +3035,15 @@ class OrchestratorServer:
                 if not command:
                     return {"status": "error", "message": "command required"}
                 return self.orch.session_run(session_id, command)
+
+            elif action == "session_pin_epoch_cpu":
+                session_id = req.get("session_id", "")
+                cpu = req.get("cpu")
+                if not session_id:
+                    return {"status": "error", "message": "session_id required"}
+                if cpu is None:
+                    return {"status": "error", "message": "cpu required"}
+                return self.orch.session_pin_epoch_cpu(session_id, cpu)
 
             elif action == "session_begin_epoch":
                 session_id = req.get("session_id", "")

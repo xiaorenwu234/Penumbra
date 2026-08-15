@@ -34,6 +34,7 @@ class FakeClient:
         self.fin_ns = 3_000
         self.runs = []
         self.rollback_calls = 0
+        self.pin_calls = []
 
     def connect(self):
         pass
@@ -43,6 +44,10 @@ class FakeClient:
 
     def timed_begin_epoch(self, session_id, agent_id):
         return {"status": "ok"}, self.begin_ns
+
+    def timed_pin_epoch_cpu(self, session_id, cpu):
+        self.pin_calls.append(cpu)
+        return {"status": "ok"}, 1
 
     def timed_run(self, session_id, command):
         self.runs.append(command)
@@ -134,6 +139,27 @@ class TestSpecCommandValidation(unittest.TestCase):
             m = self.h.measure_spec_epoch("s1", "w2_cpu 10")
         self.assertTrue(m.success)
         self.assertEqual(self.client.runs, ["w2_cpu 10"])
+
+    def test_pin_once_pins_candidate_not_each_command(self):
+        """pin_once: one epoch-level pin, NO per-command taskset wrapper."""
+        with mock.patch("framework.harness.CPU_PIN", 2):
+            m = self.h.measure_spec_epoch(
+                "s1", ["w10_output 1024"] * 3, pin_once=True)
+        self.assertTrue(m.success)
+        # Candidate pinned once for the epoch...
+        self.assertEqual(self.client.pin_calls, [2])
+        # ...and the N runs carry NO per-run taskset startup.
+        self.assertEqual(self.client.runs,
+                         ["w10_output 1024"] * 3)
+
+    def test_pin_once_false_still_uses_per_run_taskset(self):
+        with mock.patch("framework.harness.CPU_PIN", 2):
+            m = self.h.measure_spec_epoch(
+                "s1", ["w10_output 1024"] * 2)
+        self.assertTrue(m.success)
+        self.assertEqual(self.client.pin_calls, [])
+        self.assertEqual(self.client.runs,
+                         ["taskset -c 2 w10_output 1024"] * 2)
 
 
 class TestMultiCommandEpoch(unittest.TestCase):

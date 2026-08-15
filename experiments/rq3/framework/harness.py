@@ -241,7 +241,8 @@ class WorkloadHarness:
     def measure_spec_epoch(self, session_id: str, command: str,
                            finalize: str = "commit",
                            agent_id: str = "rq3-bench",
-                           verify_fn: Callable = None
+                           verify_fn: Callable = None,
+                           pin_once: bool = False
                            ) -> EpochMeasurement:
         """Run one full epoch: begin → run → commit/rollback. Timed.
 
@@ -262,12 +263,20 @@ class WorkloadHarness:
             _, begin_ns = client.timed_begin_epoch(session_id, agent_id)
             m.begin_ns = begin_ns
 
+            # Pin the candidate shell once for the whole epoch (multi-run
+            # workloads, e.g. W10-b): affinity is inherited by every command
+            # the shell spawns, so N runs pay one taskset-equivalent instead
+            # of N× the ~1.3 ms taskset startup. The raw baseline pins once
+            # via its single wrapper — this restores symmetry.
+            if CPU_PIN is not None and pin_once:
+                client.timed_pin_epoch_cpu(session_id, CPU_PIN)
+
             # Run command(s)
             total_run = 0
             for cmd in commands:
                 # Pin the speculative command to the same CPU as raw runs so
                 # the two baselines are comparable.
-                if CPU_PIN is not None:
+                if CPU_PIN is not None and not pin_once:
                     cmd = f"taskset -c {CPU_PIN} {cmd}"
                 run_resp, run_ns = client.timed_run(session_id, cmd)
                 total_run += run_ns
@@ -307,7 +316,8 @@ class WorkloadHarness:
                      teardown_fn: Callable = None,
                      new_session_per_run: bool = False,
                      verify_fn: Callable = None,
-                     error_sink: List[str] = None
+                     error_sink: List[str] = None,
+                     pin_once: bool = False
                      ) -> Tuple[Dict[str, List[float]], int]:
         """Run speculative measurement loop.
 
@@ -348,7 +358,7 @@ class WorkloadHarness:
                 if setup_fn:
                     setup_fn()
                 m = self.measure_spec_epoch(sid, command, finalize, agent_id,
-                                             verify_fn)
+                                             verify_fn, pin_once)
                 if not m.success:
                     # Warm-up failures also matter for diagnostics: they
                     # reveal whether the failure is systematic or starts
@@ -372,7 +382,7 @@ class WorkloadHarness:
                 if setup_fn:
                     setup_fn()
                 m = self.measure_spec_epoch(sid, command, finalize, agent_id,
-                                             verify_fn)
+                                             verify_fn, pin_once)
                 if teardown_fn:
                     teardown_fn()
                 if new_session_per_run:
@@ -413,7 +423,8 @@ class WorkloadHarness:
                      teardown_fn: Callable = None,
                      raw_timeout: float = 60.0,
                      new_session_per_run: bool = False,
-                     verify_fn: Callable = None
+                     verify_fn: Callable = None,
+                     pin_once: bool = False
                      ) -> WorkloadResult:
         """Run a complete workload measurement (raw + spec commit + rollback).
 
@@ -454,7 +465,8 @@ class WorkloadHarness:
                 setup_fn=setup_fn, teardown_fn=teardown_fn,
                 new_session_per_run=new_session_per_run,
                 verify_fn=verify_fn,
-                error_sink=result.spec_errors)
+                error_sink=result.spec_errors,
+                pin_once=pin_once)
             result.spec_excluded = max(result.spec_excluded, spec_excl)
 
             if mode == "commit":

@@ -722,6 +722,30 @@ class SessionProxy:
         self._recover_from_timeout(sess, sentinel)
         raise TimeoutError(f"command timed out: {command!r}")
 
+    def pin_epoch_cpu(self, sid, cpu):
+        """Pin the current epoch's candidate (live shell) to one CPU.
+
+        The candidate is a long-lived shell that stays live for the whole
+        epoch; the affinity set here is inherited by every command it
+        spawns.  Multi-run epochs (e.g. W10-b's N tool invocations) thus
+        get the same pinning as the raw baseline WITHOUT re-invoking
+        `taskset` once per run — a per-run wrapper would pay N× the
+        ~1.3 ms taskset startup and skew per-entry timing.
+        """
+        sess = self.sessions.get(sid)
+        if sess is None:
+            raise KeyError(sid)
+        ep = sess.epoch
+        if ep is None:
+            raise RuntimeError(f"session {sid}: no active epoch to pin")
+        pid = ep["candidate"]
+        try:
+            os.sched_setaffinity(pid, {int(cpu)})
+        except OSError as e:
+            raise RuntimeError(
+                f"session {sid}: sched_setaffinity({pid}, cpu {cpu}): {e}")
+        self._log(f"session {sid}: candidate {pid} pinned to cpu {cpu}")
+
     def _admit_for_versioning(self, pid: int) -> None:
         """Pre-fork admission control: verify the baseline process is in a
         snapshot-safe state.  Raises NotAdmissibleError if any check fails so
