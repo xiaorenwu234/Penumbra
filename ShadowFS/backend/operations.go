@@ -84,21 +84,45 @@ func promoteVersion(v *FileVersion) error {
 				}
 				return fmt.Errorf("promote rename snapshot %q missing", src)
 			}
-			// Copy to temporary, then atomic rename to destination.
-			tmpDst := orig + ".penumbra-tmp"
 			st, _ := os.Lstat(src)
-			if st != nil && st.IsDir() {
-				os.RemoveAll(tmpDst)
+			isDir := st != nil && st.IsDir()
+
+			// For directories: destination must not exist or must be empty.
+			if isDir {
+				if dstStat, err := os.Lstat(orig); err == nil {
+					if dstStat.IsDir() {
+						// Check if empty.
+						entries, _ := os.ReadDir(orig)
+						if len(entries) > 0 {
+							return fmt.Errorf("promote rename: destination %q is non-empty directory", orig)
+						}
+						os.Remove(orig) // Remove empty dir
+					} else {
+						os.Remove(orig) // Remove file
+					}
+				}
+			}
+
+			// Copy to unique temporary, then atomic rename to destination.
+			tmpDst := fmt.Sprintf("%s.penumbra-snap-%d", orig, v.ID)
+			if isDir {
 				if err := copyUpDir(src, tmpDst); err != nil {
+					os.RemoveAll(tmpDst) // Clean up on failure
 					return fmt.Errorf("promote rename copy dir: %w", err)
 				}
 			} else {
 				if err := copyUpFile(src, tmpDst); err != nil {
+					os.Remove(tmpDst) // Clean up on failure
 					return fmt.Errorf("promote rename copy file: %w", err)
 				}
 			}
-			os.RemoveAll(orig)
+			// Atomic install: rename overwrites file or empty dir.
 			if err := os.Rename(tmpDst, orig); err != nil {
+				if isDir {
+					os.RemoveAll(tmpDst)
+				} else {
+					os.Remove(tmpDst)
+				}
 				return fmt.Errorf("promote rename install: %w", err)
 			}
 		} else {

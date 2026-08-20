@@ -2024,6 +2024,14 @@ func (b *Backend) rollbackInternal(epochID EpochID) error {
 	}
 
 	// Remove staging payload and epoch records, then prune graph edges.
+	// Fix 3: WAL barrier BEFORE deleting recovery state. This ensures the
+	// rollback record is durable before we delete the staging directory.
+	for id := range affected {
+		if err := b.FlushEpochWAL(id); err != nil {
+			log.Printf("[backend] Rollback: WAL flush for %q failed: %v", id, err)
+			// Continue anyway - fail closed means epoch stays fenced.
+		}
+	}
 	for id := range affected {
 		if err := os.RemoveAll(epochDirFor(b.stagingDir, id)); err != nil {
 			log.Printf("[backend] Rollback: remove stage dir of %q: %v", id, err)
@@ -2335,6 +2343,10 @@ func (b *Backend) ackReleaseInternal(epochID EpochID) {
 		// is not yet finalized: leave it in place to be re-finalized.
 		return
 	}
+	// Fix 3: WAL barrier BEFORE deleting recovery state.
+	if err := b.FlushEpochWAL(epochID); err != nil {
+		log.Printf("[backend] release_ack: WAL flush for %q failed: %v", epochID, err)
+	}
 	delete(b.epochs, epochID)
 	if ep.CgroupID != "" && b.activeEpochByCgroup[ep.CgroupID] == epochID {
 		delete(b.activeEpochByCgroup, ep.CgroupID)
@@ -2465,23 +2477,25 @@ func (b *Backend) planRenames() error {
 			snapDir := filepath.Join(epochDir, "rename-snapshots")
 			snapPath := filepath.Join(snapDir, fmt.Sprintf("snap-%d", r.v.ID))
 
+			// Check if source is a directory.
+			st, err := os.Lstat(r.srcPath)
+			if err != nil {
+				return fmt.Errorf("stat rename source %q: %w", r.srcPath, err)
+			}
+			// Directory snapshots are not crash-safe (partial copy looks complete).
+			// Return EOPNOTSUPP for conflicting directory renames.
+			if st.IsDir() {
+				return fmt.Errorf("conflicting directory rename %q -> %q: %w",
+					r.v.RenameFrom, r.v.LogicalPath, syscall.EOPNOTSUPP)
+			}
+
 			// Check if snapshot already exists (idempotent retry).
 			if _, err := os.Lstat(snapPath); os.IsNotExist(err) {
 				if err := os.MkdirAll(snapDir, 0o755); err != nil {
 					return fmt.Errorf("create rename snapshot dir: %w", err)
 				}
-				st, err := os.Lstat(r.srcPath)
-				if err != nil {
-					return fmt.Errorf("stat rename source %q: %w", r.srcPath, err)
-				}
-				if st.IsDir() {
-					if err := copyUpDir(r.srcPath, snapPath); err != nil {
-						return fmt.Errorf("snapshot rename directory %q: %w", r.srcPath, err)
-					}
-				} else {
-					if err := copyUpFile(r.srcPath, snapPath); err != nil {
-						return fmt.Errorf("snapshot rename file %q: %w", r.srcPath, err)
-					}
+				if err := copyUpFile(r.srcPath, snapPath); err != nil {
+					return fmt.Errorf("snapshot rename file %q: %w", r.srcPath, err)
 				}
 				snapshotDirs = append(snapshotDirs, snapDir)
 			}
@@ -2490,13 +2504,19 @@ func (b *Backend) planRenames() error {
 		}
 	}
 
-	// Fsync snapshot directories to ensure directory entries are durable.
+	// Fsync snapshot directories and their parent (epochDir) to ensure
+	// directory entries are durable.
 	seen := make(map[string]bool)
 	for _, dir := range snapshotDirs {
 		if !seen[dir] {
 			seen[dir] = true
 			if err := fsyncDir(dir); err != nil {
 				return fmt.Errorf("fsync rename snapshot dir %q: %w", dir, err)
+			}
+			// Also fsync epochDir (parent of snapshot dir).
+			epochDir := filepath.Dir(dir)
+			if err := fsyncDir(epochDir); err != nil {
+				return fmt.Errorf("fsync epoch dir %q: %w", epochDir, err)
 			}
 		}
 	}
