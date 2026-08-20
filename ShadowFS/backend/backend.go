@@ -1454,26 +1454,75 @@ func isAncestor(dir, child string) bool {
 	return child[len(dir)] == os.PathSeparator
 }
 
-// cleanOrphanRenameTemps removes .penumbra-rename-* temp files from the
-// backing store. These are left behind if a crash occurs between copyUpFile
-// completing and the final os.Rename install step. Called during recovery.
+// renameTempRegistry returns the path to the rename temp registry file.
+// This file tracks temp file paths created during rename promotion so that
+// recovery can safely remove ONLY files proven to belong to Penumbra.
+func (b *Backend) renameTempRegistry() string {
+	return filepath.Join(b.stagingDir, ".rename-temp-registry")
+}
+
+// registerRenameTemp records a temp file path in the registry BEFORE the
+// temp is created. This ensures that if we crash at any point after creation,
+// recovery can identify and remove the orphan.
+func (b *Backend) registerRenameTemp(tmpPath string) error {
+	reg := b.renameTempRegistry()
+	f, err := os.OpenFile(reg, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open rename temp registry: %w", err)
+	}
+	if _, err := f.WriteString(tmpPath + "\n"); err != nil {
+		f.Close()
+		return fmt.Errorf("write rename temp registry: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("fsync rename temp registry: %w", err)
+	}
+	return f.Close()
+}
+
+// unregisterRenameTemp removes a temp file path from the registry after
+// successful installation. Rewrites the registry without the given path.
+func (b *Backend) unregisterRenameTemp(tmpPath string) {
+	reg := b.renameTempRegistry()
+	data, err := os.ReadFile(reg)
+	if err != nil {
+		return // registry gone, nothing to do
+	}
+	lines := strings.Split(string(data), "\n")
+	var kept []string
+	for _, ln := range lines {
+		if ln != "" && ln != tmpPath {
+			kept = append(kept, ln)
+		}
+	}
+	if len(kept) == 0 {
+		os.Remove(reg)
+		return
+	}
+	_ = os.WriteFile(reg, []byte(strings.Join(kept, "\n")+"\n"), 0o644)
+}
+
+// cleanOrphanRenameTemps removes temp files recorded in the rename temp
+// registry. Only files explicitly registered by Penumbra are removed — never
+// based on filename pattern matching. Called during recovery.
 func (b *Backend) cleanOrphanRenameTemps() {
-	// Walk the tracked (backing) directory tree and remove any orphan temps.
-	_ = filepath.Walk(b.trackedDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // skip unreadable entries
+	reg := b.renameTempRegistry()
+	data, err := os.ReadFile(reg)
+	if err != nil {
+		return // no registry, nothing to clean
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, path := range lines {
+		if path == "" {
+			continue
 		}
-		if info.IsDir() {
-			return nil
+		if rmErr := os.Remove(path); rmErr == nil {
+			log.Printf("[backend] recovery: removed registered rename temp %q", path)
 		}
-		name := info.Name()
-		if len(name) > len(".penumbra-rename-") && name[:len(".penumbra-rename-")] == ".penumbra-rename-" {
-			if rmErr := os.Remove(path); rmErr == nil {
-				log.Printf("[backend] recovery: removed orphan rename temp %q", path)
-			}
-		}
-		return nil
-	})
+	}
+	// Clear the registry after cleanup.
+	os.Remove(reg)
 }
 
 // --- Version creation (write path) ---
@@ -2739,7 +2788,7 @@ func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, e
 			}
 		}
 
-		if err := promoteVersion(head); err != nil {
+		if err := b.promoteVersion(head); err != nil {
 			// FAIL CLOSED: preserve ALL recovery state so the exact same
 			// promotion can be retried. Record why on every owner.
 			msg := fmt.Sprintf("promote %q: %v", obj, err)

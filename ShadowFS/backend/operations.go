@@ -33,7 +33,7 @@ import (
 // entries must reach stable storage BEFORE the owning epoch may transition to
 // Finalized. An fsync error is therefore a promotion failure (fail closed —
 // the epoch stays fenced and the promote is retried).
-func promoteVersion(v *FileVersion) error {
+func (b *Backend) promoteVersion(v *FileVersion) error {
 	orig := v.LogicalPath
 	parent := filepath.Dir(orig)
 	switch v.Operation {
@@ -101,16 +101,26 @@ func promoteVersion(v *FileVersion) error {
 				os.Remove(tmpDst)
 				return fmt.Errorf("promote rename close temp: %w", err)
 			}
+			// Register temp in persistent registry BEFORE use. Recovery
+			// will only delete files recorded here — never by name pattern.
+			if err := b.registerRenameTemp(tmpDst); err != nil {
+				os.Remove(tmpDst)
+				return fmt.Errorf("promote rename register temp: %w", err)
+			}
 			// copyUpFile atomically replaces tmpDst with the snapshot content.
 			if err := copyUpFile(src, tmpDst); err != nil {
 				os.Remove(tmpDst)
+				b.unregisterRenameTemp(tmpDst)
 				return fmt.Errorf("promote rename copy: %w", err)
 			}
 			// Atomic install: rename(2) atomically replaces destination.
 			if err := os.Rename(tmpDst, orig); err != nil {
 				os.Remove(tmpDst)
+				b.unregisterRenameTemp(tmpDst)
 				return fmt.Errorf("promote rename install: %w", err)
 			}
+			// Success: remove from registry (temp no longer exists).
+			b.unregisterRenameTemp(tmpDst)
 		} else {
 			// Fast path: MOVE source to destination.
 			if !srcExists {

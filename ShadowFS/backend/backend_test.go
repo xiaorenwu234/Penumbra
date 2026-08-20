@@ -1,8 +1,10 @@
 package backend
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -791,10 +793,14 @@ func TestRenameReverseOverlap(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected EOPNOTSUPP for conflicting directory rename, got nil")
 	}
+	if !errors.Is(err, syscall.EOPNOTSUPP) {
+		t.Fatalf("expected EOPNOTSUPP, got: %v", err)
+	}
 }
 
-// TestOrphanRenameTempCleanup verifies that .penumbra-rename-* files left
-// in the backing store are cleaned up during recovery.
+// TestOrphanRenameTempCleanup verifies that ONLY registered temp files are
+// cleaned during recovery. A user file with the same name pattern but NOT
+// in the registry must NOT be deleted.
 func TestOrphanRenameTempCleanup(t *testing.T) {
 	dir := t.TempDir()
 	orig := filepath.Join(dir, "orig")
@@ -802,35 +808,50 @@ func TestOrphanRenameTempCleanup(t *testing.T) {
 	if err := os.MkdirAll(orig, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	// Create an orphan temp file simulating a crash mid-promotion.
-	orphan := filepath.Join(orig, ".penumbra-rename-123456")
-	if err := os.WriteFile(orphan, []byte("orphan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Also create a normal file that should NOT be removed.
-	normal := filepath.Join(orig, "normal.txt")
-	if err := os.WriteFile(normal, []byte("keep"), 0o644); err != nil {
+	if err := os.MkdirAll(staging, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Open backend — recovery should clean the orphan.
+	// Create a registered orphan (simulating a crash mid-promotion).
+	registeredOrphan := filepath.Join(orig, ".penumbra-rename-registered")
+	if err := os.WriteFile(registeredOrphan, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Write the registry file listing ONLY the registered orphan.
+	regPath := filepath.Join(staging, ".rename-temp-registry")
+	if err := os.WriteFile(regPath, []byte(registeredOrphan+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a USER file with the same name pattern — NOT in registry.
+	userFile := filepath.Join(orig, ".penumbra-rename-user-created")
+	if err := os.WriteFile(userFile, []byte("user data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open backend — recovery should clean ONLY the registered orphan.
 	b, err := NewBackend(staging, orig)
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
 	defer b.Close()
 
-	if _, err := os.Lstat(orphan); !os.IsNotExist(err) {
-		t.Fatal("orphan .penumbra-rename-* file should have been removed")
+	if _, err := os.Lstat(registeredOrphan); !os.IsNotExist(err) {
+		t.Fatal("registered orphan should have been removed")
 	}
-	if _, err := os.Lstat(normal); err != nil {
-		t.Fatal("normal file should not be removed")
+	// User file with same pattern must NOT be deleted.
+	if _, err := os.Lstat(userFile); err != nil {
+		t.Fatal("user file with .penumbra-rename-* name must NOT be removed")
+	}
+	// Registry should be cleared.
+	if _, err := os.Lstat(regPath); !os.IsNotExist(err) {
+		t.Fatal("registry should be removed after cleanup")
 	}
 }
 
 // TestRenamePartialPromotionRecovery simulates a crash after one destination
-// is installed but before the second. On recovery, retry should complete.
+// is installed but before the second. On recovery (reopen), retry finalize
+// should complete the swap correctly.
 func TestRenamePartialPromotionRecovery(t *testing.T) {
 	dir := t.TempDir()
 	orig := filepath.Join(dir, "orig")
@@ -846,26 +867,61 @@ func TestRenamePartialPromotionRecovery(t *testing.T) {
 	os.WriteFile(bPath, []byte("B"), 0o644)
 	tmpPath := filepath.Join(orig, "tmp.txt")
 
-	// First run: create the swap and commit.
+	// Phase 1: create the swap, authorize (commit WAL), then crash.
 	b1, err := NewBackend(staging, orig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b1.RecordRename("E", aPath, tmpPath)
-	b1.RecordRename("E", bPath, aPath)
-	b1.RecordRename("E", tmpPath, bPath)
+	if err := b1.RecordRename("E", aPath, tmpPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := b1.RecordRename("E", bPath, aPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := b1.RecordRename("E", tmpPath, bPath); err != nil {
+		t.Fatal(err)
+	}
+	// Authorize the epoch (writes commit record to WAL).
+	if _, err := b1.Authorize("E", "test"); err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
 
-	// Simulate partial promotion: manually install a→tmp's result.
-	// This represents a crash after the first rename but before the rest.
+	// Manually promote ONLY the first object (a→tmp) to simulate partial
+	// promotion before a crash.
 	b1.mu.Lock()
-	_ = b1.planRenames()
+	if err := b1.planRenames(); err != nil {
+		b1.mu.Unlock()
+		t.Fatalf("planRenames: %v", err)
+	}
+	// Promote just the tmp.txt object (a→tmp).
+	if head := b1.versionByID[b1.visibleHead[tmpPath]]; head != nil {
+		_ = b1.promoteVersion(head)
+	}
 	b1.mu.Unlock()
 
-	// Commit should complete all renames.
-	mustCommitFinalized(t, b1, "E")
-	b1.Close()
+	// Simulate non-graceful shutdown: flush WAL but suppress checkpoint.
+	crash(t, b1)
 
-	// Verify final state: a=B, b=A.
+	// Phase 2: reopen — recovery replays WAL, re-authorizes, and
+	// tryPromoteAll completes the remaining promotions.
+	b2, err := NewBackend(staging, orig)
+	if err != nil {
+		t.Fatalf("reopen after crash: %v", err)
+	}
+	defer b2.Close()
+
+	// The epoch should be finalized by recovery's tryPromoteAll.
+	// If not (e.g. left in Finalizing), retry finalize.
+	b2.mu.Lock()
+	ep := b2.epochs["E"]
+	b2.mu.Unlock()
+	if ep != nil && ep.State != Finalized {
+		if _, err := b2.RetryFinalize("E"); err != nil {
+			t.Fatalf("RetryFinalize after crash: %v", err)
+		}
+	}
+
+	// Verify final state: a=B, b=A (swap completed).
 	if readFile(t, aPath) != "B" {
 		t.Fatalf("a.txt = %q, want B", readFile(t, aPath))
 	}
