@@ -604,39 +604,37 @@ func (b *Backend) bufferWALRecord(epochID EpochID, rec WALRecord) {
 // Recovery rule: if the system crashes before this barrier, the epoch is
 // treated as incomplete and its orphan staging files are cleaned up.
 func (b *Backend) FlushEpochWAL(epochID EpochID) error {
+	return b.flushWALBarrier()
+}
+
+// flushWALBarrier is the internal global WAL fsync. It ensures all
+// previously written WAL records are durable. Called before any
+// destructive operation (deleting staging, releasing epochs).
+func (b *Backend) flushWALBarrier() error {
 	// Fsync the WAL file to make all buffered writes durable.
 	f, err := os.OpenFile(b.walPath, os.O_WRONLY, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // no WAL file yet, nothing to sync
 		}
-		return fmt.Errorf("flush epoch WAL %q: open: %w", epochID, err)
+		return fmt.Errorf("WAL barrier: open: %w", err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		return fmt.Errorf("flush epoch WAL %q: fsync: %w", epochID, err)
+		return fmt.Errorf("WAL barrier: fsync: %w", err)
 	}
 	f.Close()
 
-	// Fix 3: fsync parent dir if it hasn't been synced yet (first creation).
-	// walDirSynced is separate from walFileExists: the file can exist
-	// (written without fsync) while the dir entry is not yet durable.
+	// Fsync parent dir if it hasn't been synced yet (first creation).
 	if !b.walDirSynced {
 		if err := fsyncDir(filepath.Dir(b.walPath)); err != nil {
-			return fmt.Errorf("flush epoch WAL %q: dir fsync: %w", epochID, err)
+			return fmt.Errorf("WAL barrier: dir fsync: %w", err)
 		}
 		b.walDirSynced = true
 	}
 
-	// Update epoch stats.
-	b.epochStatsMu.Lock()
-	if stats := b.epochStats[epochID]; stats != nil {
-		stats.WALFlushes++
-	}
-	b.epochStatsMu.Unlock()
-
 	if debugLog.Load() {
-		log.Printf("[backend] FlushEpochWAL: epoch=%q WAL fsync complete", epochID)
+		log.Printf("[backend] WAL barrier: fsync complete")
 	}
 	return nil
 }
@@ -2440,13 +2438,10 @@ func (b *Backend) planRenames() error {
 		return nil
 	}
 
-	// Build conflict graph: detect chains, swaps, and overlaps.
-	// Use LOGICAL paths (RenameFrom and LogicalPath) for conflict detection,
-	// not resolved physical paths.
-	dstToIdx := make(map[string]int)   // destination (LogicalPath) → index
+	// Build conflict graph: detect chains, swaps, and path overlaps.
+	// Use LOGICAL paths (RenameFrom and LogicalPath) for conflict detection.
 	srcToIdx := make(map[string][]int) // source (RenameFrom) → indices
 	for i, r := range renames {
-		dstToIdx[r.v.LogicalPath] = i
 		srcToIdx[r.v.RenameFrom] = append(srcToIdx[r.v.RenameFrom], i)
 	}
 
@@ -2462,6 +2457,27 @@ func (b *Backend) planRenames() error {
 		// Conflict: multiple renames share the same source.
 		if len(srcToIdx[r.v.RenameFrom]) > 1 {
 			for _, j := range srcToIdx[r.v.RenameFrom] {
+				conflicting[j] = true
+			}
+		}
+	}
+
+	// Detect directory/subdirectory overlaps between sources and destinations.
+	// If any source is an ancestor of any destination (or vice versa), mark
+	// both as conflicting. These require special handling not yet supported.
+	for i, ri := range renames {
+		for j, rj := range renames {
+			if i == j {
+				continue
+			}
+			// Check if ri's destination is an ancestor of rj's source.
+			if isAncestor(ri.v.LogicalPath, rj.v.RenameFrom) {
+				conflicting[i] = true
+				conflicting[j] = true
+			}
+			// Check if rj's destination is an ancestor of ri's source.
+			if isAncestor(rj.v.LogicalPath, ri.v.RenameFrom) {
+				conflicting[i] = true
 				conflicting[j] = true
 			}
 		}
@@ -3352,6 +3368,11 @@ func (b *Backend) AckReleaseGroup(groupID int) error {
 			b.applyTurnAbort(seqNum)
 			return fmt.Errorf("ack_release_group delete WAL: %w", err)
 		}
+		// WAL barrier before deleting state (fail-closed).
+		if err := b.flushWALBarrier(); err != nil {
+			b.applyTurnAbort(seqNum)
+			return fmt.Errorf("ack_release_group WAL barrier: %w", err)
+		}
 		b.mu.Lock()
 		b.applyTurnWait(seqNum)
 		delete(b.activeGroups, groupID)
@@ -3378,6 +3399,15 @@ func (b *Backend) AckReleaseGroup(groupID int) error {
 			b.applyTurnAbort(sn)
 		}
 		return fmt.Errorf("ack_release_group WAL: %w", err)
+	}
+
+	// WAL barrier before deleting state (fail-closed).
+	// One global fsync for the entire group release.
+	if err := b.flushWALBarrier(); err != nil {
+		for _, sn := range seqNums {
+			b.applyTurnAbort(sn)
+		}
+		return fmt.Errorf("ack_release_group WAL barrier: %w", err)
 	}
 
 	b.mu.Lock()

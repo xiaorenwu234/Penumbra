@@ -85,47 +85,33 @@ func promoteVersion(v *FileVersion) error {
 				return fmt.Errorf("promote rename snapshot %q missing", src)
 			}
 			st, _ := os.Lstat(src)
-			isDir := st != nil && st.IsDir()
-
-			// Create unique temporary in destination parent.
-			// Use os.CreateTemp/os.MkdirTemp for atomic unique name.
-			var tmpDst string
-			if isDir {
-				tmp, err := os.MkdirTemp(parent, ".penumbra-rename-*")
-				if err != nil {
-					return fmt.Errorf("promote rename create temp dir: %w", err)
-				}
-				tmpDst = tmp
-				// Remove the empty temp dir so copyUpDir can create it.
-				os.Remove(tmpDst)
-				if err := copyUpDir(src, tmpDst); err != nil {
-					os.RemoveAll(tmpDst)
-					return fmt.Errorf("promote rename copy dir: %w", err)
-				}
-			} else {
-				tmp, err := os.CreateTemp(parent, ".penumbra-rename-*")
-				if err != nil {
-					return fmt.Errorf("promote rename create temp file: %w", err)
-				}
-				tmpDst = tmp.Name()
-				tmp.Close()
-				os.Remove(tmpDst) // copyUpFile will create it
-				if err := copyUpFile(src, tmpDst); err != nil {
-					os.Remove(tmpDst)
-					return fmt.Errorf("promote rename copy file: %w", err)
-				}
+			if st != nil && st.IsDir() {
+				// Conflicting directory renames are rejected by planRenames.
+				return fmt.Errorf("promote rename: directory snapshot not supported")
 			}
-			// Atomic install: rename(2) handles file/dir replacement correctly.
-			// - file over file: OK
-			// - dir over empty dir: OK
-			// - dir over non-empty dir: ENOTEMPTY
-			// - type mismatch: appropriate error
+
+			// Create unique temporary file in destination parent.
+			// Keep the placeholder file; copyUpFile will atomically replace it.
+			tmp, err := os.CreateTemp(parent, ".penumbra-rename-*")
+			if err != nil {
+				return fmt.Errorf("promote rename create temp: %w", err)
+			}
+			tmpDst := tmp.Name()
+			if err := tmp.Close(); err != nil {
+				os.Remove(tmpDst)
+				return fmt.Errorf("promote rename close temp: %w", err)
+			}
+			// copyUpFile writes to a temp then renames, so we need to remove
+			// the placeholder first. Orphan cleanup: .penumbra-rename-* files
+			// in parent directories should be cleaned on recovery.
+			os.Remove(tmpDst)
+			if err := copyUpFile(src, tmpDst); err != nil {
+				os.Remove(tmpDst)
+				return fmt.Errorf("promote rename copy: %w", err)
+			}
+			// Atomic install: rename(2) atomically replaces destination.
 			if err := os.Rename(tmpDst, orig); err != nil {
-				if isDir {
-					os.RemoveAll(tmpDst)
-				} else {
-					os.Remove(tmpDst)
-				}
+				os.Remove(tmpDst)
 				return fmt.Errorf("promote rename install: %w", err)
 			}
 		} else {
