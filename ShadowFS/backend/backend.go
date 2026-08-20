@@ -287,6 +287,9 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 	// recovers as AuthorizedPending/Finalizing (fenced, retryable) — pending
 	// is never mistaken for finalized.
 	_ = b.tryPromoteAll()
+	// Clean orphan .penumbra-rename-* temp files left by a crash between
+	// copyUpFile and the final os.Rename install step.
+	b.cleanOrphanRenameTemps()
 	b.nextApply = b.seq + 1
 
 	go b.walWorker()
@@ -604,7 +607,13 @@ func (b *Backend) bufferWALRecord(epochID EpochID, rec WALRecord) {
 // Recovery rule: if the system crashes before this barrier, the epoch is
 // treated as incomplete and its orphan staging files are cleaned up.
 func (b *Backend) FlushEpochWAL(epochID EpochID) error {
-	return b.flushWALBarrier()
+	if err := b.flushWALBarrier(); err != nil {
+		return err
+	}
+	// Update epoch stats.
+	stats := b.getEpochStats(epochID)
+	stats.WALFlushes++
+	return nil
 }
 
 // flushWALBarrier is the internal global WAL fsync. It ensures all
@@ -1443,6 +1452,28 @@ func isAncestor(dir, child string) bool {
 		return true
 	}
 	return child[len(dir)] == os.PathSeparator
+}
+
+// cleanOrphanRenameTemps removes .penumbra-rename-* temp files from the
+// backing store. These are left behind if a crash occurs between copyUpFile
+// completing and the final os.Rename install step. Called during recovery.
+func (b *Backend) cleanOrphanRenameTemps() {
+	// Walk the tracked (backing) directory tree and remove any orphan temps.
+	_ = filepath.Walk(b.trackedDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if info.IsDir() {
+			return nil
+		}
+		name := info.Name()
+		if len(name) > len(".penumbra-rename-") && name[:len(".penumbra-rename-")] == ".penumbra-rename-" {
+			if rmErr := os.Remove(path); rmErr == nil {
+				log.Printf("[backend] recovery: removed orphan rename temp %q", path)
+			}
+		}
+		return nil
+	})
 }
 
 // --- Version creation (write path) ---
@@ -2463,20 +2494,33 @@ func (b *Backend) planRenames() error {
 	}
 
 	// Detect directory/subdirectory overlaps between sources and destinations.
-	// If any source is an ancestor of any destination (or vice versa), mark
-	// both as conflicting. These require special handling not yet supported.
+	// All four directions must be checked:
+	//   1. dest_i is ancestor of source_j  (rename into a dir being moved away)
+	//   2. dest_j is ancestor of source_i  (symmetric)
+	//   3. source_i is ancestor of dest_j  (rename out of a dir being moved)
+	//   4. source_j is ancestor of dest_i  (symmetric)
 	for i, ri := range renames {
 		for j, rj := range renames {
 			if i == j {
 				continue
 			}
-			// Check if ri's destination is an ancestor of rj's source.
+			// 1. dest_i is ancestor of source_j.
 			if isAncestor(ri.v.LogicalPath, rj.v.RenameFrom) {
 				conflicting[i] = true
 				conflicting[j] = true
 			}
-			// Check if rj's destination is an ancestor of ri's source.
+			// 2. dest_j is ancestor of source_i.
 			if isAncestor(rj.v.LogicalPath, ri.v.RenameFrom) {
+				conflicting[i] = true
+				conflicting[j] = true
+			}
+			// 3. source_i is ancestor of dest_j.
+			if isAncestor(ri.v.RenameFrom, rj.v.LogicalPath) {
+				conflicting[i] = true
+				conflicting[j] = true
+			}
+			// 4. source_j is ancestor of dest_i.
+			if isAncestor(rj.v.RenameFrom, ri.v.LogicalPath) {
 				conflicting[i] = true
 				conflicting[j] = true
 			}

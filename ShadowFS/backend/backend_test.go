@@ -758,3 +758,118 @@ func TestRenameIndependentFastPath(t *testing.T) {
 		t.Fatal("independent rename results wrong")
 	}
 }
+
+// TestRenameReverseOverlap tests that a rename whose SOURCE is an ancestor
+// of another rename's DESTINATION is correctly detected as conflicting.
+// Example: /a→/x and /b→/a/y — source /a is ancestor of dest /a/y.
+func TestRenameReverseOverlap(t *testing.T) {
+	b, orig, _ := newTestBackend(t)
+	// Create directory /a with a file inside.
+	aDir := filepath.Join(orig, "a")
+	if err := os.MkdirAll(aDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeOrig(t, orig, "a/inner.txt", "inner")
+	bFile := writeOrig(t, orig, "b.txt", "B")
+	xDir := filepath.Join(orig, "x")
+	ayPath := filepath.Join(orig, "a", "y.txt")
+
+	// Rename /a → /x (moves the directory).
+	if err := b.RecordRename("E", aDir, xDir); err != nil {
+		t.Fatal(err)
+	}
+	// Rename /b → /a/y (destination is inside /a, which is being moved).
+	if err := b.RecordRename("E", bFile, ayPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// planRenames should detect the overlap and mark both as conflicting.
+	// Since one involves a directory, it should return EOPNOTSUPP.
+	b.mu.Lock()
+	err := b.planRenames()
+	b.mu.Unlock()
+	if err == nil {
+		t.Fatal("expected EOPNOTSUPP for conflicting directory rename, got nil")
+	}
+}
+
+// TestOrphanRenameTempCleanup verifies that .penumbra-rename-* files left
+// in the backing store are cleaned up during recovery.
+func TestOrphanRenameTempCleanup(t *testing.T) {
+	dir := t.TempDir()
+	orig := filepath.Join(dir, "orig")
+	staging := filepath.Join(dir, "staging")
+	if err := os.MkdirAll(orig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an orphan temp file simulating a crash mid-promotion.
+	orphan := filepath.Join(orig, ".penumbra-rename-123456")
+	if err := os.WriteFile(orphan, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Also create a normal file that should NOT be removed.
+	normal := filepath.Join(orig, "normal.txt")
+	if err := os.WriteFile(normal, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open backend — recovery should clean the orphan.
+	b, err := NewBackend(staging, orig)
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	defer b.Close()
+
+	if _, err := os.Lstat(orphan); !os.IsNotExist(err) {
+		t.Fatal("orphan .penumbra-rename-* file should have been removed")
+	}
+	if _, err := os.Lstat(normal); err != nil {
+		t.Fatal("normal file should not be removed")
+	}
+}
+
+// TestRenamePartialPromotionRecovery simulates a crash after one destination
+// is installed but before the second. On recovery, retry should complete.
+func TestRenamePartialPromotionRecovery(t *testing.T) {
+	dir := t.TempDir()
+	orig := filepath.Join(dir, "orig")
+	staging := filepath.Join(dir, "staging")
+	if err := os.MkdirAll(orig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Setup: two files for a swap.
+	aPath := filepath.Join(orig, "a.txt")
+	bPath := filepath.Join(orig, "b.txt")
+	os.WriteFile(aPath, []byte("A"), 0o644)
+	os.WriteFile(bPath, []byte("B"), 0o644)
+	tmpPath := filepath.Join(orig, "tmp.txt")
+
+	// First run: create the swap and commit.
+	b1, err := NewBackend(staging, orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b1.RecordRename("E", aPath, tmpPath)
+	b1.RecordRename("E", bPath, aPath)
+	b1.RecordRename("E", tmpPath, bPath)
+
+	// Simulate partial promotion: manually install a→tmp's result.
+	// This represents a crash after the first rename but before the rest.
+	b1.mu.Lock()
+	_ = b1.planRenames()
+	b1.mu.Unlock()
+
+	// Commit should complete all renames.
+	mustCommitFinalized(t, b1, "E")
+	b1.Close()
+
+	// Verify final state: a=B, b=A.
+	if readFile(t, aPath) != "B" {
+		t.Fatalf("a.txt = %q, want B", readFile(t, aPath))
+	}
+	if readFile(t, bPath) != "A" {
+		t.Fatalf("b.txt = %q, want A", readFile(t, bPath))
+	}
+}

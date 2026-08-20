@@ -47,9 +47,7 @@ func promoteVersion(v *FileVersion) error {
 				return fmt.Errorf("promote unlink %q: %w", orig, err)
 			}
 		}
-		if err := fsyncDir(parent); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("promote whiteout fsync parent %q: %w", parent, err)
-		}
+		// Directory fsync deferred to publishBarrier (dedup by publishDirs).
 		return nil
 
 	case OpRename:
@@ -91,7 +89,9 @@ func promoteVersion(v *FileVersion) error {
 			}
 
 			// Create unique temporary file in destination parent.
-			// Keep the placeholder file; copyUpFile will atomically replace it.
+			// The placeholder is kept: copyUpFile writes to an internal
+			// temp (dst+".shadow-cptmp") then atomically renames over dst,
+			// so it replaces the placeholder without needing removal.
 			tmp, err := os.CreateTemp(parent, ".penumbra-rename-*")
 			if err != nil {
 				return fmt.Errorf("promote rename create temp: %w", err)
@@ -101,10 +101,7 @@ func promoteVersion(v *FileVersion) error {
 				os.Remove(tmpDst)
 				return fmt.Errorf("promote rename close temp: %w", err)
 			}
-			// copyUpFile writes to a temp then renames, so we need to remove
-			// the placeholder first. Orphan cleanup: .penumbra-rename-* files
-			// in parent directories should be cleaned on recovery.
-			os.Remove(tmpDst)
+			// copyUpFile atomically replaces tmpDst with the snapshot content.
 			if err := copyUpFile(src, tmpDst); err != nil {
 				os.Remove(tmpDst)
 				return fmt.Errorf("promote rename copy: %w", err)
@@ -126,9 +123,7 @@ func promoteVersion(v *FileVersion) error {
 				return fmt.Errorf("promote rename %q -> %q: %w", src, orig, err)
 			}
 		}
-		if err := fsyncDir(parent); err != nil {
-			return fmt.Errorf("promote rename fsync dest parent %q: %w", parent, err)
-		}
+		// Directory fsync deferred to publishBarrier (dedup by publishDirs).
 		return nil
 
 	case OpMkdir:
