@@ -2435,14 +2435,27 @@ func (b *Backend) planRenames() {
 	}
 
 	// Fix 2: Only set StagePath for independent renames (fast path).
-	// Conflicting renames keep empty StagePath and use safe fallback.
+	// Conflicting renames: copy source to a NEW stage file (true copy-up),
+	// so promotion is independent of other renames' moves.
 	for i, r := range renames {
 		if !conflicting[i] {
 			r.v.StagePath = r.srcPath
+		} else {
+			// Conflicting: create a private snapshot via copy-up.
+			// This ensures promotion doesn't depend on source location.
+			stageDir := filepath.Join(b.stagingDir, "rename-snapshots")
+			snapPath := filepath.Join(stageDir, fmt.Sprintf("snap-%d", r.v.ID))
+			if _, err := os.Lstat(snapPath); os.IsNotExist(err) {
+				if err := os.MkdirAll(stageDir, 0o755); err == nil {
+					if st, serr := os.Lstat(r.srcPath); serr == nil && st.IsDir() {
+						_ = copyUpDir(r.srcPath, snapPath)
+					} else {
+						_ = copyUpFile(r.srcPath, snapPath)
+					}
+				}
+			}
+			r.v.StagePath = snapPath
 		}
-		// Conflicting renames: StagePath stays empty, promoteVersion
-		// will fall back to RenameFrom (logical path) which triggers
-		// copy-up behavior — safe but not zero-copy.
 	}
 }
 

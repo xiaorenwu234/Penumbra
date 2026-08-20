@@ -2000,6 +2000,23 @@ class ShadowOrchestrator:
             out, rc = proxy.run(session_id, command)
         except KeyError:
             return {"status": "error", "message": f"unknown session {session_id}"}
+
+        # WAL barrier: flush FUSE mutation records BEFORE releasing output.
+        # This ensures crash consistency — if we crash after returning output,
+        # the WAL records are durable and recovery can reconstruct the state.
+        epoch_id = self._session_epoch(session_id)
+        if epoch_id:
+            try:
+                resp = self.fs_client.request({
+                    "action": "flush_wal", "epoch_id": epoch_id})
+                if resp.get("status") != "ok":
+                    # Fail closed: do NOT release output if WAL barrier fails.
+                    return {"status": "error",
+                            "message": f"WAL barrier failed: {resp.get('message')}"}
+            except Exception as e:
+                return {"status": "error",
+                        "message": f"WAL barrier failed: {e}"}
+
         return {"status": "ok", "output": out if out is not None else "",
                 "exit_code": rc}
 
@@ -2143,20 +2160,6 @@ class ShadowOrchestrator:
         epoch_id = self._session_epoch(session_id)
         log.info("SESSION_COMMIT_EPOCH sid=%s cgroup=%s epoch=%s",
                  session_id, cgroup_id, epoch_id or "<active>")
-
-        # Fix 6: WAL barrier before finalization. Ensures all FUSE operation
-        # records are durable before promotion starts.
-        if epoch_id:
-            try:
-                resp = self.fs_client.request({
-                    "action": "flush_wal", "epoch_id": epoch_id})
-                if resp.get("status") != "ok":
-                    return {"status": "error",
-                            "message": f"WAL barrier failed: {resp.get('message')}"}
-            except Exception as e:
-                return {"status": "error",
-                        "message": f"WAL barrier failed: {e}"}
-
         proxy = self._get_proxy()
         # Journal the intent BEFORE touching either layer, so recovery knows a
         # commit was in progress for this session even if we crash immediately.
