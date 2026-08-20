@@ -20,10 +20,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"syscall"
 )
+
+// randUint64 returns a random uint64 for unique temp file naming.
+func randUint64() uint64 { return rand.Uint64() }
 
 // promoteVersion applies a single visible-head version to the backing
 // filesystem. Called only at finalization time, when every owner in the
@@ -88,27 +92,34 @@ func (b *Backend) promoteVersion(v *FileVersion) error {
 				return fmt.Errorf("promote rename: directory snapshot not supported")
 			}
 
-			// Generate a unique candidate path, register it BEFORE creation,
-			// then create with O_EXCL. This ensures that if we crash between
-			// registration and creation, recovery sees a registered path that
-			// doesn't exist (harmless). If we crash after creation, the path
-			// is already registered and will be cleaned.
-			tmpDst := filepath.Join(parent, fmt.Sprintf(".penumbra-rename-%d", v.ID))
-			if err := b.registerRenameTemp(tmpDst); err != nil {
-				return fmt.Errorf("promote rename register temp: %w", err)
-			}
-			// Create with O_EXCL: fail if a stale file exists (crash safety).
-			f, err := os.OpenFile(tmpDst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-			if err != nil {
-				if os.IsExist(err) {
-					// Stale file from a previous crashed attempt. Remove and retry.
-					os.Remove(tmpDst)
-					f, err = os.OpenFile(tmpDst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			// Create a unique temporary file safely:
+			// 1. Generate a random candidate path
+			// 2. Register it in the persistent registry BEFORE creation
+			// 3. Create with O_EXCL (never delete an existing file)
+			// 4. If EEXIST, unregister and retry with a new name
+			// This ensures we NEVER delete or overwrite a user file.
+			var tmpDst string
+			var f *os.File
+			for attempt := 0; attempt < 10; attempt++ {
+				candidate := filepath.Join(parent, fmt.Sprintf(".penumbra-rename-%d-%d", v.ID, randUint64()))
+				if err := b.registerRenameTemp(candidate); err != nil {
+					return fmt.Errorf("promote rename register temp: %w", err)
 				}
+				var err error
+				f, err = os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 				if err != nil {
-					b.unregisterRenameTemp(tmpDst)
+					// EEXIST or other: unregister and retry. NEVER delete.
+					b.unregisterRenameTemp(candidate)
+					if os.IsExist(err) {
+						continue // try a different random name
+					}
 					return fmt.Errorf("promote rename create temp: %w", err)
 				}
+				tmpDst = candidate
+				break
+			}
+			if tmpDst == "" {
+				return fmt.Errorf("promote rename: failed to allocate temp file after retries")
 			}
 			if err := f.Close(); err != nil {
 				os.Remove(tmpDst)

@@ -1512,6 +1512,7 @@ func (b *Backend) unregisterRenameTemp(tmpPath string) {
 	}
 	if len(kept) == 0 {
 		os.Remove(reg)
+		_ = fsyncDir(b.stagingDir)
 		return
 	}
 	// Atomic rewrite: write to temp file, fsync, rename over registry.

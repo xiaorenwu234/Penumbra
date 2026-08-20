@@ -79,7 +79,9 @@ func crash(t *testing.T, b *Backend) {
 	t.Helper()
 	b.flushPending()
 	// Ensure WAL is actually durable (fsync) before simulating crash.
-	_ = b.flushWALBarrier()
+	if err := b.flushWALBarrier(); err != nil {
+		t.Fatalf("crash: flushWALBarrier: %v", err)
+	}
 	b.mu.Lock()
 	b.walCount = 0
 	b.mu.Unlock()
@@ -940,5 +942,51 @@ func TestRenamePartialPromotionRecovery(t *testing.T) {
 	}
 	if readFile(t, bPath) != "A" {
 		t.Fatalf("b.txt = %q, want A", readFile(t, bPath))
+	}
+}
+
+// TestRenameUserTempFileNotDeleted verifies that a user file whose name
+// matches the .penumbra-rename-* pattern is NEVER deleted or overwritten
+// during rename promotion.
+func TestRenameUserTempFileNotDeleted(t *testing.T) {
+	b, orig, _ := newTestBackend(t)
+	a := writeOrig(t, orig, "a.txt", "A")
+	bPath := writeOrig(t, orig, "b.txt", "B")
+	tmp := filepath.Join(orig, "tmp.txt")
+
+	// Create a user file that looks like a Penumbra temp file.
+	// Use a plausible name that could match .penumbra-rename-<id>-<rand>.
+	userTemp := filepath.Join(orig, ".penumbra-rename-1-12345")
+	if err := os.WriteFile(userTemp, []byte("USER DATA"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Perform a swap: a→tmp, b→a, tmp→b (conflicting, uses snapshots).
+	if err := b.RecordRename("E", a, tmp); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecordRename("E", bPath, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecordRename("E", tmp, bPath); err != nil {
+		t.Fatal(err)
+	}
+
+	mustCommitFinalized(t, b, "E")
+
+	// Verify swap completed correctly.
+	if readFile(t, a) != "B" {
+		t.Fatalf("a.txt = %q, want B", readFile(t, a))
+	}
+	if readFile(t, bPath) != "A" {
+		t.Fatalf("b.txt = %q, want A", readFile(t, bPath))
+	}
+
+	// CRITICAL: user file must NOT be deleted or modified.
+	if _, err := os.Lstat(userTemp); err != nil {
+		t.Fatal("user file .penumbra-rename-1-12345 was DELETED")
+	}
+	if readFile(t, userTemp) != "USER DATA" {
+		t.Fatalf("user file content = %q, want 'USER DATA'", readFile(t, userTemp))
 	}
 }
