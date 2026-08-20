@@ -1230,6 +1230,21 @@ func (b *Backend) resolveLocked(epochID EpochID, obj ObjectID) ResolveResult {
 	if v.Operation == OpWhiteout {
 		return ResolveResult{Version: v.ID, Producer: v.Owner, Exists: false, Op: OpWhiteout}
 	}
+	// OpRename: resolve to the source's physical path for speculative view.
+	if v.Operation == OpRename {
+		// If StagePath is set (by planRenames), use it.
+		if v.StagePath != "" {
+			return ResolveResult{PhysicalPath: v.StagePath, Version: v.ID, Producer: v.Owner, Exists: true, Op: v.Operation}
+		}
+		// Otherwise, resolve the source recursively.
+		visited := make(map[VersionID]bool)
+		srcPath, err := b.resolveRenameSource(v, visited)
+		if err != nil {
+			// Fallback to RenameFrom.
+			srcPath = v.RenameFrom
+		}
+		return ResolveResult{PhysicalPath: srcPath, Version: v.ID, Producer: v.Owner, Exists: true, Op: v.Operation}
+	}
 	return ResolveResult{PhysicalPath: v.StagePath, Version: v.ID, Producer: v.Owner, Exists: true, Op: v.Operation}
 }
 
@@ -2409,14 +2424,18 @@ func (b *Backend) planRenames() error {
 	}
 
 	// Build conflict graph: detect chains, swaps, and overlaps.
-	srcToIdx := make(map[string][]int)
+	// Use LOGICAL paths (RenameFrom and LogicalPath) for conflict detection,
+	// not resolved physical paths.
+	dstToIdx := make(map[string]int)   // destination (LogicalPath) → index
+	srcToIdx := make(map[string][]int) // source (RenameFrom) → indices
 	for i, r := range renames {
-		srcToIdx[r.srcPath] = append(srcToIdx[r.srcPath], i)
+		dstToIdx[r.v.LogicalPath] = i
+		srcToIdx[r.v.RenameFrom] = append(srcToIdx[r.v.RenameFrom], i)
 	}
 
 	conflicting := make([]bool, len(renames))
 	for i, r := range renames {
-		// Conflict: destination is another rename's source.
+		// Conflict: destination is another rename's source (chain/swap).
 		if _, ok := srcToIdx[r.v.LogicalPath]; ok {
 			conflicting[i] = true
 			for _, j := range srcToIdx[r.v.LogicalPath] {
@@ -2424,8 +2443,8 @@ func (b *Backend) planRenames() error {
 			}
 		}
 		// Conflict: multiple renames share the same source.
-		if len(srcToIdx[r.srcPath]) > 1 {
-			for _, j := range srcToIdx[r.srcPath] {
+		if len(srcToIdx[r.v.RenameFrom]) > 1 {
+			for _, j := range srcToIdx[r.v.RenameFrom] {
 				conflicting[j] = true
 			}
 		}
@@ -2440,7 +2459,8 @@ func (b *Backend) planRenames() error {
 			r.v.RenameSnapshot = false
 		} else {
 			// Conflicting: create a private snapshot in the epoch's directory.
-			// Snapshot survives promotion for crash recovery retry.
+			// Use the RESOLVED source path (r.srcPath) which follows the
+			// rename chain to find the actual backing file.
 			epochDir := epochDirFor(b.stagingDir, r.v.Owner)
 			snapDir := filepath.Join(epochDir, "rename-snapshots")
 			snapPath := filepath.Join(snapDir, fmt.Sprintf("snap-%d", r.v.ID))

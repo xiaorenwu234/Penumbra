@@ -558,3 +558,184 @@ func TestDownstreamBlockedUntilUpstreamFinalized(t *testing.T) {
 		t.Fatal("backing contents wrong after group settle")
 	}
 }
+
+// --- Rename batch planner tests ---
+
+// TestRenameSwap tests the classic swap pattern: a→tmp, b→a, tmp→b.
+func TestRenameSwap(t *testing.T) {
+	b, orig, _ := newTestBackend(t)
+	a := writeOrig(t, orig, "a.txt", "content-a")
+	bPath := writeOrig(t, orig, "b.txt", "content-b")
+	tmp := filepath.Join(orig, "tmp.txt")
+
+	// Perform swap: a→tmp, b→a, tmp→b
+	if err := b.RecordRename("E", a, tmp); err != nil {
+		t.Fatalf("rename a→tmp: %v", err)
+	}
+	if err := b.RecordRename("E", bPath, a); err != nil {
+		t.Fatalf("rename b→a: %v", err)
+	}
+	if err := b.RecordRename("E", tmp, bPath); err != nil {
+		t.Fatalf("rename tmp→b: %v", err)
+	}
+
+	// Verify speculative view.
+	if r := b.Resolve("E", a); !r.Exists || readFile(t, r.PhysicalPath) != "content-b" {
+		t.Fatal("speculative a should have content-b")
+	}
+	if r := b.Resolve("E", bPath); !r.Exists || readFile(t, r.PhysicalPath) != "content-a" {
+		t.Fatal("speculative b should have content-a")
+	}
+
+	// Commit and verify backing.
+	mustCommitFinalized(t, b, "E")
+	if readFile(t, a) != "content-b" {
+		t.Fatalf("backing a = %q, want content-b", readFile(t, a))
+	}
+	if readFile(t, bPath) != "content-a" {
+		t.Fatalf("backing b = %q, want content-a", readFile(t, bPath))
+	}
+	if _, err := os.Lstat(tmp); !os.IsNotExist(err) {
+		t.Fatal("tmp should not exist after swap")
+	}
+}
+
+// TestRenameThreeCycle tests a three-element cycle: a→b, b→c, c→a.
+// Note: Current implementation uses sequential POSIX semantics.
+// Sequential: a→b (b="A"), b→c (c="A"), c→a (a="A")
+// Final: a="A", b deleted, c deleted
+func TestRenameThreeCycle(t *testing.T) {
+	b, orig, _ := newTestBackend(t)
+	a := writeOrig(t, orig, "a.txt", "A")
+	bPath := writeOrig(t, orig, "b.txt", "B")
+	c := writeOrig(t, orig, "c.txt", "C")
+
+	// Cycle: a→b, b→c, c→a
+	if err := b.RecordRename("E", a, bPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecordRename("E", bPath, c); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecordRename("E", c, a); err != nil {
+		t.Fatal(err)
+	}
+
+	mustCommitFinalized(t, b, "E")
+	// Sequential semantics: all content flows to a, b and c are deleted.
+	if readFile(t, a) != "A" {
+		t.Fatalf("a = %q, want A", readFile(t, a))
+	}
+	if _, err := os.Lstat(bPath); !os.IsNotExist(err) {
+		t.Fatal("b should not exist (sequential semantics)")
+	}
+	if _, err := os.Lstat(c); !os.IsNotExist(err) {
+		t.Fatal("c should not exist (sequential semantics)")
+	}
+}
+
+// TestRenameChain tests a chain: a→b, b→c (no cycle).
+// POSIX semantics: sequential renames, so b is deleted by the second rename.
+func TestRenameChain(t *testing.T) {
+	b, orig, _ := newTestBackend(t)
+	a := writeOrig(t, orig, "a.txt", "A")
+	bPath := writeOrig(t, orig, "b.txt", "B")
+	c := filepath.Join(orig, "c.txt")
+
+	// Chain: a→b, b→c
+	// After a→b: b="A", a deleted
+	// After b→c: c="A", b deleted
+	if err := b.RecordRename("E", a, bPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecordRename("E", bPath, c); err != nil {
+		t.Fatal(err)
+	}
+
+	mustCommitFinalized(t, b, "E")
+	if _, err := os.Lstat(a); !os.IsNotExist(err) {
+		t.Fatal("a should not exist")
+	}
+	if _, err := os.Lstat(bPath); !os.IsNotExist(err) {
+		t.Fatal("b should not exist (deleted by second rename)")
+	}
+	if readFile(t, c) != "A" {
+		t.Fatalf("c = %q, want A", readFile(t, c))
+	}
+}
+
+// TestRenameThenWriteDestination tests rename followed by write to destination.
+func TestRenameThenWriteDestination(t *testing.T) {
+	b, orig, _ := newTestBackend(t)
+	a := writeOrig(t, orig, "a.txt", "original")
+	bPath := filepath.Join(orig, "b.txt")
+
+	if err := b.RecordRename("E", a, bPath); err != nil {
+		t.Fatal(err)
+	}
+	// Write to destination after rename.
+	stageWrite(t, b, "E", bPath, "modified")
+
+	mustCommitFinalized(t, b, "E")
+	if readFile(t, bPath) != "modified" {
+		t.Fatalf("b = %q, want modified", readFile(t, bPath))
+	}
+}
+
+// TestRenameRollbackCleansSnapshots verifies rollback removes all snapshots.
+func TestRenameRollbackCleansSnapshots(t *testing.T) {
+	b, orig, staging := newTestBackend(t)
+	a := writeOrig(t, orig, "a.txt", "A")
+	bPath := writeOrig(t, orig, "b.txt", "B")
+	tmp := filepath.Join(orig, "tmp.txt")
+
+	// Create conflicting renames (swap).
+	b.RecordRename("E", a, tmp)
+	b.RecordRename("E", bPath, a)
+	b.RecordRename("E", tmp, bPath)
+
+	// Rollback.
+	if _, err := b.RollbackWithAffected("E"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify no residual snapshots.
+	snapDir := filepath.Join(staging, "epochs", "E", "rename-snapshots")
+	if _, err := os.Lstat(snapDir); !os.IsNotExist(err) {
+		t.Fatalf("snapshot dir should not exist after rollback: %v", err)
+	}
+
+	// Verify backing unchanged.
+	if readFile(t, a) != "A" || readFile(t, bPath) != "B" {
+		t.Fatal("backing should be unchanged after rollback")
+	}
+}
+
+// TestRenameIndependentFastPath verifies independent renames use fast path (no snapshot).
+func TestRenameIndependentFastPath(t *testing.T) {
+	b, orig, staging := newTestBackend(t)
+	a := writeOrig(t, orig, "a1.txt", "A1")
+	bPath := writeOrig(t, orig, "a2.txt", "A2")
+	a1New := filepath.Join(orig, "b1.txt")
+	a2New := filepath.Join(orig, "b2.txt")
+
+	// Independent renames (no conflict).
+	if err := b.RecordRename("E", a, a1New); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecordRename("E", bPath, a2New); err != nil {
+		t.Fatal(err)
+	}
+
+	mustCommitFinalized(t, b, "E")
+
+	// Verify no snapshots were created for independent renames.
+	snapDir := filepath.Join(staging, "epochs", "E", "rename-snapshots")
+	if _, err := os.Lstat(snapDir); !os.IsNotExist(err) {
+		t.Fatal("independent renames should not create snapshots")
+	}
+
+	if readFile(t, a1New) != "A1" || readFile(t, a2New) != "A2" {
+		t.Fatal("independent rename results wrong")
+	}
+}
