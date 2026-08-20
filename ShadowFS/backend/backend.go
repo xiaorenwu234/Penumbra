@@ -1920,6 +1920,14 @@ func (b *Backend) RollbackWithAffected(epochID EpochID) (AffectedSet, error) {
 		return AffectedSet{}, err
 	}
 
+	// Fix 3: WAL barrier BEFORE deleting recovery state (fail-closed).
+	// One global fsync for the entire cascade rollback.
+	if err := b.FlushEpochWAL(epochID); err != nil {
+		log.Printf("[backend] Rollback WAL barrier failed: %v", err)
+		b.applyTurnAbort(seqNum)
+		return AffectedSet{}, fmt.Errorf("rollback WAL barrier: %w", err)
+	}
+
 	b.mu.Lock()
 	b.applyTurnWait(seqNum)
 	defer func() {
@@ -2024,14 +2032,8 @@ func (b *Backend) rollbackInternal(epochID EpochID) error {
 	}
 
 	// Remove staging payload and epoch records, then prune graph edges.
-	// Fix 3: WAL barrier BEFORE deleting recovery state. This ensures the
-	// rollback record is durable before we delete the staging directory.
-	for id := range affected {
-		if err := b.FlushEpochWAL(id); err != nil {
-			log.Printf("[backend] Rollback: WAL flush for %q failed: %v", id, err)
-			// Continue anyway - fail closed means epoch stays fenced.
-		}
-	}
+	// Note: WAL barrier is done by caller (RollbackWithAffected) before
+	// calling this function. This ensures fail-closed semantics.
 	for id := range affected {
 		if err := os.RemoveAll(epochDirFor(b.stagingDir, id)); err != nil {
 			log.Printf("[backend] Rollback: remove stage dir of %q: %v", id, err)
@@ -2320,6 +2322,12 @@ func (b *Backend) AckRelease(epochID EpochID) error {
 		return fmt.Errorf("ack_release WAL: %w", err)
 	}
 
+	// Fix 3: WAL barrier BEFORE deleting recovery state (fail-closed).
+	if err := b.FlushEpochWAL(epochID); err != nil {
+		b.applyTurnAbort(seqNum)
+		return fmt.Errorf("ack_release WAL barrier: %w", err)
+	}
+
 	b.mu.Lock()
 	b.applyTurnWait(seqNum)
 	defer func() {
@@ -2332,6 +2340,7 @@ func (b *Backend) AckRelease(epochID EpochID) error {
 
 // ackReleaseInternal drops a Finalized epoch's terminal record and its
 // (already-consumed) staging tree. Must be called with b.mu held. Idempotent.
+// Note: WAL barrier is done by caller (AckRelease) before calling this.
 func (b *Backend) ackReleaseInternal(epochID EpochID) {
 	ep, ok := b.epochs[epochID]
 	if !ok {
@@ -2342,10 +2351,6 @@ func (b *Backend) ackReleaseInternal(epochID EpochID) {
 		// against a stale release_ack for an epoch that (post-checkpoint)
 		// is not yet finalized: leave it in place to be re-finalized.
 		return
-	}
-	// Fix 3: WAL barrier BEFORE deleting recovery state.
-	if err := b.FlushEpochWAL(epochID); err != nil {
-		log.Printf("[backend] release_ack: WAL flush for %q failed: %v", epochID, err)
 	}
 	delete(b.epochs, epochID)
 	if ep.CgroupID != "" && b.activeEpochByCgroup[ep.CgroupID] == epochID {

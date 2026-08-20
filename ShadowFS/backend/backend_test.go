@@ -600,37 +600,43 @@ func TestRenameSwap(t *testing.T) {
 	}
 }
 
-// TestRenameThreeCycle tests a three-element cycle: a→b, b→c, c→a.
-// Note: Current implementation uses sequential POSIX semantics.
-// Sequential: a→b (b="A"), b→c (c="A"), c→a (a="A")
-// Final: a="A", b deleted, c deleted
+// TestRenameThreeCycle tests a true three-element swap using a temp file:
+// a→tmp, b→a, c→b, tmp→c
+// Result: a=B, b=C, c=A
 func TestRenameThreeCycle(t *testing.T) {
 	b, orig, _ := newTestBackend(t)
 	a := writeOrig(t, orig, "a.txt", "A")
 	bPath := writeOrig(t, orig, "b.txt", "B")
 	c := writeOrig(t, orig, "c.txt", "C")
+	tmp := filepath.Join(orig, "tmp.txt")
 
-	// Cycle: a→b, b→c, c→a
-	if err := b.RecordRename("E", a, bPath); err != nil {
+	// Four-element swap: a→tmp, b→a, c→b, tmp→c
+	if err := b.RecordRename("E", a, tmp); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.RecordRename("E", bPath, c); err != nil {
+	if err := b.RecordRename("E", bPath, a); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.RecordRename("E", c, a); err != nil {
+	if err := b.RecordRename("E", c, bPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecordRename("E", tmp, c); err != nil {
 		t.Fatal(err)
 	}
 
 	mustCommitFinalized(t, b, "E")
-	// Sequential semantics: all content flows to a, b and c are deleted.
-	if readFile(t, a) != "A" {
-		t.Fatalf("a = %q, want A", readFile(t, a))
+	// Verify three-way swap: a=B, b=C, c=A
+	if readFile(t, a) != "B" {
+		t.Fatalf("a = %q, want B", readFile(t, a))
 	}
-	if _, err := os.Lstat(bPath); !os.IsNotExist(err) {
-		t.Fatal("b should not exist (sequential semantics)")
+	if readFile(t, bPath) != "C" {
+		t.Fatalf("b = %q, want C", readFile(t, bPath))
 	}
-	if _, err := os.Lstat(c); !os.IsNotExist(err) {
-		t.Fatal("c should not exist (sequential semantics)")
+	if readFile(t, c) != "A" {
+		t.Fatalf("c = %q, want A", readFile(t, c))
+	}
+	if _, err := os.Lstat(tmp); !os.IsNotExist(err) {
+		t.Fatal("tmp should not exist after swap")
 	}
 }
 
@@ -694,13 +700,26 @@ func TestRenameRollbackCleansSnapshots(t *testing.T) {
 	b.RecordRename("E", bPath, a)
 	b.RecordRename("E", tmp, bPath)
 
+	// Call planRenames to create snapshots (this is what happens during commit).
+	b.mu.Lock()
+	err := b.planRenames()
+	b.mu.Unlock()
+	if err != nil {
+		t.Fatalf("planRenames: %v", err)
+	}
+
+	// Verify snapshots were created.
+	snapDir := filepath.Join(staging, "epochs", "E", "rename-snapshots")
+	if _, err := os.Lstat(snapDir); os.IsNotExist(err) {
+		t.Fatal("snapshot dir should exist after planRenames")
+	}
+
 	// Rollback.
 	if _, err := b.RollbackWithAffected("E"); err != nil {
 		t.Fatal(err)
 	}
 
-	// Verify no residual snapshots.
-	snapDir := filepath.Join(staging, "epochs", "E", "rename-snapshots")
+	// Verify snapshots are cleaned up.
 	if _, err := os.Lstat(snapDir); !os.IsNotExist(err) {
 		t.Fatalf("snapshot dir should not exist after rollback: %v", err)
 	}

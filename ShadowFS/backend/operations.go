@@ -87,36 +87,39 @@ func promoteVersion(v *FileVersion) error {
 			st, _ := os.Lstat(src)
 			isDir := st != nil && st.IsDir()
 
-			// For directories: destination must not exist or must be empty.
+			// Create unique temporary in destination parent.
+			// Use os.CreateTemp/os.MkdirTemp for atomic unique name.
+			var tmpDst string
 			if isDir {
-				if dstStat, err := os.Lstat(orig); err == nil {
-					if dstStat.IsDir() {
-						// Check if empty.
-						entries, _ := os.ReadDir(orig)
-						if len(entries) > 0 {
-							return fmt.Errorf("promote rename: destination %q is non-empty directory", orig)
-						}
-						os.Remove(orig) // Remove empty dir
-					} else {
-						os.Remove(orig) // Remove file
-					}
+				tmp, err := os.MkdirTemp(parent, ".penumbra-rename-*")
+				if err != nil {
+					return fmt.Errorf("promote rename create temp dir: %w", err)
 				}
-			}
-
-			// Copy to unique temporary, then atomic rename to destination.
-			tmpDst := fmt.Sprintf("%s.penumbra-snap-%d", orig, v.ID)
-			if isDir {
+				tmpDst = tmp
+				// Remove the empty temp dir so copyUpDir can create it.
+				os.Remove(tmpDst)
 				if err := copyUpDir(src, tmpDst); err != nil {
-					os.RemoveAll(tmpDst) // Clean up on failure
+					os.RemoveAll(tmpDst)
 					return fmt.Errorf("promote rename copy dir: %w", err)
 				}
 			} else {
+				tmp, err := os.CreateTemp(parent, ".penumbra-rename-*")
+				if err != nil {
+					return fmt.Errorf("promote rename create temp file: %w", err)
+				}
+				tmpDst = tmp.Name()
+				tmp.Close()
+				os.Remove(tmpDst) // copyUpFile will create it
 				if err := copyUpFile(src, tmpDst); err != nil {
-					os.Remove(tmpDst) // Clean up on failure
+					os.Remove(tmpDst)
 					return fmt.Errorf("promote rename copy file: %w", err)
 				}
 			}
-			// Atomic install: rename overwrites file or empty dir.
+			// Atomic install: rename(2) handles file/dir replacement correctly.
+			// - file over file: OK
+			// - dir over empty dir: OK
+			// - dir over non-empty dir: ENOTEMPTY
+			// - type mismatch: appropriate error
 			if err := os.Rename(tmpDst, orig); err != nil {
 				if isDir {
 					os.RemoveAll(tmpDst)
