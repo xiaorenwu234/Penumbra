@@ -35,8 +35,7 @@ type ObjectID = string
 type VersionOp int
 
 const (
-	// OpWrite: file content (create / modify / copy-up target / rename
-	// destination / setattr / xattr change). StagePath holds the content.
+	// OpWrite: file content (create / modify / copy-up target / setattr / xattr change). StagePath holds the content.
 	OpWrite VersionOp = iota
 	// OpMkdir: a directory created speculatively.
 	OpMkdir
@@ -50,6 +49,10 @@ const (
 	// OpXattr is reserved for standalone metadata versions; the current
 	// implementation routes xattr/metadata changes through OpWrite copy-up.
 	OpXattr
+	// OpRename: a namespace-only rename. The new path references the old
+	// path's physical version without copying content. Copy-up is deferred
+	// until the renamed path is written. RenameFrom holds the source path.
+	OpRename
 )
 
 func (op VersionOp) String() string {
@@ -66,6 +69,8 @@ func (op VersionOp) String() string {
 		return "mknod"
 	case OpXattr:
 		return "xattr"
+	case OpRename:
+		return "rename"
 	default:
 		return "unknown"
 	}

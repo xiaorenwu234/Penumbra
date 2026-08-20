@@ -52,6 +52,38 @@ func promoteVersion(v *FileVersion) error {
 		}
 		return nil
 
+	case OpRename:
+		// Optimization 2: namespace-only rename. StagePath stores the source's
+		// PHYSICAL path (stage file or orig file). Move it to the destination.
+		src := v.StagePath // physical path of source
+		if src == "" {
+			// Fallback to RenameFrom (logical path) for backward compatibility.
+			src = v.RenameFrom
+		}
+		if src == "" {
+			return fmt.Errorf("promote rename %q: missing source path", orig)
+		}
+		// Ensure destination parent exists.
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return fmt.Errorf("promote rename mkdir parent: %w", err)
+		}
+		// If source doesn't exist, check if rename already done (idempotent).
+		if _, err := os.Lstat(src); os.IsNotExist(err) {
+			if _, err := os.Lstat(orig); err == nil {
+				return nil // already renamed
+			}
+			return fmt.Errorf("promote rename: source %q missing and dest %q absent", src, orig)
+		}
+		// Perform the atomic rename. Use movePath for cross-device support.
+		if err := movePath(src, orig); err != nil {
+			return fmt.Errorf("promote rename %q -> %q: %w", src, orig, err)
+		}
+		// Fsync destination parent directory.
+		if err := fsyncDir(parent); err != nil {
+			return fmt.Errorf("promote rename fsync dest parent %q: %w", parent, err)
+		}
+		return nil
+
 	case OpMkdir:
 		mode := os.FileMode(v.Mode)
 		if mode == 0 {
@@ -63,9 +95,7 @@ func promoteVersion(v *FileVersion) error {
 		if err := os.Mkdir(orig, mode); err != nil && !os.IsExist(err) {
 			return fmt.Errorf("promote mkdir %q: %w", orig, err)
 		}
-		if err := fsyncDir(parent); err != nil {
-			return fmt.Errorf("promote mkdir fsync parent %q: %w", parent, err)
-		}
+		// Optimization 3: directory fsync deferred to publishBarrier.
 		return nil
 
 	case OpLink:
@@ -79,9 +109,7 @@ func promoteVersion(v *FileVersion) error {
 		if err := os.Link(v.LinkTarget, orig); err != nil && !os.IsExist(err) {
 			return fmt.Errorf("promote link %q -> %q: %w", v.LinkTarget, orig, err)
 		}
-		if err := fsyncDir(parent); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("promote link fsync parent %q: %w", parent, err)
-		}
+		// Optimization 3: directory fsync deferred to publishBarrier.
 		return nil
 
 	case OpMknod:
@@ -93,9 +121,7 @@ func promoteVersion(v *FileVersion) error {
 				return fmt.Errorf("promote mknod %q (mode=%#o): %w", orig, v.Mode, err)
 			}
 		}
-		if err := fsyncDir(parent); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("promote mknod fsync parent %q: %w", parent, err)
-		}
+		// Optimization 3: directory fsync deferred to publishBarrier.
 		return nil
 
 	default: // OpWrite / OpXattr: content-bearing stage payload
@@ -114,17 +140,15 @@ func promoteVersion(v *FileVersion) error {
 		if err := movePath(v.StagePath, orig); err != nil {
 			return fmt.Errorf("promote write %q -> %q: %w", v.StagePath, orig, err)
 		}
+		// Fsync the data file for durability (file contents must be stable).
 		if st.Mode().IsRegular() {
 			if err := fsyncFile(orig); err != nil {
 				return fmt.Errorf("promote write fsync file %q: %w", orig, err)
 			}
 		}
-		if err := fsyncDir(parent); err != nil {
-			return fmt.Errorf("promote write fsync dest dir %q: %w", parent, err)
-		}
-		if err := fsyncDir(filepath.Dir(v.StagePath)); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("promote write fsync src dir %q: %w", filepath.Dir(v.StagePath), err)
-		}
+		// Optimization 3: directory fsyncs deferred to publishBarrier.
+		// - dest parent dir fsync: handled by publishBarrier
+		// - src staging dir fsync: removed (recovery cleans orphan stage files)
 		return nil
 	}
 }

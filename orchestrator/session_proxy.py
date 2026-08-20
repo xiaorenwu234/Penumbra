@@ -471,6 +471,7 @@ class _Session:
         self.log_path = os.path.join(
             _SESSION_DIR, f"shadow-session-{session_id}.log")
         self.fifo_wfd = None        # held-open write end (keeps FIFO from EOF)
+        self.log_fd = None          # held-open log file for fast polling
         self.live_pid = None        # current canonical pid (agent never sees it)
         self.epoch = None           # {"baseline": pid, "candidate": pid} or None
         # Identity of the in-flight epoch, used to tag transcript entries.
@@ -644,6 +645,11 @@ class SessionProxy:
     def _feed(self, sess, line):
         os.write(sess.fifo_wfd, (line + "\n").encode())
 
+    def _feed_batch(self, sess, lines):
+        """Feed multiple lines in a single write (reduces syscall overhead)."""
+        data = "".join(line + "\n" for line in lines)
+        os.write(sess.fifo_wfd, data.encode())
+
     def _loglines_from(self, sess, pos):
         """Read the session log from byte offset `pos`, returning the
         complete lines that ended at or after it.  A trailing partial line
@@ -653,11 +659,16 @@ class SessionProxy:
         The cursor is a BYTE offset (seek() is byte-based); the line
         splitting is done after decoding, so multibyte output (e.g. bash's
         localized "killed" notices) cannot shift the cursor.
+
+        Optimization: keep the log file handle open to avoid open() syscall
+        on every poll.
         """
         try:
-            with open(sess.log_path, "rb") as fh:
-                fh.seek(pos)
-                data = fh.read()
+            if sess.log_fd is None:
+                sess.log_fd = open(sess.log_path, "rb")
+            fh = sess.log_fd
+            fh.seek(pos)
+            data = fh.read()
         except OSError:
             return []
         if not data:
@@ -694,10 +705,11 @@ class SessionProxy:
         sentinel = f"__SHADOW_DONE_{next(self._sentinel_ids)}__"
         rc_marker = f"__SHADOW_RC_{sentinel}__"
         n0 = sess._log_pos
-        self._feed(sess, command)
-        self._feed(sess, f"echo {rc_marker}$?")
-        self._feed(sess, f"echo {sentinel}")
+        # Optimization: batch all three lines into a single write syscall.
+        self._feed_batch(sess, [command, f"echo {rc_marker}$?", f"echo {sentinel}"])
         deadline = time.time() + timeout
+        # Optimization: use adaptive polling — busy-wait first, then back off.
+        poll_count = 0
         while time.time() < deadline:
             lines = self._loglines_from(sess, n0)
             if sentinel in lines:
@@ -718,7 +730,13 @@ class SessionProxy:
                 # straight back to the caller.
                 sess.transcript.append((sess.epoch_id, out))
                 return out, rc
-            time.sleep(0.001)
+            # Adaptive polling: no sleep for first 10 polls, then 0.1ms, then 1ms.
+            poll_count += 1
+            if poll_count > 100:
+                time.sleep(0.001)
+            elif poll_count > 10:
+                time.sleep(0.0001)
+            # else: busy-wait (no sleep)
         self._recover_from_timeout(sess, sentinel)
         raise TimeoutError(f"command timed out: {command!r}")
 
@@ -1432,6 +1450,12 @@ class SessionProxy:
                 os.close(sess.fifo_wfd)
             except OSError:
                 pass
+        if sess.log_fd is not None:
+            try:
+                sess.log_fd.close()
+            except OSError:
+                pass
+            sess.log_fd = None
         # Release the eBPF cgroup slot so the daemon can reclaim it. Without this
         # every session permanently consumes one of the 64 cgroup_map slots.
         try:

@@ -436,6 +436,14 @@ type walFrame struct {
 // matches the begin frame. An incomplete tail transaction is discarded; corrupt
 // or incomplete transactions followed by later data fail closed during load.
 func appendWAL(path string, records []WALRecord) error {
+	return appendWALEx(path, records, false, false)
+}
+
+// appendWALEx is the extended version of appendWAL with options:
+//   - skipDirSync: skip parent directory fsync (Optimization 4)
+//   - skipFileSync: skip WAL file fsync (Optimization 1: deferred to FlushEpochWAL)
+func appendWALEx(path string, records []WALRecord, skipDirSync bool, skipFileSync ...bool) error {
+	noFsync := len(skipFileSync) > 0 && skipFileSync[0]
 	if len(records) == 0 {
 		return nil
 	}
@@ -475,17 +483,23 @@ func appendWAL(path string, records []WALRecord) error {
 		f.Close()
 		return fmt.Errorf("write WAL transaction: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return fmt.Errorf("fsync WAL file: %w", err)
+	// Optimization 1: skip file fsync during normal operations; deferred
+	// to FlushEpochWAL at commit time.
+	if !noFsync {
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return fmt.Errorf("fsync WAL file: %w", err)
+		}
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close WAL file: %w", err)
 	}
-	// fsync the parent directory so the WAL file's directory entry is
-	// durable (critical when the file is first created).
-	if err := fsyncDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("fsync WAL dir: %w", err)
+	// Optimization 4: fsync the parent directory only when the WAL file is
+	// first created (skipDirSync=false).
+	if !skipDirSync && !noFsync {
+		if err := fsyncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("fsync WAL dir: %w", err)
+		}
 	}
 	return nil
 }

@@ -57,6 +57,23 @@ const (
 	checkpointWALThreshold = 1000            // force checkpoint when WAL exceeds this
 )
 
+// debugLog controls per-object debug logging. When false (default), only
+// epoch-level summary statistics are logged. Set via SetDebugLog.
+var debugLog atomic.Bool
+
+// EpochStats accumulates per-epoch operation counters for summary logging.
+type EpochStats struct {
+	Versions    int64 // total versions created
+	Creates     int64 // file creates (OpWrite without RenameFrom)
+	Renames     int64 // rename operations
+	Whiteouts   int64 // unlink/rmdir operations
+	Mkdirs      int64 // directory creates
+	WALFlushes  int64 // WAL flush calls
+	FileFsyncs  int64 // file fsync calls
+	DirFsyncs   int64 // directory fsync calls
+	PromoteTime time.Duration
+}
+
 // walPending is one submission unit handed off to the WAL worker. A single
 // submission may carry multiple records that should be fsync'd atomically
 // (e.g. a rename produces two version records). The worker writes accumulated
@@ -164,6 +181,17 @@ type Backend struct {
 	graphGen     int64
 	activeGroups map[int]*finalizeGroup
 	nextGroupID  int
+
+	// Epoch-local WAL buffer for batched persistence (Optimization 1).
+	// Records are buffered per-epoch and flushed with a single fsync when
+	// FlushEpochWAL is called (before results are released to the agent).
+	epochWALBuf   map[EpochID][]WALRecord
+	epochWALMu    sync.Mutex
+	walFileExists bool // tracks if WAL file has been created (for Opt 4)
+
+	// Per-epoch statistics for summary logging (Optimization 5).
+	epochStats   map[EpochID]*EpochStats
+	epochStatsMu sync.Mutex
 }
 
 // SetMountDir records the FUSE mountpoint so commit-time writable-MAP_SHARED
@@ -218,8 +246,16 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 		stopCh:              make(chan struct{}),
 		chkptDone:           make(chan struct{}),
 		activeGroups:        make(map[int]*finalizeGroup),
+		epochWALBuf:         make(map[EpochID][]WALRecord),
+		epochStats:          make(map[EpochID]*EpochStats),
 	}
 	b.applyCond = sync.NewCond(&b.mu)
+
+	// Check if WAL file already exists (for Optimization 4: skip parent
+	// dir fsync on subsequent appends).
+	if _, err := os.Stat(b.walPath); err == nil {
+		b.walFileExists = true
+	}
 
 	// --- Crash recovery (fail closed on unreadable state) ---
 	if _, err := os.Stat(b.persistPath); err == nil {
@@ -409,8 +445,15 @@ func (b *Backend) flushPending() {
 	for _, p := range batch {
 		allRecs = append(allRecs, p.recs...)
 	}
-	err := appendWAL(b.walPath, allRecs)
+	// Optimization 1+4: write WAL without fsync (deferred to FlushEpochWAL);
+	// skip parent dir fsync if WAL file already exists.
+	skipDirSync := b.walFileExists
+	err := appendWALEx(b.walPath, allRecs, skipDirSync, true) // true = skipFileSync
 	if err == nil {
+		// Mark WAL file as existing after first successful append.
+		if !b.walFileExists {
+			b.walFileExists = true
+		}
 		b.mu.Lock()
 		b.walCount += int64(len(allRecs))
 		over := b.walCount >= checkpointWALThreshold
@@ -536,6 +579,93 @@ func (b *Backend) TrackedDir() string { return b.trackedDir }
 
 // StagingDir returns the staging directory passed to NewBackend.
 func (b *Backend) StagingDir() string { return b.stagingDir }
+
+// SetDebugLog enables or disables per-object debug logging. When disabled
+// (default), only epoch-level summary statistics are logged.
+func SetDebugLog(enabled bool) { debugLog.Store(enabled) }
+
+// --- Epoch-local WAL buffer (Optimization 1: batched persistence) ---
+
+// bufferWALRecord adds a WAL record to the epoch's local buffer instead of
+// immediately submitting for fsync. The record will be persisted when
+// FlushEpochWAL is called.
+func (b *Backend) bufferWALRecord(epochID EpochID, rec WALRecord) {
+	b.epochWALMu.Lock()
+	b.epochWALBuf[epochID] = append(b.epochWALBuf[epochID], rec)
+	b.epochWALMu.Unlock()
+}
+
+// FlushEpochWAL fsyncs the WAL file to ensure all previously written
+// (but not yet synced) records are durable. This is the WAL barrier that
+// must succeed before the epoch's results are released to the agent.
+//
+// Recovery rule: if the system crashes before this barrier, the epoch is
+// treated as incomplete and its orphan staging files are cleaned up.
+func (b *Backend) FlushEpochWAL(epochID EpochID) error {
+	// Fsync the WAL file to make all buffered writes durable.
+	f, err := os.OpenFile(b.walPath, os.O_WRONLY, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // no WAL file yet, nothing to sync
+		}
+		return fmt.Errorf("flush epoch WAL %q: open: %w", epochID, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("flush epoch WAL %q: fsync: %w", epochID, err)
+	}
+	f.Close()
+
+	// Also fsync parent dir on first creation.
+	if !b.walFileExists {
+		b.walFileExists = true
+		if err := fsyncDir(filepath.Dir(b.walPath)); err != nil {
+			return fmt.Errorf("flush epoch WAL %q: dir fsync: %w", epochID, err)
+		}
+	}
+
+	// Update epoch stats.
+	b.epochStatsMu.Lock()
+	if stats := b.epochStats[epochID]; stats != nil {
+		stats.WALFlushes++
+	}
+	b.epochStatsMu.Unlock()
+
+	if debugLog.Load() {
+		log.Printf("[backend] FlushEpochWAL: epoch=%q WAL fsync complete", epochID)
+	}
+	return nil
+}
+
+// --- Epoch statistics (Optimization 5: summary logging) ---
+
+// getEpochStats returns or creates the stats accumulator for an epoch.
+func (b *Backend) getEpochStats(epochID EpochID) *EpochStats {
+	b.epochStatsMu.Lock()
+	defer b.epochStatsMu.Unlock()
+	stats := b.epochStats[epochID]
+	if stats == nil {
+		stats = &EpochStats{}
+		b.epochStats[epochID] = stats
+	}
+	return stats
+}
+
+// LogEpochSummary logs the accumulated statistics for an epoch and clears
+// the accumulator. Called at epoch finalization or release.
+func (b *Backend) LogEpochSummary(epochID EpochID) {
+	b.epochStatsMu.Lock()
+	stats := b.epochStats[epochID]
+	delete(b.epochStats, epochID)
+	b.epochStatsMu.Unlock()
+
+	if stats == nil || stats.Versions == 0 {
+		return
+	}
+	log.Printf("[backend] epoch=%q summary: versions=%d creates=%d renames=%d whiteouts=%d mkdirs=%d wal_flushes=%d file_fsyncs=%d dir_fsyncs=%d promote_time=%v",
+		epochID, stats.Versions, stats.Creates, stats.Renames, stats.Whiteouts,
+		stats.Mkdirs, stats.WALFlushes, stats.FileFsyncs, stats.DirFsyncs, stats.PromoteTime)
+}
 
 // --- FD tracking ---
 
@@ -1323,6 +1453,13 @@ func (b *Backend) materializeVersionLocked(v *FileVersion) error {
 		}
 		return nil
 
+	case OpRename:
+		// Optimization 2: OpRename is namespace-only; NO physical stage
+		// payload is created. The new path references the old path's
+		// physical version. Copy-up is deferred until the renamed path
+		// is actually written (via PrepareWrite on the new path).
+		return nil
+
 	case OpMkdir:
 		if err := ensureParentDir(v.StagePath); err != nil {
 			return err
@@ -1419,23 +1556,13 @@ func (b *Backend) createVersion(epochID EpochID, origPath string, spec versionSp
 	defer b.opRW.RUnlock()
 
 	obj := filepath.Clean(origPath)
-	if spec.op != OpWhiteout {
-		if _, err := relFromTracked(b.trackedDir, obj); err != nil {
-			return nil, err
-		}
-	} else {
-		// Whiteouts still need path validation (escape rejection).
-		if _, err := relFromTracked(b.trackedDir, obj); err != nil {
-			return nil, err
-		}
+	if _, err := relFromTracked(b.trackedDir, obj); err != nil {
+		return nil, err
 	}
 
 	// --- compute (under mu) ---
 	b.mu.Lock()
 	if spec.op == OpWrite && spec.renameFrom == "" {
-		// Reject writes targeting a symlink: every subsequent mutation
-		// primitive used by Open(W)/Setattr follows symlinks, so the change
-		// would land on the link TARGET and escape version tracking.
 		view := b.resolveLocked(epochID, obj)
 		if view.Exists && view.PhysicalPath != "" {
 			if st, lerr := os.Lstat(view.PhysicalPath); lerr == nil && st.Mode()&os.ModeSymlink != 0 {
@@ -1443,12 +1570,12 @@ func (b *Backend) createVersion(epochID EpochID, origPath string, spec versionSp
 				return nil, syscall.EOPNOTSUPP
 			}
 		}
-		// Dedup: the epoch already owns the newest version of this object
-		// and it carries content — repeated open(W) reuses it.
 		if own := b.latestOwnVersionLocked(epochID, obj); own != nil &&
 			b.visibleHead[obj] == own.ID && own.Operation != OpWhiteout && own.StagePath != "" {
 			b.mu.Unlock()
-			log.Printf("[backend] createVersion: epoch=%q path=%q reuse v%d", epochID, obj, own.ID)
+			if debugLog.Load() {
+				log.Printf("[backend] createVersion: epoch=%q path=%q reuse v%d", epochID, obj, own.ID)
+			}
 			return own, nil
 		}
 	}
@@ -1482,7 +1609,8 @@ func (b *Backend) createVersion(epochID EpochID, origPath string, spec versionSp
 	rec := WALRecord{EpochID: string(epochID), SeqNum: seqNum, Version: &pv}
 	b.mu.Unlock()
 
-	// --- WAL fsync (group-commit) ---
+	// Optimization 1: WAL write without fsync (group-commit worker handles
+	// the write; fsync is deferred to FlushEpochWAL at commit time).
 	if err := <-b.submitWAL(rec); err != nil {
 		b.applyTurnAbort(seqNum)
 		return nil, err
@@ -1497,15 +1625,29 @@ func (b *Backend) createVersion(epochID EpochID, origPath string, spec versionSp
 	}()
 
 	if err := b.materializeVersionLocked(v); err != nil {
-		// The WAL record is durable; replay will retry the same idempotent
-		// materialization. Surface the error but still link the version so
-		// memory and WAL agree (fail closed: rollback removes both).
 		b.insertVersionLocked(v)
 		return nil, fmt.Errorf("materialize %s %q: %w", spec.op, obj, err)
 	}
 	b.insertVersionLocked(v)
-	log.Printf("[backend] createVersion: epoch=%q op=%s path=%q v%d parent=v%d",
-		epochID, spec.op, obj, v.ID, v.Parent)
+
+	// Optimization 5: update epoch stats.
+	stats := b.getEpochStats(epochID)
+	stats.Versions++
+	switch spec.op {
+	case OpWrite:
+		if spec.renameFrom == "" {
+			stats.Creates++
+		}
+	case OpMkdir:
+		stats.Mkdirs++
+	case OpWhiteout:
+		stats.Whiteouts++
+	}
+
+	if debugLog.Load() {
+		log.Printf("[backend] createVersion: epoch=%q op=%s path=%q v%d parent=v%d",
+			epochID, spec.op, obj, v.ID, v.Parent)
+	}
 	return v, nil
 }
 
@@ -1581,8 +1723,12 @@ func (b *Backend) RecordXattrWrite(epochID EpochID, origPath string) (string, er
 }
 
 // RecordRename records a rename as a version PAIR sharing one WAL fsync: a
-// content version at newPath (RenameFrom=oldPath) plus a whiteout version at
+// namespace-only OpRename version at newPath plus a whiteout version at
 // oldPath. Both carry consecutive seqs so replay reconstructs the same order.
+//
+// Optimization 2: OpRename does NOT copy the source file. StagePath stores
+// the source's physical path. At promotion, the source is moved atomically
+// to the destination. Promotion order is guaranteed: OpRename before OpWhiteout.
 func (b *Backend) RecordRename(epochID EpochID, oldPath, newPath string) error {
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
@@ -1621,14 +1767,13 @@ func (b *Backend) RecordRename(epochID EpochID, oldPath, newPath string) error {
 	dstVid := VersionID(b.nextVersion)
 	srcVid := VersionID(b.nextVersion + 1)
 	b.nextVersion += 2
-	dstStage, stageErr := stagePathFor(b.stagingDir, b.trackedDir, epochID, dstVid, cleanNew)
-	if stageErr != nil {
-		b.mu.Unlock()
-		return stageErr
-	}
+
+	// OpRename: StagePath stores the source's PHYSICAL path for promotion.
+	// RenameFrom stores the logical source path for reference.
 	dstV := &FileVersion{
-		ID: dstVid, Owner: epochID, LogicalPath: cleanNew, StagePath: dstStage,
-		Seq: seq1, Operation: OpWrite, State: VSpeculative, RenameFrom: cleanOld,
+		ID: dstVid, Owner: epochID, LogicalPath: cleanNew, StagePath: src.PhysicalPath,
+		Seq: seq1, Operation: OpRename, State: VSpeculative, RenameFrom: cleanOld,
+		Dir: srcIsDir,
 	}
 	srcV := &FileVersion{
 		ID: srcVid, Owner: epochID, LogicalPath: cleanOld,
@@ -1640,17 +1785,14 @@ func (b *Backend) RecordRename(epochID EpochID, oldPath, newPath string) error {
 		{EpochID: string(epochID), SeqNum: seq1, Version: &pv1},
 		{EpochID: string(epochID), SeqNum: seq2, Version: &pv2},
 	}
+
+	// The rename READS the source version it moves: record that dependency.
+	if needSrcDep {
+		b.readDepInternal(epochID, src.Version)
+	}
 	b.mu.Unlock()
 
-	// The rename READS the source version it moves: record that dependency
-	// durably before the mutation lands.
-	if needSrcDep {
-		if err := b.recordReadDep(epochID, src.Version, cleanOld); err != nil {
-			return err
-		}
-	}
-
-	// Both records go in one fsync; share the same waiter.
+	// WAL write without fsync (deferred to FlushEpochWAL).
 	if err := <-b.submitWAL(recs...); err != nil {
 		b.applyTurnAbort(seq1)
 		b.applyTurnAbort(seq2)
@@ -1665,8 +1807,7 @@ func (b *Backend) RecordRename(epochID EpochID, oldPath, newPath string) error {
 		b.mu.Unlock()
 	}()
 
-	// Materialize + insert the destination FIRST (its copy source is the
-	// still-visible old path), then hide the source with its whiteout.
+	// Materialize + insert the destination FIRST, then the source whiteout.
 	if err := b.materializeVersionLocked(dstV); err != nil {
 		b.insertVersionLocked(dstV)
 		b.insertVersionLocked(srcV)
@@ -1675,7 +1816,15 @@ func (b *Backend) RecordRename(epochID EpochID, oldPath, newPath string) error {
 	b.insertVersionLocked(dstV)
 	_ = b.materializeVersionLocked(srcV)
 	b.insertVersionLocked(srcV)
-	log.Printf("[backend] RecordRename: epoch=%q %q -> %q (v%d, v%d)", epochID, cleanOld, cleanNew, dstVid, srcVid)
+
+	// Update epoch stats.
+	stats := b.getEpochStats(epochID)
+	stats.Versions += 2
+	stats.Renames++
+
+	if debugLog.Load() {
+		log.Printf("[backend] RecordRename: epoch=%q %q -> %q (v%d, v%d)", epochID, cleanOld, cleanNew, dstVid, srcVid)
+	}
 	return nil
 }
 
@@ -1708,6 +1857,14 @@ func (b *Backend) rollbackBlockedBy(ids map[EpochID]struct{}) EpochID {
 func (b *Backend) Rollback(epochID EpochID) error {
 	_, err := b.RollbackWithAffected(epochID)
 	return err
+}
+
+// discardEpochWALBuf removes any buffered WAL records for an epoch.
+// Called during rollback — the records are discarded, not persisted.
+func (b *Backend) discardEpochWALBuf(epochID EpochID) {
+	b.epochWALMu.Lock()
+	delete(b.epochWALBuf, epochID)
+	b.epochWALMu.Unlock()
 }
 
 // RollbackWithAffected performs a cascading rollback and returns the
@@ -1810,8 +1967,10 @@ func (b *Backend) rollbackInternal(epochID EpochID) error {
 
 	// Force-close every tracked fd of affected epochs BEFORE the version
 	// files disappear, so processes get EBADF instead of stale data.
+	// Also discard buffered WAL records — they won't be persisted.
 	for id := range affected {
 		b.CloseEpochFDs(id)
+		b.discardEpochWALBuf(id)
 	}
 
 	// Collect touched objects and rebuild their chains without the affected
@@ -1983,6 +2142,13 @@ func (b *Backend) Commit(epochID EpochID) (CommitResult, error) {
 		return CommitResult{}, err
 	}
 
+	// Optimization 1: Flush buffered WAL records before promotion.
+	// This is the WAL barrier — all epoch records are persisted with one fsync.
+	if err := b.FlushEpochWAL(epochID); err != nil {
+		log.Printf("[backend] Commit: epoch=%q WAL flush failed: %v", epochID, err)
+		return CommitResult{}, err
+	}
+
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 	b.mu.Lock()
@@ -2033,6 +2199,12 @@ func (b *Backend) commitInternal(epochID EpochID) {
 // (one left in AuthorizedPending/Finalizing by an earlier promotion failure).
 // Safe to call repeatedly: every promoteVersion is idempotent.
 func (b *Backend) RetryFinalize(epochID EpochID) (CommitResult, error) {
+	// Optimization 1: Flush any remaining buffered WAL records.
+	if err := b.FlushEpochWAL(epochID); err != nil {
+		log.Printf("[backend] RetryFinalize: epoch=%q WAL flush failed: %v", epochID, err)
+		return CommitResult{}, err
+	}
+
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 	b.mu.Lock()
@@ -2190,7 +2362,20 @@ func (b *Backend) tryPromoteAll() error {
 		// Promote deeper paths first so that e.g. child whiteouts empty a
 		// directory on the backing side before the directory itself is
 		// renamed/removed by its own head version.
+		// Optimization 2: OpRename MUST be promoted before OpWhiteout to
+		// ensure the source file is moved before the whiteout deletes it.
 		sort.Slice(objects, func(i, j int) bool {
+			hi := b.versionByID[b.visibleHead[objects[i]]]
+			hj := b.versionByID[b.visibleHead[objects[j]]]
+			// Prioritize OpRename over OpWhiteout.
+			if hi != nil && hj != nil {
+				if hi.Operation == OpRename && hj.Operation == OpWhiteout {
+					return true
+				}
+				if hi.Operation == OpWhiteout && hj.Operation == OpRename {
+					return false
+				}
+			}
 			di := strings.Count(objects[i], string(os.PathSeparator))
 			dj := strings.Count(objects[j], string(os.PathSeparator))
 			if di != dj {
