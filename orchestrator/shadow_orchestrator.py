@@ -2143,6 +2143,20 @@ class ShadowOrchestrator:
         epoch_id = self._session_epoch(session_id)
         log.info("SESSION_COMMIT_EPOCH sid=%s cgroup=%s epoch=%s",
                  session_id, cgroup_id, epoch_id or "<active>")
+
+        # Fix 6: WAL barrier before finalization. Ensures all FUSE operation
+        # records are durable before promotion starts.
+        if epoch_id:
+            try:
+                resp = self.fs_client.request({
+                    "action": "flush_wal", "epoch_id": epoch_id})
+                if resp.get("status") != "ok":
+                    return {"status": "error",
+                            "message": f"WAL barrier failed: {resp.get('message')}"}
+            except Exception as e:
+                return {"status": "error",
+                        "message": f"WAL barrier failed: {e}"}
+
         proxy = self._get_proxy()
         # Journal the intent BEFORE touching either layer, so recovery knows a
         # commit was in progress for this session even if we crash immediately.

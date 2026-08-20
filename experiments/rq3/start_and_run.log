@@ -10,12 +10,12 @@ make: 对“all”无需做任何事。
 make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/benchmarks”
   Done
 [4/7] 启动 ShadowFS...
-  ShadowFS PID=1691840 OK
+  ShadowFS PID=1882807 OK
   FUSE 挂载: /tmp/shadow-rq2-test/mnt OK
 [5/7] 启动 ShadowProc...
-  ShadowProc PID=1691912 OK
+  ShadowProc PID=1882847 OK
 [6/7] 启动 Orchestrator...
-  Orchestrator PID=1691960 OK
+  Orchestrator PID=1882886 OK
   Socket: /tmp/shadow-orch.sock OK
   Orchestrator 连接测试: OK
 [7/7] 运行 RQ3 实验...
@@ -45,7 +45,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 600/1000
   [harness]   spec(rollback) progress: 800/1000
   [harness]   spec(rollback) progress: 1000/1000
-  [harness]   Done in 218.8s
+  [harness]   Done in 219.5s
 
 ######################################################################
   WORKLOAD W2 (repeats=1000)
@@ -71,7 +71,38 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 600/1000
   [harness]   spec(rollback) progress: 800/1000
   [harness]   spec(rollback) progress: 1000/1000
-  [harness]   Done in 250.8s
+  [harness]   Done in 251.2s
   [harness] Starting W2 [100ms] repeats=1000
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 200/1000
+  [harness]   raw progress: 400/1000
+  [harness]   raw progress: 600/1000
+  [harness]   raw progress: 800/1000
+  [harness]   raw progress: 1000/1000
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 200/1000
+  [harness]   spec(commit) progress: 400/1000
+  [harness]   spec(commit) progress: 600/1000
+  [harness]   spec(commit) progress: 800/1000
+  [harness]   spec(commit) progress: 1000/1000
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 200/1000
+  [harness]   spec(rollback) progress: 400/1000
+  [harness]   spec(rollback) progress: 600/1000
+  [harness]   spec(rollback) progress: 800/1000
+  [harness]   spec(rollback) progress: 1000/1000
+  [harness]   Done in 557.7s
+  [harness] Starting W2 [1000ms] repeats=1000
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 200/1000
+  [harness]   raw progress: 400/1000
+  [harness]   raw progress: 600/1000
+  [harness]   raw progress: 800/1000
+  [harness]   raw progress: 1000/1000
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 200/1000
+  [harness]   spec(commit) progress: 400/1000
+  [harness]   spec(commit) progress: 600/1000
+  [harness]   spec(commit) progress: 800/1000
+  [harness]   spec(commit) progress: 1000/1000
+  [harness]   Measuring spec (rollback) ...

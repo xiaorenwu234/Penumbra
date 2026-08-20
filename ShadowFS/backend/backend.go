@@ -2358,44 +2358,52 @@ type renameEntry struct {
 	srcPath string // resolved physical path of source
 }
 
-// planRenames resolves OpRename source paths and detects conflicts.
-// Independent renames get their StagePath set for fast-path promotion.
-// Conflicting renames (chains, swaps, overlaps) are promoted via two-phase
-// park → install. Must be called with b.mu held.
+// resolveRenameSource recursively resolves the physical path for an OpRename's
+// source. Fix 4: handles rename chains (a→tmp, b→a, tmp→b) by following
+// SourceVersion links. A visited set prevents infinite loops from corrupt WAL.
+func (b *Backend) resolveRenameSource(v *FileVersion, visited map[VersionID]bool) (string, error) {
+	if v.SourceVersion == 0 {
+		// Source is the backing file.
+		return v.RenameFrom, nil
+	}
+	if visited[v.SourceVersion] {
+		return "", fmt.Errorf("rename source cycle detected at version %d", v.SourceVersion)
+	}
+	visited[v.SourceVersion] = true
+	src := b.versionByID[v.SourceVersion]
+	if src == nil {
+		// Source version gone (already promoted/cleaned). Use logical path.
+		return v.RenameFrom, nil
+	}
+	if src.Operation == OpRename {
+		// Recursive: source is itself a rename.
+		return b.resolveRenameSource(src, visited)
+	}
+	if src.StagePath != "" {
+		return src.StagePath, nil
+	}
+	return src.LogicalPath, nil
+}
+
+// planRenames resolves OpRename source paths for independent renames.
+// Fix 2: Does NOT move files — only sets StagePath for fast-path promotion.
+// Conflicting renames (chains, swaps, overlaps) are left with empty StagePath
+// and fall back to safe copy-up promotion via promoteVersion.
+// Must be called with b.mu held.
 func (b *Backend) planRenames() {
-	// Collect all promotable OpRename heads.
+	// Collect all OpRename heads.
 	var renames []renameEntry
 	for obj, headVid := range b.visibleHead {
 		head := b.versionByID[headVid]
 		if head == nil || head.Operation != OpRename {
 			continue
 		}
-		// Check if promotable (all owners authorized).
-		chain := b.versionsByObject[obj]
-		promotable := true
-		for _, vid := range chain {
-			if v := b.versionByID[vid]; v != nil {
-				if ep, ok := b.epochs[v.Owner]; !ok || !ep.approved() {
-					promotable = false
-					break
-				}
-			}
-		}
-		if !promotable {
+		// Resolve source physical path recursively (Fix 4).
+		visited := make(map[VersionID]bool)
+		srcPath, err := b.resolveRenameSource(head, visited)
+		if err != nil {
+			log.Printf("[backend] planRenames: resolve %q: %v", obj, err)
 			continue
-		}
-		// Resolve source physical path from SourceVersion.
-		var srcPath string
-		if head.SourceVersion == 0 {
-			// Source is the backing file.
-			srcPath = head.RenameFrom
-		} else if sv := b.versionByID[head.SourceVersion]; sv != nil {
-			srcPath = sv.StagePath
-			if srcPath == "" {
-				srcPath = sv.LogicalPath // backing file
-			}
-		} else {
-			srcPath = head.RenameFrom // fallback
 		}
 		renames = append(renames, renameEntry{v: head, srcPath: srcPath})
 	}
@@ -2404,16 +2412,11 @@ func (b *Backend) planRenames() {
 	}
 
 	// Build conflict graph: detect chains, swaps, and overlaps.
-	// A rename conflicts if its destination is another rename's source,
-	// or if multiple renames share the same source.
-	dstToIdx := make(map[string]int)   // destination path → index
-	srcToIdx := make(map[string][]int) // source path → indices
+	srcToIdx := make(map[string][]int)
 	for i, r := range renames {
-		dstToIdx[r.v.LogicalPath] = i
 		srcToIdx[r.srcPath] = append(srcToIdx[r.srcPath], i)
 	}
 
-	// Find connected components of conflicting renames.
 	conflicting := make([]bool, len(renames))
 	for i, r := range renames {
 		// Conflict: destination is another rename's source.
@@ -2431,77 +2434,15 @@ func (b *Backend) planRenames() {
 		}
 	}
 
-	// Fast path: independent renames get StagePath set.
+	// Fix 2: Only set StagePath for independent renames (fast path).
+	// Conflicting renames keep empty StagePath and use safe fallback.
 	for i, r := range renames {
 		if !conflicting[i] {
 			r.v.StagePath = r.srcPath
 		}
-	}
-
-	// Two-phase promotion for conflicting renames.
-	var conflicted []renameEntry
-	for i, r := range renames {
-		if conflicting[i] {
-			conflicted = append(conflicted, r)
-		}
-	}
-	if len(conflicted) > 0 {
-		b.promoteConflictingRenames(conflicted)
-	}
-}
-
-// promoteConflictingRenames handles conflicting renames via two-phase
-// park → install. Must be called with b.mu held.
-func (b *Backend) promoteConflictingRenames(renames []renameEntry) {
-	// Phase 1: Park all sources to temporary paths.
-	type parkEntry struct {
-		v       *FileVersion
-		srcPath string
-		tmpPath string
-	}
-	var parked []parkEntry
-	for _, r := range renames {
-		srcDir := filepath.Dir(r.srcPath)
-		tmpPath := filepath.Join(srcDir, fmt.Sprintf(".penumbra.rename.%d", r.v.ID))
-		if err := movePath(r.srcPath, tmpPath); err != nil {
-			log.Printf("[backend] rename park %q -> %q: %v", r.srcPath, tmpPath, err)
-			continue
-		}
-		parked = append(parked, parkEntry{v: r.v, srcPath: r.srcPath, tmpPath: tmpPath})
-	}
-
-	// Fsync unique source directories.
-	srcDirs := make(map[string]struct{})
-	for _, p := range parked {
-		srcDirs[filepath.Dir(p.srcPath)] = struct{}{}
-	}
-	for dir := range srcDirs {
-		_ = fsyncDir(dir)
-	}
-
-	// Phase 2: Install all destinations from temporary paths.
-	for _, p := range parked {
-		dstDir := filepath.Dir(p.v.LogicalPath)
-		if err := os.MkdirAll(dstDir, 0o755); err != nil {
-			log.Printf("[backend] rename install mkdir %q: %v", dstDir, err)
-			continue
-		}
-		if err := movePath(p.tmpPath, p.v.LogicalPath); err != nil {
-			log.Printf("[backend] rename install %q -> %q: %v", p.tmpPath, p.v.LogicalPath, err)
-			continue
-		}
-		// Mark as promoted by setting State.
-		p.v.State = VPromoted
-		b.publishDirs[dstDir] = struct{}{}
-	}
-
-	// Fsync unique destination directories.
-	dstDirs := make(map[string]struct{})
-	for _, p := range parked {
-		dstDirs[filepath.Dir(p.v.LogicalPath)] = struct{}{}
-	}
-	for dir := range dstDirs {
-		_ = fsyncDir(dir)
+		// Conflicting renames: StagePath stays empty, promoteVersion
+		// will fall back to RenameFrom (logical path) which triggers
+		// copy-up behavior — safe but not zero-copy.
 	}
 }
 
@@ -2628,6 +2569,12 @@ func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, e
 	if head == nil {
 		return false, nil
 	}
+
+	// Fix 1: If the head was already physically promoted by the rename
+	// batch planner (VPromoted), skip promoteVersion but still clean up
+	// the chain and record publishDirs.
+	alreadyPromoted := head.State == VPromoted
+
 	// Promotion has started for this object: move its (authorized) owners
 	// to Finalizing so a normal rollback is refused from here on.
 	for w := range owners {
@@ -2636,27 +2583,29 @@ func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, e
 		}
 	}
 
-	// git 的 link-unlink 模式：写 tmp_obj → link(tmp, final) → unlink(tmp)。
-	// tmp 的 visible head 是 OpWhiteout，永远不会被提升到 orig，但 OpLink
-	// 的 LinkTarget 指向 tmp 的 orig 路径。提升前先把 tmp 的 WRITE 版本
-	// 从 stage 落盘到 orig，否则 os.Link 会永久 ENOENT。
-	if head.Operation == OpLink && head.LinkTarget != "" {
-		if _, statErr := os.Lstat(head.LinkTarget); os.IsNotExist(statErr) {
-			b.ensureLinkTarget(head.LinkTarget)
-		}
-	}
-
-	if err := promoteVersion(head); err != nil {
-		// FAIL CLOSED: preserve ALL recovery state so the exact same
-		// promotion can be retried. Record why on every owner.
-		msg := fmt.Sprintf("promote %q: %v", obj, err)
-		log.Printf("[backend] Promote: %s", msg)
-		for w := range owners {
-			if ep := b.epochs[w]; ep != nil {
-				ep.FinalizeErr = msg
+	if !alreadyPromoted {
+		// git 的 link-unlink 模式：写 tmp_obj → link(tmp, final) → unlink(tmp)。
+		// tmp 的 visible head 是 OpWhiteout，永远不会被提升到 orig，但 OpLink
+		// 的 LinkTarget 指向 tmp 的 orig 路径。提升前先把 tmp 的 WRITE 版本
+		// 从 stage 落盘到 orig，否则 os.Link 会永久 ENOENT。
+		if head.Operation == OpLink && head.LinkTarget != "" {
+			if _, statErr := os.Lstat(head.LinkTarget); os.IsNotExist(statErr) {
+				b.ensureLinkTarget(head.LinkTarget)
 			}
 		}
-		return false, fmt.Errorf("%s", msg)
+
+		if err := promoteVersion(head); err != nil {
+			// FAIL CLOSED: preserve ALL recovery state so the exact same
+			// promotion can be retried. Record why on every owner.
+			msg := fmt.Sprintf("promote %q: %v", obj, err)
+			log.Printf("[backend] Promote: %s", msg)
+			for w := range owners {
+				if ep := b.epochs[w]; ep != nil {
+					ep.FinalizeErr = msg
+				}
+			}
+			return false, fmt.Errorf("%s", msg)
+		}
 	}
 
 	// Head published durably. Tear down the WHOLE chain: superseded
