@@ -81,6 +81,7 @@ type PersistVersion struct {
 	LinkTarget    string `json:"link_target,omitempty"`
 	Dir           bool   `json:"dir,omitempty"`
 	SourceVersion uint64 `json:"source_version,omitempty"` // Fix 4
+	RenameSnapshot bool  `json:"rename_snapshot,omitempty"` // Fix 4: snapshot mode
 }
 
 // marshalVersion converts a FileVersion to its serializable form.
@@ -100,6 +101,7 @@ func marshalVersion(v *FileVersion) PersistVersion {
 		LinkTarget:    v.LinkTarget,
 		Dir:           v.Dir,
 		SourceVersion: uint64(v.SourceVersion),
+		RenameSnapshot: v.RenameSnapshot,
 	}
 }
 
@@ -120,6 +122,7 @@ func unmarshalVersion(p *PersistVersion) *FileVersion {
 		LinkTarget:    p.LinkTarget,
 		Dir:           p.Dir,
 		SourceVersion: VersionID(p.SourceVersion),
+		RenameSnapshot: p.RenameSnapshot,
 	}
 }
 

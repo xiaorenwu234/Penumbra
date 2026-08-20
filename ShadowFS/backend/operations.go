@@ -53,14 +53,12 @@ func promoteVersion(v *FileVersion) error {
 		return nil
 
 	case OpRename:
-		// Fix 4: OpRename is handled by the rename batch planner in
-		// promoteRenameBatch(). If we reach here, it means this rename
-		// was NOT part of a conflicting group and uses the fast path.
-		// The source physical path is resolved from SourceVersion at
-		// plan time and stored in StagePath by the planner.
+		// OpRename promotion: StagePath is set by planRenames.
+		// - Independent renames: StagePath = source path, use movePath.
+		// - Conflicting renames: StagePath = snapshot, RenameSnapshot = true,
+		//   use COPY (not move) so snapshot survives for crash recovery.
 		src := v.StagePath
 		if src == "" {
-			// Fallback: resolve from RenameFrom (logical path).
 			src = v.RenameFrom
 		}
 		if src == "" {
@@ -69,14 +67,51 @@ func promoteVersion(v *FileVersion) error {
 		if err := os.MkdirAll(parent, 0o755); err != nil {
 			return fmt.Errorf("promote rename mkdir parent: %w", err)
 		}
+
+		// Check if source exists.
+		srcExists := true
 		if _, err := os.Lstat(src); os.IsNotExist(err) {
-			if _, err := os.Lstat(orig); err == nil {
-				return nil // already renamed (idempotent)
-			}
-			return fmt.Errorf("promote rename: source %q missing and dest %q absent", src, orig)
+			srcExists = false
 		}
-		if err := movePath(src, orig); err != nil {
-			return fmt.Errorf("promote rename %q -> %q: %w", src, orig, err)
+
+		if v.RenameSnapshot {
+			// Snapshot mode: COPY from snapshot (idempotent, crash-safe).
+			// Snapshot is preserved for retry until publish barrier succeeds.
+			if !srcExists {
+				// Snapshot missing: check if destination already installed.
+				if _, err := os.Lstat(orig); err == nil {
+					return nil // already installed (idempotent)
+				}
+				return fmt.Errorf("promote rename snapshot %q missing", src)
+			}
+			// Copy to temporary, then atomic rename to destination.
+			tmpDst := orig + ".penumbra-tmp"
+			st, _ := os.Lstat(src)
+			if st != nil && st.IsDir() {
+				os.RemoveAll(tmpDst)
+				if err := copyUpDir(src, tmpDst); err != nil {
+					return fmt.Errorf("promote rename copy dir: %w", err)
+				}
+			} else {
+				if err := copyUpFile(src, tmpDst); err != nil {
+					return fmt.Errorf("promote rename copy file: %w", err)
+				}
+			}
+			os.RemoveAll(orig)
+			if err := os.Rename(tmpDst, orig); err != nil {
+				return fmt.Errorf("promote rename install: %w", err)
+			}
+		} else {
+			// Fast path: MOVE source to destination.
+			if !srcExists {
+				if _, err := os.Lstat(orig); err == nil {
+					return nil // already renamed (idempotent)
+				}
+				return fmt.Errorf("promote rename: source %q missing", src)
+			}
+			if err := movePath(src, orig); err != nil {
+				return fmt.Errorf("promote rename %q -> %q: %w", src, orig, err)
+			}
 		}
 		if err := fsyncDir(parent); err != nil {
 			return fmt.Errorf("promote rename fsync dest parent %q: %w", parent, err)

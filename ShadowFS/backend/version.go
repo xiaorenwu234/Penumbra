@@ -110,6 +110,10 @@ type FileVersion struct {
 	// planner to resolve the actual physical path at promotion time,
 	// instead of relying on a potentially-stale StagePath.
 	SourceVersion VersionID
+	// RenameSnapshot indicates this OpRename's StagePath is a private
+	// snapshot copy (not the original source). Promotion should COPY
+	// from snapshot (not move), so the snapshot survives for retry.
+	RenameSnapshot bool
 }
 
 // EpochState holds the lifecycle and version ownership of a single epoch.

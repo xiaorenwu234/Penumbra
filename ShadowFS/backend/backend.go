@@ -2385,12 +2385,10 @@ func (b *Backend) resolveRenameSource(v *FileVersion, visited map[VersionID]bool
 	return src.LogicalPath, nil
 }
 
-// planRenames resolves OpRename source paths for independent renames.
-// Fix 2: Does NOT move files — only sets StagePath for fast-path promotion.
-// Conflicting renames (chains, swaps, overlaps) are left with empty StagePath
-// and fall back to safe copy-up promotion via promoteVersion.
+// planRenames resolves OpRename source paths and prepares snapshots for
+// conflicting renames. Returns an error if any snapshot creation fails.
 // Must be called with b.mu held.
-func (b *Backend) planRenames() {
+func (b *Backend) planRenames() error {
 	// Collect all OpRename heads.
 	var renames []renameEntry
 	for obj, headVid := range b.visibleHead {
@@ -2402,13 +2400,12 @@ func (b *Backend) planRenames() {
 		visited := make(map[VersionID]bool)
 		srcPath, err := b.resolveRenameSource(head, visited)
 		if err != nil {
-			log.Printf("[backend] planRenames: resolve %q: %v", obj, err)
-			continue
+			return fmt.Errorf("planRenames: resolve %q: %w", obj, err)
 		}
 		renames = append(renames, renameEntry{v: head, srcPath: srcPath})
 	}
 	if len(renames) == 0 {
-		return
+		return nil
 	}
 
 	// Build conflict graph: detect chains, swaps, and overlaps.
@@ -2434,29 +2431,57 @@ func (b *Backend) planRenames() {
 		}
 	}
 
-	// Fix 2: Only set StagePath for independent renames (fast path).
-	// Conflicting renames: copy source to a NEW stage file (true copy-up),
-	// so promotion is independent of other renames' moves.
+	// Set StagePath for independent renames (fast path: direct move).
+	// Create snapshots for conflicting renames (safe: copy from snapshot).
+	var snapshotDirs []string
 	for i, r := range renames {
 		if !conflicting[i] {
 			r.v.StagePath = r.srcPath
+			r.v.RenameSnapshot = false
 		} else {
-			// Conflicting: create a private snapshot via copy-up.
-			// This ensures promotion doesn't depend on source location.
-			stageDir := filepath.Join(b.stagingDir, "rename-snapshots")
-			snapPath := filepath.Join(stageDir, fmt.Sprintf("snap-%d", r.v.ID))
+			// Conflicting: create a private snapshot in the epoch's directory.
+			// Snapshot survives promotion for crash recovery retry.
+			epochDir := epochDirFor(b.stagingDir, r.v.Owner)
+			snapDir := filepath.Join(epochDir, "rename-snapshots")
+			snapPath := filepath.Join(snapDir, fmt.Sprintf("snap-%d", r.v.ID))
+
+			// Check if snapshot already exists (idempotent retry).
 			if _, err := os.Lstat(snapPath); os.IsNotExist(err) {
-				if err := os.MkdirAll(stageDir, 0o755); err == nil {
-					if st, serr := os.Lstat(r.srcPath); serr == nil && st.IsDir() {
-						_ = copyUpDir(r.srcPath, snapPath)
-					} else {
-						_ = copyUpFile(r.srcPath, snapPath)
+				if err := os.MkdirAll(snapDir, 0o755); err != nil {
+					return fmt.Errorf("create rename snapshot dir: %w", err)
+				}
+				st, err := os.Lstat(r.srcPath)
+				if err != nil {
+					return fmt.Errorf("stat rename source %q: %w", r.srcPath, err)
+				}
+				if st.IsDir() {
+					if err := copyUpDir(r.srcPath, snapPath); err != nil {
+						return fmt.Errorf("snapshot rename directory %q: %w", r.srcPath, err)
+					}
+				} else {
+					if err := copyUpFile(r.srcPath, snapPath); err != nil {
+						return fmt.Errorf("snapshot rename file %q: %w", r.srcPath, err)
 					}
 				}
+				snapshotDirs = append(snapshotDirs, snapDir)
 			}
 			r.v.StagePath = snapPath
+			r.v.RenameSnapshot = true
 		}
 	}
+
+	// Fsync snapshot directories to ensure directory entries are durable.
+	seen := make(map[string]bool)
+	for _, dir := range snapshotDirs {
+		if !seen[dir] {
+			seen[dir] = true
+			if err := fsyncDir(dir); err != nil {
+				return fmt.Errorf("fsync rename snapshot dir %q: %w", dir, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // tryPromoteAll iterates over every object with a speculative head and
@@ -2468,7 +2493,9 @@ func (b *Backend) planRenames() {
 func (b *Backend) tryPromoteAll() error {
 	for {
 		// Fix 4: resolve OpRename source paths and detect conflicts.
-		b.planRenames()
+		if err := b.planRenames(); err != nil {
+			return err
+		}
 
 		var errs []error
 		objects := make([]string, 0, len(b.versionsByObject))
