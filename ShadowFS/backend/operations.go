@@ -88,24 +88,32 @@ func (b *Backend) promoteVersion(v *FileVersion) error {
 				return fmt.Errorf("promote rename: directory snapshot not supported")
 			}
 
-			// Create unique temporary file in destination parent.
-			// The placeholder is kept: copyUpFile writes to an internal
-			// temp (dst+".shadow-cptmp") then atomically renames over dst,
-			// so it replaces the placeholder without needing removal.
-			tmp, err := os.CreateTemp(parent, ".penumbra-rename-*")
-			if err != nil {
-				return fmt.Errorf("promote rename create temp: %w", err)
-			}
-			tmpDst := tmp.Name()
-			if err := tmp.Close(); err != nil {
-				os.Remove(tmpDst)
-				return fmt.Errorf("promote rename close temp: %w", err)
-			}
-			// Register temp in persistent registry BEFORE use. Recovery
-			// will only delete files recorded here — never by name pattern.
+			// Generate a unique candidate path, register it BEFORE creation,
+			// then create with O_EXCL. This ensures that if we crash between
+			// registration and creation, recovery sees a registered path that
+			// doesn't exist (harmless). If we crash after creation, the path
+			// is already registered and will be cleaned.
+			tmpDst := filepath.Join(parent, fmt.Sprintf(".penumbra-rename-%d", v.ID))
 			if err := b.registerRenameTemp(tmpDst); err != nil {
-				os.Remove(tmpDst)
 				return fmt.Errorf("promote rename register temp: %w", err)
+			}
+			// Create with O_EXCL: fail if a stale file exists (crash safety).
+			f, err := os.OpenFile(tmpDst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			if err != nil {
+				if os.IsExist(err) {
+					// Stale file from a previous crashed attempt. Remove and retry.
+					os.Remove(tmpDst)
+					f, err = os.OpenFile(tmpDst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+				}
+				if err != nil {
+					b.unregisterRenameTemp(tmpDst)
+					return fmt.Errorf("promote rename create temp: %w", err)
+				}
+			}
+			if err := f.Close(); err != nil {
+				os.Remove(tmpDst)
+				b.unregisterRenameTemp(tmpDst)
+				return fmt.Errorf("promote rename close temp: %w", err)
 			}
 			// copyUpFile atomically replaces tmpDst with the snapshot content.
 			if err := copyUpFile(src, tmpDst); err != nil {

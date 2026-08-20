@@ -1466,6 +1466,10 @@ func (b *Backend) renameTempRegistry() string {
 // recovery can identify and remove the orphan.
 func (b *Backend) registerRenameTemp(tmpPath string) error {
 	reg := b.renameTempRegistry()
+	isNew := false
+	if _, err := os.Lstat(reg); os.IsNotExist(err) {
+		isNew = true
+	}
 	f, err := os.OpenFile(reg, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("open rename temp registry: %w", err)
@@ -1478,11 +1482,21 @@ func (b *Backend) registerRenameTemp(tmpPath string) error {
 		f.Close()
 		return fmt.Errorf("fsync rename temp registry: %w", err)
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close rename temp registry: %w", err)
+	}
+	// Fsync staging directory on first creation to persist the directory entry.
+	if isNew {
+		if err := fsyncDir(b.stagingDir); err != nil {
+			return fmt.Errorf("fsync staging dir for registry: %w", err)
+		}
+	}
+	return nil
 }
 
 // unregisterRenameTemp removes a temp file path from the registry after
-// successful installation. Rewrites the registry without the given path.
+// successful installation. Uses atomic rewrite (temp + rename) to prevent
+// registry corruption on crash.
 func (b *Backend) unregisterRenameTemp(tmpPath string) {
 	reg := b.renameTempRegistry()
 	data, err := os.ReadFile(reg)
@@ -1500,12 +1514,25 @@ func (b *Backend) unregisterRenameTemp(tmpPath string) {
 		os.Remove(reg)
 		return
 	}
-	_ = os.WriteFile(reg, []byte(strings.Join(kept, "\n")+"\n"), 0o644)
+	// Atomic rewrite: write to temp file, fsync, rename over registry.
+	tmpReg := reg + ".tmp"
+	if err := os.WriteFile(tmpReg, []byte(strings.Join(kept, "\n")+"\n"), 0o644); err != nil {
+		return // best effort; stale entry is harmless (recovery checks existence)
+	}
+	if f, err := os.Open(tmpReg); err == nil {
+		_ = f.Sync()
+		_ = f.Close()
+	}
+	_ = os.Rename(tmpReg, reg)
+	_ = fsyncDir(b.stagingDir)
 }
 
 // cleanOrphanRenameTemps removes temp files recorded in the rename temp
 // registry. Only files explicitly registered by Penumbra are removed — never
 // based on filename pattern matching. Called during recovery.
+// Safety: each path is validated to be within trackedDir and match the
+// .penumbra-rename- prefix before deletion. Failed deletions are preserved
+// in the registry for the next recovery attempt.
 func (b *Backend) cleanOrphanRenameTemps() {
 	reg := b.renameTempRegistry()
 	data, err := os.ReadFile(reg)
@@ -1513,16 +1540,35 @@ func (b *Backend) cleanOrphanRenameTemps() {
 		return // no registry, nothing to clean
 	}
 	lines := strings.Split(string(data), "\n")
+	var failed []string
 	for _, path := range lines {
 		if path == "" {
 			continue
 		}
+		// Safety: verify path is within trackedDir.
+		if !isAncestor(b.trackedDir, path) && filepath.Dir(path) != b.trackedDir {
+			log.Printf("[backend] recovery: skipping out-of-bounds registry entry %q", path)
+			continue
+		}
+		// Safety: verify filename matches the expected temp pattern.
+		name := filepath.Base(path)
+		if !strings.HasPrefix(name, ".penumbra-rename-") {
+			log.Printf("[backend] recovery: skipping non-temp registry entry %q", path)
+			continue
+		}
 		if rmErr := os.Remove(path); rmErr == nil {
 			log.Printf("[backend] recovery: removed registered rename temp %q", path)
+		} else if !os.IsNotExist(rmErr) {
+			// Deletion failed (not ENOENT): keep in registry for next attempt.
+			failed = append(failed, path)
 		}
 	}
-	// Clear the registry after cleanup.
-	os.Remove(reg)
+	// Rewrite registry with only failed entries, or remove if all cleaned.
+	if len(failed) == 0 {
+		os.Remove(reg)
+	} else {
+		_ = os.WriteFile(reg, []byte(strings.Join(failed, "\n")+"\n"), 0o644)
+	}
 }
 
 // --- Version creation (write path) ---

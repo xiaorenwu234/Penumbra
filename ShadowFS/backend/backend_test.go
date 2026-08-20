@@ -72,12 +72,14 @@ func mustCommitFinalized(t *testing.T, b *Backend, epoch EpochID) {
 	}
 }
 
-// crash simulates a hard crash: WAL is flushed durable, but the graceful
-// final checkpoint is suppressed (walCount forced to 0 makes checkpoint a
-// no-op), so a reopen exercises the WAL REPLAY path.
+// crash simulates a hard crash: WAL is flushed durable (with fsync), but the
+// graceful final checkpoint is suppressed (walCount forced to 0 makes
+// checkpoint a no-op), so a reopen exercises the WAL REPLAY path.
 func crash(t *testing.T, b *Backend) {
 	t.Helper()
 	b.flushPending()
+	// Ensure WAL is actually durable (fsync) before simulating crash.
+	_ = b.flushWALBarrier()
 	b.mu.Lock()
 	b.walCount = 0
 	b.mu.Unlock()
@@ -886,18 +888,29 @@ func TestRenamePartialPromotionRecovery(t *testing.T) {
 		t.Fatalf("Authorize: %v", err)
 	}
 
-	// Manually promote ONLY the first object (a→tmp) to simulate partial
-	// promotion before a crash.
+	// Manually promote ONLY the first destination (b→a) to simulate partial
+	// promotion before a crash. In the swap a→tmp, b→a, tmp→b:
+	// visibleHead[aPath] is the OpRename for b→a.
 	b1.mu.Lock()
 	if err := b1.planRenames(); err != nil {
 		b1.mu.Unlock()
 		t.Fatalf("planRenames: %v", err)
 	}
-	// Promote just the tmp.txt object (a→tmp).
-	if head := b1.versionByID[b1.visibleHead[tmpPath]]; head != nil {
-		_ = b1.promoteVersion(head)
+	headA := b1.versionByID[b1.visibleHead[aPath]]
+	if headA == nil || headA.Operation != OpRename {
+		b1.mu.Unlock()
+		t.Fatalf("expected OpRename at aPath, got %v", headA)
+	}
+	if err := b1.promoteVersion(headA); err != nil {
+		b1.mu.Unlock()
+		t.Fatalf("partial promote aPath: %v", err)
 	}
 	b1.mu.Unlock()
+
+	// Verify partial state: aPath now has "B" (from b→a), but bPath still "B".
+	if readFile(t, aPath) != "B" {
+		t.Fatalf("after partial promote: a.txt = %q, want B", readFile(t, aPath))
+	}
 
 	// Simulate non-graceful shutdown: flush WAL but suppress checkpoint.
 	crash(t, b1)
