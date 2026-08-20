@@ -102,9 +102,14 @@ type FileVersion struct {
 	// Op-specific payload.
 	Mode       uint32 // mkdir / mknod mode (incl. S_IFMT bits for mknod)
 	Rdev       uint64 // mknod device number
-	RenameFrom string // OpWrite created as a rename destination: source orig path
+	RenameFrom string // OpRename: source logical path
 	LinkTarget string // OpLink: orig path of the link target
 	Dir        bool   // OpWhiteout: true when the deleted object is a directory
+	// Fix 4: SourceVersion identifies the version whose physical content
+	// this rename references. 0 = backing file. Used by the rename batch
+	// planner to resolve the actual physical path at promotion time,
+	// instead of relying on a potentially-stale StagePath.
+	SourceVersion VersionID
 }
 
 // EpochState holds the lifecycle and version ownership of a single epoch.

@@ -67,56 +67,59 @@ type PersistGroup struct {
 // PersistVersion is the flat serialized form of a FileVersion. Shared by the
 // checkpoint (Versions slice) and WAL mutation records.
 type PersistVersion struct {
-	ID          uint64 `json:"id"`
-	Owner       string `json:"owner"`
-	LogicalPath string `json:"path"`
-	StagePath   string `json:"stage_path,omitempty"`
-	Parent      uint64 `json:"parent,omitempty"`
-	Seq         int64  `json:"seq"`
-	Op          int    `json:"op"`
-	State       int    `json:"state,omitempty"`
-	Mode        uint32 `json:"mode,omitempty"`
-	Rdev        uint64 `json:"rdev,omitempty"`
-	RenameFrom  string `json:"rename_from,omitempty"`
-	LinkTarget  string `json:"link_target,omitempty"`
-	Dir         bool   `json:"dir,omitempty"`
+	ID            uint64 `json:"id"`
+	Owner         string `json:"owner"`
+	LogicalPath   string `json:"path"`
+	StagePath     string `json:"stage_path,omitempty"`
+	Parent        uint64 `json:"parent,omitempty"`
+	Seq           int64  `json:"seq"`
+	Op            int    `json:"op"`
+	State         int    `json:"state,omitempty"`
+	Mode          uint32 `json:"mode,omitempty"`
+	Rdev          uint64 `json:"rdev,omitempty"`
+	RenameFrom    string `json:"rename_from,omitempty"`
+	LinkTarget    string `json:"link_target,omitempty"`
+	Dir           bool   `json:"dir,omitempty"`
+	SourceVersion uint64 `json:"source_version,omitempty"` // Fix 4
 }
 
 // marshalVersion converts a FileVersion to its serializable form.
 func marshalVersion(v *FileVersion) PersistVersion {
 	return PersistVersion{
-		ID:          uint64(v.ID),
-		Owner:       string(v.Owner),
-		LogicalPath: v.LogicalPath,
-		StagePath:   v.StagePath,
-		Parent:      uint64(v.Parent),
-		Seq:         v.Seq,
-		Op:          int(v.Operation),
-		State:       int(v.State),
-		Mode:        v.Mode,
-		Rdev:        v.Rdev,
-		RenameFrom:  v.RenameFrom,
-		LinkTarget:  v.LinkTarget,
-		Dir:         v.Dir,
+		ID:            uint64(v.ID),
+		Owner:         string(v.Owner),
+		LogicalPath:   v.LogicalPath,
+		StagePath:     v.StagePath,
+		Parent:        uint64(v.Parent),
+		Seq:           v.Seq,
+		Op:            int(v.Operation),
+		State:         int(v.State),
+		Mode:          v.Mode,
+		Rdev:          v.Rdev,
+		RenameFrom:    v.RenameFrom,
+		LinkTarget:    v.LinkTarget,
+		Dir:           v.Dir,
+		SourceVersion: uint64(v.SourceVersion),
 	}
 }
 
 // unmarshalVersion converts a PersistVersion back to a FileVersion.
 func unmarshalVersion(p *PersistVersion) *FileVersion {
 	return &FileVersion{
-		ID:          VersionID(p.ID),
-		Owner:       EpochID(p.Owner),
-		LogicalPath: p.LogicalPath,
-		StagePath:   p.StagePath,
-		Parent:      VersionID(p.Parent),
-		Seq:         p.Seq,
-		Operation:   VersionOp(p.Op),
-		State:       VersionState(p.State),
-		Mode:        p.Mode,
-		Rdev:        p.Rdev,
-		RenameFrom:  p.RenameFrom,
-		LinkTarget:  p.LinkTarget,
-		Dir:         p.Dir,
+		ID:            VersionID(p.ID),
+		Owner:         EpochID(p.Owner),
+		LogicalPath:   p.LogicalPath,
+		StagePath:     p.StagePath,
+		Parent:        VersionID(p.Parent),
+		Seq:           p.Seq,
+		Operation:     VersionOp(p.Op),
+		State:         VersionState(p.State),
+		Mode:          p.Mode,
+		Rdev:          p.Rdev,
+		RenameFrom:    p.RenameFrom,
+		LinkTarget:    p.LinkTarget,
+		Dir:           p.Dir,
+		SourceVersion: VersionID(p.SourceVersion),
 	}
 }
 

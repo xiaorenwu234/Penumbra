@@ -53,32 +53,31 @@ func promoteVersion(v *FileVersion) error {
 		return nil
 
 	case OpRename:
-		// Optimization 2: namespace-only rename. StagePath stores the source's
-		// PHYSICAL path (stage file or orig file). Move it to the destination.
-		src := v.StagePath // physical path of source
+		// Fix 4: OpRename is handled by the rename batch planner in
+		// promoteRenameBatch(). If we reach here, it means this rename
+		// was NOT part of a conflicting group and uses the fast path.
+		// The source physical path is resolved from SourceVersion at
+		// plan time and stored in StagePath by the planner.
+		src := v.StagePath
 		if src == "" {
-			// Fallback to RenameFrom (logical path) for backward compatibility.
+			// Fallback: resolve from RenameFrom (logical path).
 			src = v.RenameFrom
 		}
 		if src == "" {
 			return fmt.Errorf("promote rename %q: missing source path", orig)
 		}
-		// Ensure destination parent exists.
 		if err := os.MkdirAll(parent, 0o755); err != nil {
 			return fmt.Errorf("promote rename mkdir parent: %w", err)
 		}
-		// If source doesn't exist, check if rename already done (idempotent).
 		if _, err := os.Lstat(src); os.IsNotExist(err) {
 			if _, err := os.Lstat(orig); err == nil {
-				return nil // already renamed
+				return nil // already renamed (idempotent)
 			}
 			return fmt.Errorf("promote rename: source %q missing and dest %q absent", src, orig)
 		}
-		// Perform the atomic rename. Use movePath for cross-device support.
 		if err := movePath(src, orig); err != nil {
 			return fmt.Errorf("promote rename %q -> %q: %w", src, orig, err)
 		}
-		// Fsync destination parent directory.
 		if err := fsyncDir(parent); err != nil {
 			return fmt.Errorf("promote rename fsync dest parent %q: %w", parent, err)
 		}

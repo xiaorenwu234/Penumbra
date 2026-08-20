@@ -187,7 +187,8 @@ type Backend struct {
 	// FlushEpochWAL is called (before results are released to the agent).
 	epochWALBuf   map[EpochID][]WALRecord
 	epochWALMu    sync.Mutex
-	walFileExists bool // tracks if WAL file has been created (for Opt 4)
+	walFileExists bool // tracks if WAL file has been created
+	walDirSynced  bool // tracks if WAL parent dir has been fsync'd (Fix 3)
 
 	// Per-epoch statistics for summary logging (Optimization 5).
 	epochStats   map[EpochID]*EpochStats
@@ -251,10 +252,11 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 	}
 	b.applyCond = sync.NewCond(&b.mu)
 
-	// Check if WAL file already exists (for Optimization 4: skip parent
-	// dir fsync on subsequent appends).
+	// Check if WAL file already exists. If so, both the file and its
+	// directory entry are already durable from a previous run.
 	if _, err := os.Stat(b.walPath); err == nil {
 		b.walFileExists = true
+		b.walDirSynced = true
 	}
 
 	// --- Crash recovery (fail closed on unreadable state) ---
@@ -445,15 +447,15 @@ func (b *Backend) flushPending() {
 	for _, p := range batch {
 		allRecs = append(allRecs, p.recs...)
 	}
-	// Optimization 1+4: write WAL without fsync (deferred to FlushEpochWAL);
-	// skip parent dir fsync if WAL file already exists.
-	skipDirSync := b.walFileExists
+	// Optimization 1+4: write WAL without fsync (deferred to FlushEpochWAL).
+	// Fix 3: skipDirSync only if dir was ALREADY synced (not just file created).
+	skipDirSync := b.walDirSynced
 	err := appendWALEx(b.walPath, allRecs, skipDirSync, true) // true = skipFileSync
 	if err == nil {
 		// Mark WAL file as existing after first successful append.
-		if !b.walFileExists {
-			b.walFileExists = true
-		}
+		// Note: walDirSynced is NOT set here — it's set by FlushEpochWAL
+		// after the actual dir fsync (Fix 3).
+		b.walFileExists = true
 		b.mu.Lock()
 		b.walCount += int64(len(allRecs))
 		over := b.walCount >= checkpointWALThreshold
@@ -616,12 +618,14 @@ func (b *Backend) FlushEpochWAL(epochID EpochID) error {
 	}
 	f.Close()
 
-	// Also fsync parent dir on first creation.
-	if !b.walFileExists {
-		b.walFileExists = true
+	// Fix 3: fsync parent dir if it hasn't been synced yet (first creation).
+	// walDirSynced is separate from walFileExists: the file can exist
+	// (written without fsync) while the dir entry is not yet durable.
+	if !b.walDirSynced {
 		if err := fsyncDir(filepath.Dir(b.walPath)); err != nil {
 			return fmt.Errorf("flush epoch WAL %q: dir fsync: %w", epochID, err)
 		}
+		b.walDirSynced = true
 	}
 
 	// Update epoch stats.
@@ -1768,12 +1772,14 @@ func (b *Backend) RecordRename(epochID EpochID, oldPath, newPath string) error {
 	srcVid := VersionID(b.nextVersion + 1)
 	b.nextVersion += 2
 
-	// OpRename: StagePath stores the source's PHYSICAL path for promotion.
-	// RenameFrom stores the logical source path for reference.
+	// Fix 4: OpRename stores the source's VERSION IDENTITY (not a physical
+	// path that could be moved by another rename). The rename batch planner
+	// resolves the actual physical path at promotion time.
+	// StagePath is empty for OpRename (no stage file created).
 	dstV := &FileVersion{
-		ID: dstVid, Owner: epochID, LogicalPath: cleanNew, StagePath: src.PhysicalPath,
+		ID: dstVid, Owner: epochID, LogicalPath: cleanNew, StagePath: "",
 		Seq: seq1, Operation: OpRename, State: VSpeculative, RenameFrom: cleanOld,
-		Dir: srcIsDir,
+		Dir: srcIsDir, SourceVersion: src.Version,
 	}
 	srcV := &FileVersion{
 		ID: srcVid, Owner: epochID, LogicalPath: cleanOld,
@@ -2346,6 +2352,159 @@ func (b *Backend) publishBarrier() error {
 	return nil
 }
 
+// renameEntry is one OpRename collected by the batch planner.
+type renameEntry struct {
+	v       *FileVersion
+	srcPath string // resolved physical path of source
+}
+
+// planRenames resolves OpRename source paths and detects conflicts.
+// Independent renames get their StagePath set for fast-path promotion.
+// Conflicting renames (chains, swaps, overlaps) are promoted via two-phase
+// park → install. Must be called with b.mu held.
+func (b *Backend) planRenames() {
+	// Collect all promotable OpRename heads.
+	var renames []renameEntry
+	for obj, headVid := range b.visibleHead {
+		head := b.versionByID[headVid]
+		if head == nil || head.Operation != OpRename {
+			continue
+		}
+		// Check if promotable (all owners authorized).
+		chain := b.versionsByObject[obj]
+		promotable := true
+		for _, vid := range chain {
+			if v := b.versionByID[vid]; v != nil {
+				if ep, ok := b.epochs[v.Owner]; !ok || !ep.approved() {
+					promotable = false
+					break
+				}
+			}
+		}
+		if !promotable {
+			continue
+		}
+		// Resolve source physical path from SourceVersion.
+		var srcPath string
+		if head.SourceVersion == 0 {
+			// Source is the backing file.
+			srcPath = head.RenameFrom
+		} else if sv := b.versionByID[head.SourceVersion]; sv != nil {
+			srcPath = sv.StagePath
+			if srcPath == "" {
+				srcPath = sv.LogicalPath // backing file
+			}
+		} else {
+			srcPath = head.RenameFrom // fallback
+		}
+		renames = append(renames, renameEntry{v: head, srcPath: srcPath})
+	}
+	if len(renames) == 0 {
+		return
+	}
+
+	// Build conflict graph: detect chains, swaps, and overlaps.
+	// A rename conflicts if its destination is another rename's source,
+	// or if multiple renames share the same source.
+	dstToIdx := make(map[string]int)   // destination path → index
+	srcToIdx := make(map[string][]int) // source path → indices
+	for i, r := range renames {
+		dstToIdx[r.v.LogicalPath] = i
+		srcToIdx[r.srcPath] = append(srcToIdx[r.srcPath], i)
+	}
+
+	// Find connected components of conflicting renames.
+	conflicting := make([]bool, len(renames))
+	for i, r := range renames {
+		// Conflict: destination is another rename's source.
+		if _, ok := srcToIdx[r.v.LogicalPath]; ok {
+			conflicting[i] = true
+			for _, j := range srcToIdx[r.v.LogicalPath] {
+				conflicting[j] = true
+			}
+		}
+		// Conflict: multiple renames share the same source.
+		if len(srcToIdx[r.srcPath]) > 1 {
+			for _, j := range srcToIdx[r.srcPath] {
+				conflicting[j] = true
+			}
+		}
+	}
+
+	// Fast path: independent renames get StagePath set.
+	for i, r := range renames {
+		if !conflicting[i] {
+			r.v.StagePath = r.srcPath
+		}
+	}
+
+	// Two-phase promotion for conflicting renames.
+	var conflicted []renameEntry
+	for i, r := range renames {
+		if conflicting[i] {
+			conflicted = append(conflicted, r)
+		}
+	}
+	if len(conflicted) > 0 {
+		b.promoteConflictingRenames(conflicted)
+	}
+}
+
+// promoteConflictingRenames handles conflicting renames via two-phase
+// park → install. Must be called with b.mu held.
+func (b *Backend) promoteConflictingRenames(renames []renameEntry) {
+	// Phase 1: Park all sources to temporary paths.
+	type parkEntry struct {
+		v       *FileVersion
+		srcPath string
+		tmpPath string
+	}
+	var parked []parkEntry
+	for _, r := range renames {
+		srcDir := filepath.Dir(r.srcPath)
+		tmpPath := filepath.Join(srcDir, fmt.Sprintf(".penumbra.rename.%d", r.v.ID))
+		if err := movePath(r.srcPath, tmpPath); err != nil {
+			log.Printf("[backend] rename park %q -> %q: %v", r.srcPath, tmpPath, err)
+			continue
+		}
+		parked = append(parked, parkEntry{v: r.v, srcPath: r.srcPath, tmpPath: tmpPath})
+	}
+
+	// Fsync unique source directories.
+	srcDirs := make(map[string]struct{})
+	for _, p := range parked {
+		srcDirs[filepath.Dir(p.srcPath)] = struct{}{}
+	}
+	for dir := range srcDirs {
+		_ = fsyncDir(dir)
+	}
+
+	// Phase 2: Install all destinations from temporary paths.
+	for _, p := range parked {
+		dstDir := filepath.Dir(p.v.LogicalPath)
+		if err := os.MkdirAll(dstDir, 0o755); err != nil {
+			log.Printf("[backend] rename install mkdir %q: %v", dstDir, err)
+			continue
+		}
+		if err := movePath(p.tmpPath, p.v.LogicalPath); err != nil {
+			log.Printf("[backend] rename install %q -> %q: %v", p.tmpPath, p.v.LogicalPath, err)
+			continue
+		}
+		// Mark as promoted by setting State.
+		p.v.State = VPromoted
+		b.publishDirs[dstDir] = struct{}{}
+	}
+
+	// Fsync unique destination directories.
+	dstDirs := make(map[string]struct{})
+	for _, p := range parked {
+		dstDirs[filepath.Dir(p.v.LogicalPath)] = struct{}{}
+	}
+	for dir := range dstDirs {
+		_ = fsyncDir(dir)
+	}
+}
+
 // tryPromoteAll iterates over every object with a speculative head and
 // promotes those whose whole chain is owned by authorized epochs (with
 // all-finalized external upstreams). Promotion of one object may finalize an
@@ -2354,6 +2513,9 @@ func (b *Backend) publishBarrier() error {
 // encountered (nil if all succeeded). Must be called with b.mu held.
 func (b *Backend) tryPromoteAll() error {
 	for {
+		// Fix 4: resolve OpRename source paths and detect conflicts.
+		b.planRenames()
+
 		var errs []error
 		objects := make([]string, 0, len(b.versionsByObject))
 		for obj := range b.versionsByObject {
@@ -2974,6 +3136,22 @@ func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (BeginFinali
 	members := append([]EpochID(nil), g.members...)
 	g.state = "finalizing"
 	g.finalizeErr = ""
+	b.mu.Unlock()
+
+	// Fix 2: WAL durability barrier BEFORE any promotion. This ensures
+	// authorization records and all version records are durable before
+	// files are published to the backing store.
+	for _, id := range members {
+		if err := b.FlushEpochWAL(id); err != nil {
+			b.mu.Lock()
+			g.state = "failed"
+			g.finalizeErr = fmt.Sprintf("WAL barrier: %v", err)
+			b.mu.Unlock()
+			return BeginFinalizeResult{}, fmt.Errorf("begin_finalize: WAL barrier for %q: %w", id, err)
+		}
+	}
+
+	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	// Quiesce + flush each member, then promote.

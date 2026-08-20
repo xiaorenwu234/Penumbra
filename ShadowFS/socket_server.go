@@ -431,6 +431,20 @@ func (s *SocketServer) handleRequest(req Request) Response {
 		}
 		return Response{Status: "ok", GroupID: req.GroupID}
 
+	case "flush_wal":
+		// Fix 1: WAL durability barrier. Called by the orchestrator after
+		// a tool execution completes, before provisional results are
+		// released to the agent. Ensures all FUSE operation records are
+		// durable with a single fsync.
+		epochID := backend.EpochID(req.EpochID)
+		if epochID == "" {
+			return Response{Status: "error", Message: "epoch_id required"}
+		}
+		if err := shadowBackend.FlushEpochWAL(epochID); err != nil {
+			return Response{Status: "error", Message: err.Error()}
+		}
+		return Response{Status: "ok"}
+
 	default:
 		return Response{Status: "error", Message: "unknown action: " + req.Action}
 	}
