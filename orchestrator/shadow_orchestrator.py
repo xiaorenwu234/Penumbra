@@ -875,6 +875,39 @@ class ShadowOrchestrator:
             prep_req["epoch_id"] = epoch_id
 
         with self._graph_sequence_lock:
+            # CRITICAL ORDERING: authorize MUST come BEFORE prepare_resolution.
+            # ShadowFS's authorize action advances graph_generation internally.
+            # If prepare runs first, it returns gen=N, then authorize advances
+            # to gen=N+1, and begin_finalize(gen=N) fails with TOCTOU mismatch.
+            # By authorizing first, prepare_resolution returns the POST-authorize
+            # generation, and nothing between prepare and begin_finalize touches
+            # ShadowFS (only local dict lookups and ShadowProc freeze calls).
+
+            # Step 1a: Record authorization and call ShadowFS authorize.
+            policy_hash = self._record_authorized_epoch(epoch_id or "",
+                                                        cgroup_id, proc_policy)
+            auth_req = {"action": "authorize", "cgroup_id": cgroup_id,
+                        "policy_hash": policy_hash}
+            if epoch_id:
+                auth_req["epoch_id"] = epoch_id
+            try:
+                auth = self.fs_client.request(auth_req)
+            except Exception as e:  # noqa: BLE001
+                return {"status": "error", "message": f"authorize: {e}"}
+            if not isinstance(auth, dict) or auth.get("status") != "ok":
+                return auth if isinstance(auth, dict) else {"status": "error", "message": str(auth)}
+            authorized_epoch = auth.get("epoch_id") or epoch_id or ""
+            if authorized_epoch and authorized_epoch != (epoch_id or ""):
+                policy_hash = self._record_authorized_epoch(authorized_epoch,
+                                                            cgroup_id, proc_policy)
+            if auth.get("policy_hash") and auth.get("policy_hash") != policy_hash:
+                return {"status": "error", "message": "ShadowFS policy_hash mismatch"}
+            if hasattr(self, "_journal"):
+                self._journal.append("authorized", epoch=authorized_epoch,
+                                     cgroup=cgroup_id, policy_hash=policy_hash)
+
+            # Step 1b: prepare_resolution — NOW returns the post-authorize
+            # graph_generation. No ShadowFS call between here and begin_finalize.
             try:
                 prep = self.fs_client.request(prep_req)
             except Exception as e:  # noqa: BLE001
@@ -885,37 +918,17 @@ class ShadowOrchestrator:
             group_id = prep["group_id"]
             members = prep["members"]
             graph_gen = prep["graph_generation"]
-            log.info("  prepare_resolution: group_id=%d members=%s graph_gen=%d",
-                     group_id, members, graph_gen)
+            log.info("  prepare_resolution: group_id=%d members=%s graph_gen=%d "
+                     "[lock=%s tid=%s]",
+                     group_id, members, graph_gen,
+                     self._graph_sequence_lock.locked(),
+                     threading.current_thread().name)
 
-            # Record this epoch's own authorization decision before considering
-            # SCC finalization. Missing siblings are not errors: they mean this
-            # epoch is authorized_pending and must remain fenced until their policy
-            # paths independently authorize them.
-            policy_hash = self._record_authorized_epoch(epoch_id or members[0],
-                                                        cgroup_id, proc_policy)
-            auth_req = {"action": "authorize", "cgroup_id": cgroup_id,
-                        "policy_hash": policy_hash}
-            if epoch_id:
-                auth_req["epoch_id"] = epoch_id
-            try:
-                auth = self.fs_client.request(auth_req)
-            except Exception as e:  # noqa: BLE001
-                self._cancel_group(group_id)
-                return {"status": "error", "message": f"authorize: {e}"}
-            if not isinstance(auth, dict) or auth.get("status") != "ok":
-                self._cancel_group(group_id)
-                return auth
-            authorized_epoch = auth.get("epoch_id") or epoch_id or members[0]
-            if authorized_epoch != (epoch_id or members[0]):
-                policy_hash = self._record_authorized_epoch(authorized_epoch,
-                                                            cgroup_id, proc_policy)
-            if auth.get("policy_hash") and auth.get("policy_hash") != policy_hash:
-                self._cancel_group(group_id)
-                return {"status": "error", "message": "ShadowFS policy_hash mismatch"}
-            if hasattr(self, "_journal"):
-                self._journal.append("authorized", epoch=authorized_epoch,
-                                     cgroup=cgroup_id, policy_hash=policy_hash)
+            # Re-record authorization with the correct member key (now that
+            # we know members from prepare_resolution). The preliminary record
+            # above used epoch_id or "" which may not match members[0].
+            self._record_authorized_epoch(epoch_id or members[0],
+                                         cgroup_id, proc_policy)
 
             policies = self._member_policies(members)
             if policies is None:
@@ -931,7 +944,8 @@ class ShadowOrchestrator:
             member_cgroups = [policies[m]["cgroup_id"] for m in members]
 
             # Freeze every independently authorized SCC member before ShadowFS
-            # captures mmap/writeback state.
+            # captures mmap/writeback state. (ShadowProc calls do NOT advance
+            # ShadowFS's graph_generation, so this is safe inside the lock.)
             proc_client = getattr(self, "proc_client", None)
             if proc_client is not None:
                 for mcg in member_cgroups:
@@ -948,9 +962,13 @@ class ShadowOrchestrator:
                         return {"status": "error",
                                 "message": f"freeze {mcg}: {freeze_resp}"}
 
-            # Step 2: begin_finalize — still under _graph_sequence_lock, so
-            # no other thread can advance the graph between our prepare and
-            # this call. The TOCTOU is eliminated by construction.
+            # Step 2: begin_finalize — graph_gen is guaranteed fresh because
+            # NO ShadowFS call occurred between prepare_resolution and here.
+            log.info("  begin_finalize: group_id=%d graph_gen=%d "
+                     "[lock=%s tid=%s]",
+                     group_id, graph_gen,
+                     self._graph_sequence_lock.locked(),
+                     threading.current_thread().name)
             try:
                 fin = self.fs_client.request({
                     "action": "begin_finalize",
@@ -1054,18 +1072,22 @@ class ShadowOrchestrator:
         return resp.get("state", "pending"), resp.get("finalize_err", "")
 
     def _fs_begin_finalize_group(self, group_id: int, graph_generation: int) -> Tuple[str, str]:
-        try:
-            resp = self.fs_client.request({
-                "action": "begin_finalize",
-                "group_id": group_id,
-                "graph_generation": graph_generation,
-            })
-        except Exception as e:  # noqa: BLE001
-            log.warning("  begin_finalize(%d) retry failed: %s", group_id, e)
-            return "unknown", str(e)
-        if not isinstance(resp, dict) or resp.get("status") != "ok":
-            return "unknown", resp.get("message", str(resp)) if isinstance(resp, dict) else str(resp)
-        return resp.get("state", "pending"), resp.get("finalize_err", "")
+        # Must hold _graph_sequence_lock: this is called by the background
+        # retry loop, and without the lock it can advance the graph between
+        # the main commit path's prepare_resolution and begin_finalize.
+        with self._graph_sequence_lock:
+            try:
+                resp = self.fs_client.request({
+                    "action": "begin_finalize",
+                    "group_id": group_id,
+                    "graph_generation": graph_generation,
+                })
+            except Exception as e:  # noqa: BLE001
+                log.warning("  begin_finalize(%d) retry failed: %s", group_id, e)
+                return "unknown", str(e)
+            if not isinstance(resp, dict) or resp.get("status") != "ok":
+                return "unknown", resp.get("message", str(resp)) if isinstance(resp, dict) else str(resp)
+            return resp.get("state", "pending"), resp.get("finalize_err", "")
 
     def _prune_epoch_results(self) -> None:
         if not hasattr(self, "_epoch_results"):
@@ -2189,12 +2211,17 @@ class ShadowOrchestrator:
         log.info("SESSION_BEGIN_EPOCH sid=%s cgroup=%s epoch=%s agent=%s",
                  session_id, cgroup_id, epoch_id, aid or "-")
         # Step 1: ShadowFS epoch registration (epoch_id -> cgroup attribution).
-        fs_resp = self.fs_client.request({
-            "action": "begin_epoch",
-            "epoch_id": epoch_id,
-            "cgroup_id": cgroup_id,
-            "session_id": session_id,
-        })
+        # Hold _graph_sequence_lock: begin_epoch ADDS a node to the dependency
+        # graph and advances graph_generation. Without this, a concurrent
+        # begin_epoch can advance the graph between another thread's
+        # prepare_resolution and begin_finalize, causing TOCTOU mismatch.
+        with self._graph_sequence_lock:
+            fs_resp = self.fs_client.request({
+                "action": "begin_epoch",
+                "epoch_id": epoch_id,
+                "cgroup_id": cgroup_id,
+                "session_id": session_id,
+            })
         if fs_resp.get("status") != "ok":
             log.error("  ShadowFS begin_epoch failed: %s", fs_resp.get("message"))
             # Nothing is in flight after a failed open -- free the agent slot or
@@ -2211,9 +2238,10 @@ class ShadowOrchestrator:
             # children, writable MAP_SHARED, pending signals, or non-regular
             # fds).  Degrade to non-speculative mode: unwind the FS epoch and
             # return an error so the caller runs commands directly.
-            self.fs_client.request({"action": "rollback_epoch",
-                                    "epoch_id": epoch_id,
-                                    "cgroup_id": cgroup_id})
+            with self._graph_sequence_lock:
+                self.fs_client.request({"action": "rollback_epoch",
+                                        "epoch_id": epoch_id,
+                                        "cgroup_id": cgroup_id})
             with self._sessions_lock:
                 self._session_epochs.pop(session_id, None)
             log.warning("  begin_epoch not admissible: %s -- degrading to "
@@ -2224,9 +2252,10 @@ class ShadowOrchestrator:
         except Exception as e:  # noqa: BLE001
             # Best-effort unwind of the FS epoch so the agent is not left
             # with a dangling open epoch.
-            self.fs_client.request({"action": "rollback_epoch",
-                                    "epoch_id": epoch_id,
-                                    "cgroup_id": cgroup_id})
+            with self._graph_sequence_lock:
+                self.fs_client.request({"action": "rollback_epoch",
+                                        "epoch_id": epoch_id,
+                                        "cgroup_id": cgroup_id})
             with self._sessions_lock:
                 self._session_epochs.pop(session_id, None)
             log.error("  begin_epoch (process layer) failed: %s", e)
@@ -2675,11 +2704,14 @@ class ShadowOrchestrator:
                  session_id, cgroup_id, epoch_id or "<active>")
 
         # Step 1: roll back the file layer FIRST and gate on its success.
+        # Hold _graph_sequence_lock: rollback_epoch REMOVES a node from the
+        # dependency graph and advances graph_generation.
         try:
             rb_req = {"action": "rollback_epoch", "cgroup_id": cgroup_id}
             if epoch_id:
                 rb_req["epoch_id"] = epoch_id
-            fs_resp = self.fs_client.request(rb_req)
+            with self._graph_sequence_lock:
+                fs_resp = self.fs_client.request(rb_req)
         except Exception as e:  # noqa: BLE001 - fail closed: do not touch procs
             log.error("  ShadowFS rollback_epoch unreachable: %s -- "
                       "NOT rolling back the process layer", e)
