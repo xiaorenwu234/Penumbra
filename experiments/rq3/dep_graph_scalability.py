@@ -6,14 +6,17 @@ Measures the scalability of dependency-aware publication (group-level
 finalization) across multiple dimensions:
 
   D1: Chain topology — 1, 10, 100, 500 epochs in a linear dependency chain.
+      Each node is an independent epoch: epoch[i] writes file[i], epoch[i+1]
+      reads file[i] (creating a real cross-epoch read-from edge).
   D2: Fan-out / Fan-in — one root epoch feeds N dependents (fan-out), or
-      N epochs converge into one sink (fan-in).
+      N epochs converge into one sink (fan-in). Each node is a separate epoch.
   D3: SCC (mutual dependencies) — cycles in the dependency graph that
-      require strongly-connected-component resolution.
-  D4: Concurrent agents — 1, 8, 32, 128 agents each running independent
-      epochs, measuring barrier + finalization contention.
-  D5: Authorization decisions — allow, root-deny, middle-node-deny to
-      measure the cost of policy enforcement at different graph positions.
+      require strongly-connected-component resolution. Each node in the
+      cycle is a separate epoch with cross-epoch reads forming the cycle.
+  D4: Concurrent agents — 1, 8, 32, 128 agents each with its own epoch,
+      all consuming a shared root epoch's output (real dependency graph).
+  D5: Authorization decisions — allow, root-deny, middle-node-deny on a
+      multi-epoch chain to measure policy enforcement at different positions.
 
 Usage:
     SHADOW_RUN_RQ3_EXPERIMENTS=1 python3 dep_graph_scalability.py [options]
@@ -39,7 +42,7 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -56,8 +59,6 @@ DEP_WORK_ORIG = os.path.join(SHADOWFS_ORIG, "rq3-dep")
 
 # Default policy: allow all (for benchmarks that commit)
 ALLOW_ALL_OPS = [{"event_type": "*", "action": "allow", "path_pattern": "/"}]
-# Deny policy: deny all (for rollback scenarios)
-DENY_ALL_OPS = [{"event_type": "*", "action": "deny", "path_pattern": "/"}]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -77,6 +78,10 @@ class DepGraphResult:
     finalize_ns: List[float] = field(default_factory=list)
     total_ns: List[float] = field(default_factory=list)
     per_epoch_finalize_ns: List[float] = field(default_factory=list)
+
+    # Dependency verification
+    verified_deps: int = 0   # number of verified dependency edges
+    group_sizes: List[int] = field(default_factory=list)
 
     # Metadata
     repeats: int = 0
@@ -105,6 +110,8 @@ class DepGraphResult:
             "size": self.size,
             "decision": self.decision,
             "repeats": self.repeats,
+            "verified_deps": self.verified_deps,
+            "group_sizes": self.group_sizes[:10],
             "errors": self.errors[:10],
             "wall_time_s": self.wall_time_s,
             "stats": stats,
@@ -133,47 +140,78 @@ def dep_fuse_path(rel: str) -> str:
 
 
 def create_seed_file(rel_path: str, content: str = "seed"):
-    """Create a seed file in the orig directory."""
+    """Create a seed file in the orig (backing store) directory.
+
+    Files MUST pre-exist in the backing store so FUSE Lookup succeeds
+    when the consumer epoch opens them. Without this, the VFS returns
+    ENOENT before reaching the Open handler where Resolve() records
+    the read-from dependency edge.
+    """
     full = os.path.join(DEP_WORK_ORIG, rel_path)
     os.makedirs(os.path.dirname(full), exist_ok=True)
     with open(full, "w") as f:
         f.write(content)
 
 
-class SessionManager:
-    """Manages a pool of orchestrator sessions for dependency experiments."""
+@dataclass
+class EpochNode:
+    """A single epoch node in the dependency graph (one session = one epoch)."""
+    node_id: str
+    session_id: str
+    cgroup_id: str
+    epoch_id: str
+    agent_id: str
 
-    def __init__(self, orch_sock: str = None):
-        self._orch_sock = orch_sock
-        self._sessions: Dict[str, Dict] = {}  # agent_id -> {session_id, ...}
 
-    def _client(self) -> OrchClient:
-        c = OrchClient(self._orch_sock)
-        c.connect()
-        return c
+def open_epoch_node(client: OrchClient, node_id: str,
+                    run_tag: str) -> EpochNode:
+    """Open a session and begin an epoch for one graph node.
 
-    def open_session(self, agent_id: str) -> Dict:
-        """Open a session for the given agent."""
-        c = self._client()
+    Each graph node gets its own session (hence its own cgroup and epoch),
+    ensuring ShadowFS tracks it as an independent vertex in the dep graph.
+    """
+    agent_id = f"dep-{run_tag}-{node_id}"
+    sess = client.session_open(agent_id=agent_id)
+    sid = sess["session_id"]
+    cg_id = sess["cgroup_id"]
+    epoch_resp = client.session_begin_epoch(sid, agent_id=agent_id)
+    epoch_id = epoch_resp.get("epoch_id", "")
+    return EpochNode(node_id=node_id, session_id=sid, cgroup_id=cg_id,
+                     epoch_id=epoch_id, agent_id=agent_id)
+
+
+def verify_dependencies(client: OrchClient, nodes: List[EpochNode],
+                        expected_min_edges: int) -> Tuple[int, List[str]]:
+    """Verify that cross-epoch dependencies actually formed.
+
+    Uses get_affected (dry-run rollback) on the root node to check how
+    many downstream epochs would be cascaded. Returns (verified_count, errors).
+    """
+    if not nodes:
+        return 0, ["no nodes to verify"]
+    errors = []
+    verified = 0
+    root = nodes[0]
+    try:
+        resp = client.get_affected(root.cgroup_id)
+        affected = resp.get("affected", [])
+        verified = len(affected)
+        if verified < expected_min_edges:
+            errors.append(
+                f"dependency verification: expected >= {expected_min_edges} "
+                f"affected, got {verified}")
+    except Exception as e:
+        errors.append(f"get_affected failed: {e}")
+    return verified, errors
+
+
+def close_all_nodes(client: OrchClient, nodes: List[EpochNode]):
+    """Close all sessions (best-effort cleanup)."""
+    for node in nodes:
         try:
-            resp = c.session_open(agent_id=agent_id)
-            self._sessions[agent_id] = resp
-            return resp
-        finally:
-            c.close()
-
-    def close_all(self):
-        """Close all open sessions."""
-        c = self._client()
-        try:
-            for agent_id, info in self._sessions.items():
-                try:
-                    c.session_close(info["session_id"])
-                except Exception:
-                    pass
-        finally:
-            c.close()
-        self._sessions.clear()
+            client.session_close(node.session_id)
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -181,12 +219,15 @@ class SessionManager:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def run_d1_chain(sizes: List[int], repeats: int) -> List[DepGraphResult]:
-    """D1: Linear dependency chain — epoch[i] writes file[i], epoch[i+1]
-    reads file[i] and writes file[i+1], creating a sequential dependency.
+    """D1: Linear dependency chain — N independent epochs forming a chain.
+
+    epoch[0] writes file[0], epoch[1] reads file[0] and writes file[1],
+    epoch[2] reads file[1] and writes file[2], etc. Each read across epochs
+    creates a real ShadowFS read-from dependency edge.
 
     Measures how group finalization scales with chain length.
     """
-    print("\n[D1] Chain topology (linear dependency)")
+    print("\n[D1] Chain topology (linear dependency, cross-epoch)")
     results = []
 
     for n in sizes:
@@ -197,34 +238,52 @@ def run_d1_chain(sizes: List[int], repeats: int) -> List[DepGraphResult]:
 
         for rep in range(repeats):
             cleanup_dep_dir()
-            # Create seed file that the first epoch reads
-            create_seed_file("chain_0.dat", "root")
-            agent_id = f"d1-chain-{n}"
+            # Pre-create ALL chain files in backing store so FUSE Lookup
+            # succeeds when consumer epochs open them.
+            for i in range(n):
+                create_seed_file(f"chain_{i}.dat", f"base-{i}")
 
+            run_tag = f"d1-{n}-r{rep}"
+            nodes: List[EpochNode] = []
+            rep_t0 = time.time()
             try:
                 client = OrchClient()
                 client.connect()
-                sess = client.session_open(agent_id=agent_id)
-                sid = sess["session_id"]
 
-                # Setup: begin epoch and create the chain via file writes
+                # Setup: open N sessions, begin N epochs, build chain deps
                 with Timer() as setup_t:
-                    client.session_begin_epoch(sid, agent_id=agent_id)
-                    # Write all chain files in one epoch to create internal
-                    # dependencies (each file depends on the previous via
-                    # the epoch's write-set forming a sequential pattern).
-                    cmds = []
+                    # Open all epoch nodes
+                    for i in range(n):
+                        node = open_epoch_node(client, f"n{i}", run_tag)
+                        nodes.append(node)
+
+                    # Build cross-epoch dependencies sequentially:
+                    # epoch[i] writes file[i], epoch[i+1] reads file[i]
                     for i in range(n):
                         fpath = dep_fuse_path(f"chain_{i}.dat")
-                        cmds.append(f"echo 'epoch-{i}' > {fpath}")
-                    # Batch: write all files (creates N objects in one epoch)
-                    batch_cmd = " && ".join(cmds)
-                    client.session_run(sid, batch_cmd)
+                        # Producer epoch writes (creates speculative version)
+                        client.session_run(
+                            nodes[i].session_id,
+                            f"echo 'epoch-{i}' > {fpath}")
+                        # Consumer epoch reads (records read-from edge)
+                        if i + 1 < n:
+                            client.session_run(
+                                nodes[i + 1].session_id,
+                                f"cat {fpath} > /dev/null")
 
-                # Finalize: commit the epoch (triggers group resolution)
+                # Verify dependencies formed before timing finalization
+                verified, verrs = verify_dependencies(
+                    client, nodes, max(1, n - 1))
+                r.verified_deps = verified
+                if verrs:
+                    r.errors.extend(verrs)
+
+                # Finalize: commit all epochs (triggers group resolution)
                 with Timer() as fin_t:
-                    client.session_commit_epoch(sid, agent_id=agent_id,
-                                               allowed_ops=ALLOW_ALL_OPS)
+                    for node in nodes:
+                        client.session_commit_epoch(
+                            node.session_id, agent_id=node.agent_id,
+                            allowed_ops=ALLOW_ALL_OPS)
 
                 r.setup_ns.append(setup_t.elapsed_ns)
                 r.finalize_ns.append(fin_t.elapsed_ns)
@@ -232,11 +291,20 @@ def run_d1_chain(sizes: List[int], repeats: int) -> List[DepGraphResult]:
                 if n > 0:
                     r.per_epoch_finalize_ns.append(fin_t.elapsed_ns / n)
 
-                client.session_close(sid)
+                close_all_nodes(client, nodes)
                 client.close()
 
             except Exception as e:
                 r.errors.append(f"rep={rep}: {e}")
+                # Best-effort cleanup
+                try:
+                    close_all_nodes(client, nodes)
+                    client.close()
+                except Exception:
+                    pass
+
+            print(f"    rep {rep+1}/{repeats} done "
+                  f"({time.time()-rep_t0:.1f}s)", flush=True)
 
         r.wall_time_s = time.time() - t0
         results.append(r)
@@ -257,10 +325,12 @@ def run_d1_chain(sizes: List[int], repeats: int) -> List[DepGraphResult]:
 def run_d2_fan(sizes: List[int], repeats: int) -> List[DepGraphResult]:
     """D2: Fan-out (one root → N leaves) and Fan-in (N sources → one sink).
 
-    Fan-out: root epoch writes a shared file; N leaf epochs each read it.
-    Fan-in: N source epochs each write a file; sink epoch reads all N files.
+    Fan-out: root epoch writes a shared file; N leaf epochs each read it
+    in their own independent epoch (creating N cross-epoch dep edges).
+    Fan-in: N source epochs each write a distinct file; sink epoch reads
+    all N files (creating N cross-epoch dep edges into one node).
     """
-    print("\n[D2] Fan-out / Fan-in topology")
+    print("\n[D2] Fan-out / Fan-in topology (cross-epoch)")
     results = []
 
     for n in sizes:
@@ -273,36 +343,62 @@ def run_d2_fan(sizes: List[int], repeats: int) -> List[DepGraphResult]:
         for rep in range(repeats):
             cleanup_dep_dir()
             create_seed_file("fan_root.dat", "root-data")
-            agent_id = f"d2-fanout-{n}"
+            run_tag = f"d2fo-{n}-r{rep}"
+            nodes: List[EpochNode] = []
+            rep_t0 = time.time()
 
             try:
                 client = OrchClient()
                 client.connect()
-                sess = client.session_open(agent_id=agent_id)
-                sid = sess["session_id"]
 
                 with Timer() as setup_t:
-                    client.session_begin_epoch(sid, agent_id=agent_id)
-                    # Root writes N output files (fan-out: one epoch → N files)
-                    cmds = []
+                    # Root epoch
+                    root = open_epoch_node(client, "root", run_tag)
+                    nodes.append(root)
+                    # Leaf epochs
                     for i in range(n):
-                        fpath = dep_fuse_path(f"fan_leaf_{i}.dat")
-                        cmds.append(f"echo 'leaf-{i}' > {fpath}")
-                    batch_cmd = " && ".join(cmds) if cmds else "true"
-                    client.session_run(sid, batch_cmd)
+                        leaf = open_epoch_node(client, f"leaf{i}", run_tag)
+                        nodes.append(leaf)
+
+                    # Root writes the shared file
+                    root_file = dep_fuse_path("fan_root.dat")
+                    client.session_run(
+                        root.session_id,
+                        f"echo 'root-output' > {root_file}")
+                    # Each leaf reads the root's output (cross-epoch dep)
+                    for i in range(n):
+                        client.session_run(
+                            nodes[i + 1].session_id,
+                            f"cat {root_file} > /dev/null")
+
+                verified, verrs = verify_dependencies(
+                    client, nodes, max(1, n))
+                r.verified_deps = verified
+                if verrs:
+                    r.errors.extend(verrs)
 
                 with Timer() as fin_t:
-                    client.session_commit_epoch(sid, agent_id=agent_id,
-                                               allowed_ops=ALLOW_ALL_OPS)
+                    for node in nodes:
+                        client.session_commit_epoch(
+                            node.session_id, agent_id=node.agent_id,
+                            allowed_ops=ALLOW_ALL_OPS)
 
                 r.setup_ns.append(setup_t.elapsed_ns)
                 r.finalize_ns.append(fin_t.elapsed_ns)
                 r.total_ns.append(setup_t.elapsed_ns + fin_t.elapsed_ns)
 
-                client.session_close(sid)
+                close_all_nodes(client, nodes)
                 client.close()
             except Exception as e:
                 r.errors.append(f"fan-out rep={rep}: {e}")
+                try:
+                    close_all_nodes(client, nodes)
+                    client.close()
+                except Exception:
+                    pass
+
+            print(f"    rep {rep+1}/{repeats} done "
+                  f"({time.time()-rep_t0:.1f}s)", flush=True)
 
         r.wall_time_s = time.time() - t0
         results.append(r)
@@ -319,41 +415,68 @@ def run_d2_fan(sizes: List[int], repeats: int) -> List[DepGraphResult]:
 
         for rep in range(repeats):
             cleanup_dep_dir()
-            # Create N source files
+            # Pre-create source files in backing store
             for i in range(n):
-                create_seed_file(f"fanin_src_{i}.dat", f"src-{i}")
-            agent_id = f"d2-fanin-{n}"
+                create_seed_file(f"fanin_src_{i}.dat", f"src-base-{i}")
+            run_tag = f"d2fi-{n}-r{rep}"
+            nodes = []
+            rep_t0 = time.time()
 
             try:
                 client = OrchClient()
                 client.connect()
-                sess = client.session_open(agent_id=agent_id)
-                sid = sess["session_id"]
 
                 with Timer() as setup_t:
-                    client.session_begin_epoch(sid, agent_id=agent_id)
-                    # Sink reads all N files and writes one output
-                    cmds = []
+                    # Source epochs
+                    for i in range(n):
+                        src = open_epoch_node(client, f"src{i}", run_tag)
+                        nodes.append(src)
+                    # Sink epoch
+                    sink = open_epoch_node(client, "sink", run_tag)
+                    nodes.append(sink)
+
+                    # Each source writes its own file
                     for i in range(n):
                         fpath = dep_fuse_path(f"fanin_src_{i}.dat")
-                        cmds.append(f"cat {fpath}")
-                    out_path = dep_fuse_path("fanin_sink.dat")
-                    cmds.append(f"echo 'merged' > {out_path}")
-                    batch_cmd = " && ".join(cmds) if cmds else "true"
-                    client.session_run(sid, batch_cmd)
+                        client.session_run(
+                            nodes[i].session_id,
+                            f"echo 'src-{i}-output' > {fpath}")
+                    # Sink reads ALL source files (cross-epoch deps)
+                    for i in range(n):
+                        fpath = dep_fuse_path(f"fanin_src_{i}.dat")
+                        client.session_run(
+                            sink.session_id,
+                            f"cat {fpath} > /dev/null")
+
+                # Fan-in: rolling back one source cascades to the sink (1 node)
+                verified, verrs = verify_dependencies(
+                    client, nodes, 1)
+                r2.verified_deps = verified
+                if verrs:
+                    r2.errors.extend(verrs)
 
                 with Timer() as fin_t:
-                    client.session_commit_epoch(sid, agent_id=agent_id,
-                                               allowed_ops=ALLOW_ALL_OPS)
+                    for node in nodes:
+                        client.session_commit_epoch(
+                            node.session_id, agent_id=node.agent_id,
+                            allowed_ops=ALLOW_ALL_OPS)
 
                 r2.setup_ns.append(setup_t.elapsed_ns)
                 r2.finalize_ns.append(fin_t.elapsed_ns)
                 r2.total_ns.append(setup_t.elapsed_ns + fin_t.elapsed_ns)
 
-                client.session_close(sid)
+                close_all_nodes(client, nodes)
                 client.close()
             except Exception as e:
                 r2.errors.append(f"fan-in rep={rep}: {e}")
+                try:
+                    close_all_nodes(client, nodes)
+                    client.close()
+                except Exception:
+                    pass
+
+            print(f"    rep {rep+1}/{repeats} done "
+                  f"({time.time()-rep_t0:.1f}s)", flush=True)
 
         r2.wall_time_s = time.time() - t0
         results.append(r2)
@@ -372,116 +495,148 @@ def run_d2_fan(sizes: List[int], repeats: int) -> List[DepGraphResult]:
 def run_d3_scc(sizes: List[int], repeats: int) -> List[DepGraphResult]:
     """D3: Strongly-connected components — epochs with mutual dependencies.
 
-    Creates a cycle: epoch writes file A and reads file B, while another
-    epoch writes file B and reads file A. This forms an SCC that must be
-    resolved atomically by the group finalization.
+    Creates a cycle of N independent epochs: epoch[i] writes file[i] and
+    reads file[(i-1) % N]. Since every epoch both produces and consumes
+    another epoch's output, the dependency graph forms a cycle (SCC).
+
+    SCCs cannot be committed sequentially (each epoch's finalize would
+    require its dependencies to be finalized first — circular). Instead,
+    this measures the CASCADE ROLLBACK cost: denying one epoch in the SCC
+    triggers atomic rollback of the entire cycle. This is the meaningful
+    scalability metric for SCC resolution.
     """
-    print("\n[D3] SCC (mutual dependencies)")
+    print("\n[D3] SCC (mutual dependencies, cascade rollback)")
     results = []
 
     for n in sizes:
         print(f"  [D3] SCC size={n} (cycle of {n} epochs)")
         r = DepGraphResult(dimension="D3", topology="scc", size=n,
-                           repeats=repeats)
+                           decision="rollback-cascade", repeats=repeats)
         t0 = time.time()
 
         for rep in range(repeats):
             cleanup_dep_dir()
-            # Create seed files for the cycle
+            # Pre-create all cycle files in backing store
             for i in range(n):
                 create_seed_file(f"scc_{i}.dat", f"init-{i}")
-            agent_id = f"d3-scc-{n}"
+            run_tag = f"d3-{n}-r{rep}"
+            nodes: List[EpochNode] = []
+            rep_t0 = time.time()
 
             try:
                 client = OrchClient()
                 client.connect()
-                sess = client.session_open(agent_id=agent_id)
-                sid = sess["session_id"]
 
                 with Timer() as setup_t:
-                    client.session_begin_epoch(sid, agent_id=agent_id)
-                    # Create mutual dependencies: each node reads prev and
-                    # writes self, forming a cycle 0→1→2→...→n-1→0
-                    cmds = []
+                    # Open N independent epoch nodes
+                    for i in range(n):
+                        node = open_epoch_node(client, f"cyc{i}", run_tag)
+                        nodes.append(node)
+
+                    # Phase 1: each epoch writes its own file
+                    for i in range(n):
+                        fpath = dep_fuse_path(f"scc_{i}.dat")
+                        client.session_run(
+                            nodes[i].session_id,
+                            f"echo 'scc-{i}-written' > {fpath}")
+
+                    # Phase 2: each epoch reads its predecessor's file
+                    # epoch[i] reads file[(i-1) % n] → creates cycle
                     for i in range(n):
                         prev = (i - 1) % n
                         read_path = dep_fuse_path(f"scc_{prev}.dat")
-                        write_path = dep_fuse_path(f"scc_{i}.dat")
-                        cmds.append(
-                            f"cat {read_path} > /dev/null && "
-                            f"echo 'scc-{i}-updated' > {write_path}")
-                    batch_cmd = " && ".join(cmds) if cmds else "true"
-                    client.session_run(sid, batch_cmd)
+                        client.session_run(
+                            nodes[i].session_id,
+                            f"cat {read_path} > /dev/null")
 
+                # Verify: in an SCC, rolling back any node should affect all
+                verified, verrs = verify_dependencies(
+                    client, nodes, max(1, n - 1))
+                r.verified_deps = verified
+                if verrs:
+                    r.errors.extend(verrs)
+
+                # Measure cascade rollback: deny ONE epoch, ShadowFS
+                # cascades to the entire SCC atomically.
                 with Timer() as fin_t:
-                    client.session_commit_epoch(sid, agent_id=agent_id,
-                                               allowed_ops=ALLOW_ALL_OPS)
+                    # Deny the first epoch → triggers SCC-wide rollback
+                    client.session_resolve_epoch(
+                        nodes[0].session_id,
+                        agent_id=nodes[0].agent_id,
+                        decision="deny")
+                    # Rollback remaining epochs (may already be cascaded)
+                    for node in nodes[1:]:
+                        try:
+                            client.session_rollback_epoch(
+                                node.session_id,
+                                agent_id=node.agent_id)
+                        except Exception:
+                            pass  # already rolled back by cascade
 
                 r.setup_ns.append(setup_t.elapsed_ns)
                 r.finalize_ns.append(fin_t.elapsed_ns)
                 r.total_ns.append(setup_t.elapsed_ns + fin_t.elapsed_ns)
 
-                client.session_close(sid)
+                close_all_nodes(client, nodes)
                 client.close()
             except Exception as e:
                 r.errors.append(f"rep={rep}: {e}")
+                try:
+                    close_all_nodes(client, nodes)
+                    client.close()
+                except Exception:
+                    pass
+
+            print(f"    rep {rep+1}/{repeats} done "
+                  f"({time.time()-rep_t0:.1f}s)", flush=True)
 
         r.wall_time_s = time.time() - t0
         results.append(r)
         if r.finalize_ns:
-            s = compute_stats("scc-finalize", r.finalize_ns)
-            print(f"    SCC finalize: mean={s.mean_ns/1e6:.2f}ms "
+            s = compute_stats("scc-rollback", r.finalize_ns)
+            print(f"    SCC cascade rollback: mean={s.mean_ns/1e6:.2f}ms "
                   f"p95={s.p95_ns/1e6:.2f}ms")
 
     return results
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# D4: Concurrent agents
+# D4: Concurrent agents with shared dependency
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _run_single_agent_epoch(agent_idx: int, epoch_count: int,
-                            orch_sock: str = None) -> Dict[str, Any]:
-    """Run one agent's epoch lifecycle (used by D4 concurrent test).
+def _open_and_write_agent(agent_idx: int, run_tag: str,
+                          shared_file: str) -> Dict[str, Any]:
+    """Open one agent's epoch and read the shared root file.
 
-    All agents write to the SAME shared directory, forming a real dependency
-    graph in ShadowFS. This is intentional: D4 measures how group-level
-    finalization scales when concurrent agents share file dependencies.
-
-    IMPORTANT: This function only does begin_epoch + session_run (the FUSE
-    write phase). The commit is done separately in phase 2, after ALL agents
-    have finished writing. This prevents FUSE writes from advancing
-    ShadowFS's internal graph_generation during another agent's commit.
+    Each agent forms a real dependency on the root epoch by reading the
+    root's output file. Returns session info for phase-2 commit.
     """
-    agent_id = f"d4-agent-{agent_idx}"
-    client = OrchClient(orch_sock)
-    # Retry connection on transient backlog overflow (BlockingIOError)
+    agent_id = f"dep-d4-{run_tag}-agent{agent_idx}"
+    client = OrchClient()
     for attempt in range(5):
         try:
             client.connect()
             break
         except (BlockingIOError, ConnectionRefusedError, OSError):
             if attempt == 4:
-                return {"agent_idx": agent_idx, "total_ns": 0,
-                        "error": "connect failed after 5 attempts",
-                        "session_id": None, "client": None}
+                return {"agent_idx": agent_idx, "error": "connect failed",
+                        "session_id": None, "client": None, "agent_id": agent_id}
             time.sleep(0.05 * (attempt + 1))
     try:
         sess = client.session_open(agent_id=agent_id)
         sid = sess["session_id"]
-
-        # Phase 1: begin epoch + write (FUSE operations)
         client.session_begin_epoch(sid, agent_id=agent_id)
-        fpath = dep_fuse_path(f"concurrent_{agent_idx}.dat")
-        client.session_run(sid, f"echo 'agent-{agent_idx}' > {fpath}")
-
-        # Return session info for phase 2 (commit)
-        return {"agent_idx": agent_idx, "total_ns": 0,
-                "error": None, "session_id": sid, "client": client}
+        # Read the shared root file → creates cross-epoch dep on root
+        client.session_run(sid, f"cat {shared_file} > /dev/null")
+        # Also write agent's own output (so commit has effects)
+        own_file = dep_fuse_path(f"concurrent_{agent_idx}.dat")
+        client.session_run(sid, f"echo 'agent-{agent_idx}' > {own_file}")
+        return {"agent_idx": agent_idx, "error": None,
+                "session_id": sid, "client": client, "agent_id": agent_id}
     except Exception as e:
         client.close()
-        return {"agent_idx": agent_idx, "total_ns": 0, "error": str(e),
-                "session_id": None, "client": None}
+        return {"agent_idx": agent_idx, "error": str(e),
+                "session_id": None, "client": None, "agent_id": agent_id}
 
 
 def _commit_agent(client, session_id: str, agent_id: str) -> Dict[str, Any]:
@@ -495,11 +650,13 @@ def _commit_agent(client, session_id: str, agent_id: str) -> Dict[str, Any]:
 
 
 def run_d4_concurrent(sizes: List[int], repeats: int) -> List[DepGraphResult]:
-    """D4: Concurrent agents — 1, 8, 32, 128 agents running independent
-    epochs simultaneously. Measures barrier contention and finalization
-    parallelism.
+    """D4: Concurrent agents with shared dependency graph.
+
+    A root epoch writes a shared file; N agent epochs each read it (forming
+    a real fan-out dependency). Then all agents commit concurrently,
+    measuring group-level finalization contention with actual dependencies.
     """
-    print("\n[D4] Concurrent agents")
+    print("\n[D4] Concurrent agents (shared dependency)")
     results = []
 
     for n_agents in sizes:
@@ -510,57 +667,102 @@ def run_d4_concurrent(sizes: List[int], repeats: int) -> List[DepGraphResult]:
 
         for rep in range(repeats):
             cleanup_dep_dir()
+            create_seed_file("shared_root.dat", "shared-base")
+            # Pre-create agent output files
+            for i in range(n_agents):
+                create_seed_file(f"concurrent_{i}.dat", f"agent-base-{i}")
+            run_tag = f"d4-{n_agents}-r{rep}"
 
-            # TWO-PHASE approach to eliminate FUSE-write vs commit race:
-            #   Phase 1: All agents do begin_epoch + session_run (FUSE writes)
-            #   Phase 2: All agents do session_commit_epoch (measured)
-            # This ensures no FUSE writes occur during any agent's commit,
-            # preventing ShadowFS's internal graph_generation from advancing
-            # between another agent's prepare_resolution and begin_finalize.
+            root_client = None
+            root_node = None
+            rep_t0 = time.time()
+            try:
+                # Phase 0: root epoch writes the shared file
+                root_client = OrchClient()
+                root_client.connect()
+                root_node = open_epoch_node(root_client, "root", run_tag)
+                shared_file = dep_fuse_path("shared_root.dat")
+                root_client.session_run(
+                    root_node.session_id,
+                    f"echo 'root-shared-output' > {shared_file}")
 
-            # Phase 1: begin_epoch + write (staggered connections)
-            with ThreadPoolExecutor(max_workers=min(n_agents, 128)) as pool:
-                futures = []
-                for i in range(n_agents):
-                    futures.append(
-                        pool.submit(_run_single_agent_epoch, i, 1))
-                    if i < n_agents - 1:
-                        time.sleep(0.005)
-                phase1_results = [f.result() for f in as_completed(futures)]
+                # Phase 1: all agents open epochs and read the shared file
+                with ThreadPoolExecutor(
+                        max_workers=min(n_agents, 128)) as pool:
+                    futures = []
+                    for i in range(n_agents):
+                        futures.append(pool.submit(
+                            _open_and_write_agent, i, run_tag, shared_file))
+                        if i < n_agents - 1:
+                            time.sleep(0.005)
+                    phase1_results = [f.result() for f in as_completed(futures)]
 
-            # Collect successful sessions for phase 2
-            ready = [r for r in phase1_results
-                     if not r["error"] and r["session_id"]]
-            phase1_errors = [r["error"] for r in phase1_results if r["error"]]
+                ready = [x for x in phase1_results
+                         if not x["error"] and x["session_id"]]
+                phase1_errors = [x["error"] for x in phase1_results
+                                 if x["error"]]
 
-            # Phase 2: commit all agents (measured)
-            if ready:
-                with Timer() as batch_t:
-                    with ThreadPoolExecutor(max_workers=min(len(ready), 128)) as pool:
-                        commit_futures = []
-                        for item in ready:
-                            commit_futures.append(pool.submit(
-                                _commit_agent, item["client"], item["session_id"],
-                                f"d4-agent-{item['agent_idx']}"))
-                        commit_results = [f.result() for f in as_completed(commit_futures)]
+                # Verify dependency: root rollback should affect all agents
+                verified, verrs = verify_dependencies(
+                    root_client, [root_node], max(1, len(ready)))
+                r.verified_deps = verified
+                if verrs:
+                    r.errors.extend(verrs)
 
-                r.finalize_ns.append(batch_t.elapsed_ns)
-                r.total_ns.append(batch_t.elapsed_ns)
-                commit_errors = [cr["error"] for cr in commit_results if cr["error"]]
-                if commit_errors:
-                    r.errors.extend(commit_errors[:5])
+                # Phase 2: commit root + all agents concurrently (measured)
+                if ready:
+                    with Timer() as batch_t:
+                        # Commit root first (it's the producer)
+                        root_client.session_commit_epoch(
+                            root_node.session_id,
+                            agent_id=root_node.agent_id,
+                            allowed_ops=ALLOW_ALL_OPS)
+                        # Then commit all consumers concurrently
+                        with ThreadPoolExecutor(
+                                max_workers=min(len(ready), 128)) as pool:
+                            commit_futures = []
+                            for item in ready:
+                                commit_futures.append(pool.submit(
+                                    _commit_agent, item["client"],
+                                    item["session_id"], item["agent_id"]))
+                            commit_results = [f.result()
+                                              for f in as_completed(commit_futures)]
 
-                # Close all sessions
-                for cr in commit_results:
-                    if cr.get("client"):
-                        try:
-                            cr["client"].session_close(cr["session_id"])
-                            cr["client"].close()
-                        except Exception:
-                            pass
+                    r.finalize_ns.append(batch_t.elapsed_ns)
+                    r.total_ns.append(batch_t.elapsed_ns)
+                    commit_errors = [cr["error"] for cr in commit_results
+                                     if cr["error"]]
+                    if commit_errors:
+                        r.errors.extend(commit_errors[:5])
 
-            if phase1_errors:
-                r.errors.extend(phase1_errors[:5])
+                    # Close all agent sessions
+                    for cr in commit_results:
+                        if cr.get("client"):
+                            try:
+                                cr["client"].session_close(cr["session_id"])
+                                cr["client"].close()
+                            except Exception:
+                                pass
+
+                if phase1_errors:
+                    r.errors.extend(phase1_errors[:5])
+
+                # Close root session
+                close_all_nodes(root_client, [root_node])
+                root_client.close()
+
+            except Exception as e:
+                r.errors.append(f"rep={rep}: {e}")
+                try:
+                    if root_node and root_client:
+                        close_all_nodes(root_client, [root_node])
+                    if root_client:
+                        root_client.close()
+                except Exception:
+                    pass
+
+            print(f"    rep {rep+1}/{repeats} done "
+                  f"({time.time()-rep_t0:.1f}s)", flush=True)
 
         r.wall_time_s = time.time() - t0
         results.append(r)
@@ -581,9 +783,12 @@ def run_d4_concurrent(sizes: List[int], repeats: int) -> List[DepGraphResult]:
 def run_d5_decisions(chain_size: int, repeats: int) -> List[DepGraphResult]:
     """D5: Authorization decisions at different graph positions.
 
+    Builds a real multi-epoch chain (same as D1), then:
     - allow: all epochs commit successfully
-    - root-deny: the root epoch is denied (cascading rollback)
-    - middle-deny: a middle epoch is denied (partial rollback)
+    - root-deny: the ROOT epoch (epoch[0]) is denied → cascading rollback
+      of ALL downstream epochs
+    - middle-deny: a MIDDLE epoch (epoch[chain_size//2]) is denied →
+      partial rollback of only its downstream dependents
     """
     print(f"\n[D5] Authorization decisions (chain_size={chain_size})")
     results = []
@@ -597,53 +802,104 @@ def run_d5_decisions(chain_size: int, repeats: int) -> List[DepGraphResult]:
 
         for rep in range(repeats):
             cleanup_dep_dir()
-            create_seed_file("decision_0.dat", "root")
-            agent_id = f"d5-{decision_mode}-{chain_size}"
+            # Pre-create all chain files
+            for i in range(chain_size):
+                create_seed_file(f"decision_{i}.dat", f"base-{i}")
+            run_tag = f"d5-{decision_mode}-{chain_size}-r{rep}"
+            nodes: List[EpochNode] = []
+            rep_t0 = time.time()
 
             try:
                 client = OrchClient()
                 client.connect()
-                sess = client.session_open(agent_id=agent_id)
-                sid = sess["session_id"]
 
+                # Setup: build a real multi-epoch chain
                 with Timer() as setup_t:
-                    client.session_begin_epoch(sid, agent_id=agent_id)
-                    cmds = []
+                    for i in range(chain_size):
+                        node = open_epoch_node(client, f"n{i}", run_tag)
+                        nodes.append(node)
+
+                    # Build cross-epoch chain dependencies
                     for i in range(chain_size):
                         fpath = dep_fuse_path(f"decision_{i}.dat")
-                        cmds.append(f"echo 'node-{i}' > {fpath}")
-                    batch_cmd = " && ".join(cmds) if cmds else "true"
-                    client.session_run(sid, batch_cmd)
+                        # Producer writes
+                        client.session_run(
+                            nodes[i].session_id,
+                            f"echo 'node-{i}' > {fpath}")
+                        # Consumer reads (cross-epoch dep)
+                        if i + 1 < chain_size:
+                            client.session_run(
+                                nodes[i + 1].session_id,
+                                f"cat {fpath} > /dev/null")
 
-                # Apply the decision
+                # Verify dependencies formed
+                verified, verrs = verify_dependencies(
+                    client, nodes, max(1, chain_size - 1))
+                r.verified_deps = verified
+                if verrs:
+                    r.errors.extend(verrs)
+
+                # Apply the decision at the correct graph position
                 with Timer() as fin_t:
                     if decision_mode == "allow":
-                        client.session_commit_epoch(
-                            sid, agent_id=agent_id,
-                            allowed_ops=ALLOW_ALL_OPS)
+                        # Commit all epochs
+                        for node in nodes:
+                            client.session_commit_epoch(
+                                node.session_id, agent_id=node.agent_id,
+                                allowed_ops=ALLOW_ALL_OPS)
                     elif decision_mode == "root-deny":
-                        # Deny the entire epoch (root deny = full rollback)
+                        # Deny the ROOT epoch (epoch[0]) → full cascade
                         client.session_resolve_epoch(
-                            sid, agent_id=agent_id,
+                            nodes[0].session_id,
+                            agent_id=nodes[0].agent_id,
                             decision="deny")
+                        # Remaining epochs must also be rolled back
+                        # (they depend on the denied root)
+                        for node in nodes[1:]:
+                            try:
+                                client.session_rollback_epoch(
+                                    node.session_id,
+                                    agent_id=node.agent_id)
+                            except Exception:
+                                pass  # already cascaded
                     elif decision_mode == "middle-deny":
-                        # Deny with a restrictive policy that only allows
-                        # the first half of the files (simulates middle-node
-                        # policy violation detected at authorization time)
-                        # Since we have a single epoch, we deny it entirely
-                        # to simulate the cascade from a middle-node reject.
+                        # Deny a MIDDLE epoch → partial cascade
+                        mid = chain_size // 2
+                        # Commit epochs before the middle (they're independent)
+                        for node in nodes[:mid]:
+                            client.session_commit_epoch(
+                                node.session_id, agent_id=node.agent_id,
+                                allowed_ops=ALLOW_ALL_OPS)
+                        # Deny the middle epoch
                         client.session_resolve_epoch(
-                            sid, agent_id=agent_id,
+                            nodes[mid].session_id,
+                            agent_id=nodes[mid].agent_id,
                             decision="deny")
+                        # Rollback downstream of middle
+                        for node in nodes[mid + 1:]:
+                            try:
+                                client.session_rollback_epoch(
+                                    node.session_id,
+                                    agent_id=node.agent_id)
+                            except Exception:
+                                pass  # already cascaded
 
                 r.setup_ns.append(setup_t.elapsed_ns)
                 r.finalize_ns.append(fin_t.elapsed_ns)
                 r.total_ns.append(setup_t.elapsed_ns + fin_t.elapsed_ns)
 
-                client.session_close(sid)
+                close_all_nodes(client, nodes)
                 client.close()
             except Exception as e:
                 r.errors.append(f"rep={rep}: {e}")
+                try:
+                    close_all_nodes(client, nodes)
+                    client.close()
+                except Exception:
+                    pass
+
+            print(f"    rep {rep+1}/{repeats} done "
+                  f"({time.time()-rep_t0:.1f}s)", flush=True)
 
         r.wall_time_s = time.time() - t0
         results.append(r)
@@ -659,21 +915,22 @@ def run_d5_decisions(chain_size: int, repeats: int) -> List[DepGraphResult]:
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Default sizes
-FULL_CHAIN_SIZES = [1, 10, 100, 500]
-FULL_FAN_SIZES = [2, 8, 32, 128]
-FULL_SCC_SIZES = [2, 4, 8, 16]
-FULL_CONCURRENT_SIZES = [1, 8, 16, 32]
-FULL_DECISION_CHAIN = 10
+# Default sizes — each graph node is an independent session (cgroup + fork),
+# so per-node overhead is ~300-500ms. Keep sizes practical (< 2 min per config).
+FULL_CHAIN_SIZES = [2, 4, 8, 16]
+FULL_FAN_SIZES = [2, 4, 8, 16]
+FULL_SCC_SIZES = [2, 4, 8]
+FULL_CONCURRENT_SIZES = [1, 4, 8, 16]
+FULL_DECISION_CHAIN = 8
 
-QUICK_CHAIN_SIZES = [1, 5, 10]
-QUICK_FAN_SIZES = [2, 4, 8]
+QUICK_CHAIN_SIZES = [2, 4, 8]
+QUICK_FAN_SIZES = [2, 4]
 QUICK_SCC_SIZES = [2, 4]
-QUICK_CONCURRENT_SIZES = [1, 4, 8]
-QUICK_DECISION_CHAIN = 5
+QUICK_CONCURRENT_SIZES = [1, 4]
+QUICK_DECISION_CHAIN = 4
 
-DEFAULT_REPEATS = 10
-QUICK_REPEATS = 3
+DEFAULT_REPEATS = 5
+QUICK_REPEATS = 2
 
 
 def _is_fuse_mounted(mount_point: str) -> bool:
@@ -780,6 +1037,7 @@ def main():
 
     print("═" * 70)
     print("  RQ3 Dependency Graph Scalability Experiment")
+    print("  (cross-epoch dependency construction)")
     print("═" * 70)
 
     ensure_dep_dirs()
@@ -809,18 +1067,20 @@ def main():
         print("  SUMMARY")
         print("═" * 70)
         print(f"{'Dim':<4} {'Topology':<12} {'Size':<6} {'Decision':<12} "
-              f"{'Finalize mean(ms)':<18} {'P95(ms)':<10} {'Errors'}")
-        print("─" * 70)
+              f"{'Finalize mean(ms)':<18} {'P95(ms)':<10} "
+              f"{'Deps':<5} {'Errors'}")
+        print("─" * 78)
         for r in all_results:
             if r.finalize_ns:
                 s = compute_stats("summary", r.finalize_ns)
                 print(f"{r.dimension:<4} {r.topology:<12} {r.size:<6} "
                       f"{r.decision:<12} {s.mean_ns/1e6:<18.3f} "
-                      f"{s.p95_ns/1e6:<10.3f} {len(r.errors)}")
+                      f"{s.p95_ns/1e6:<10.3f} "
+                      f"{r.verified_deps:<5} {len(r.errors)}")
             else:
                 print(f"{r.dimension:<4} {r.topology:<12} {r.size:<6} "
                       f"{r.decision:<12} {'N/A':<18} {'N/A':<10} "
-                      f"{len(r.errors)}")
+                      f"{r.verified_deps:<5} {len(r.errors)}")
 
     cleanup_dep_dir()
     print("\n[done] Dependency graph scalability experiment complete.")

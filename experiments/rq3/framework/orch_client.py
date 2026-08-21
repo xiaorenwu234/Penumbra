@@ -181,6 +181,20 @@ class OrchClient:
             "agent_id": agent_id,
         })
 
+    # ─── Dependency graph queries ─────────────────────────────────────────
+
+    def get_affected(self, cgroup_id: str) -> Dict:
+        """Query which cgroups would be affected by a rollback (dry-run).
+
+        Returns {status, affected: [cgroup_id, ...]}.
+        Used to verify that cross-epoch dependencies actually formed
+        before measuring finalization cost.
+        """
+        return self.request_ok({
+            "action": "get_affected",
+            "cgroup_id": cgroup_id,
+        })
+
     # ─── Timed operations ─────────────────────────────────────────────────
 
     def timed_begin_epoch(self, session_id: str,
