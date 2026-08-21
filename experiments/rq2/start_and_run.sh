@@ -3,7 +3,7 @@
 set -e
 
 PROJ="/home/xht/桌面/penumbra-work/RQ2/speculative_shadow"
-EXP="$PROJ/experiments"
+EXP="$PROJ/experiments/rq2"
 
 echo "[1/6] 清理旧进程和挂载..."
 pkill -9 -f shadow-proc 2>/dev/null || true
@@ -84,6 +84,17 @@ else
     echo "  WARNING: ShadowObserve 二进制不存在，audit 测试将被 skip"
 fi
 
+# 等待 socket 就绪（最多 15 秒）
+for i in $(seq 1 15); do
+    if [ -S /tmp/shadow_proc.sock ]; then
+        break
+    fi
+    sleep 1
+done
+if [ ! -S /tmp/shadow_proc.sock ]; then
+    echo "ERROR: ShadowProc socket 未创建"; cat /var/tmp/shadowproc.log; exit 1
+fi
+
 # 连接测试
 python3 -c "
 import socket, json
@@ -122,7 +133,7 @@ export SHADOWFS_MNT=/tmp/shadow-rq2-test/mnt
 export SHADOWFS_ORIG=/tmp/shadow-rq2-test/orig
 export SHADOWFS_STAGING=/tmp/shadow-rq2-test/staging
 
-REPEATS="${1:-2}"
+REPEATS="${1:-10}"
 TRIALS="${2:-100}"
 
 # Phase A: Run exp1-4 (BPF map accumulates entries)

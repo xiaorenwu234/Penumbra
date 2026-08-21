@@ -130,13 +130,47 @@ class OrchClient:
         })
 
     def session_commit_epoch(self, session_id: str,
-                             agent_id: str = "rq3-bench") -> Dict:
-        """Commit the current epoch (finalize + release)."""
+                             agent_id: str = "rq3-bench",
+                             allowed_ops: list = None) -> Dict:
+        """Commit the current epoch (finalize + release).
+
+        allowed_ops is MANDATORY: the typed prospective policy that authorizes
+        the epoch's effects. Defaults to a wildcard allow for benchmarks.
+        """
+        if allowed_ops is None:
+            allowed_ops = [{"event_type": "*", "action": "allow",
+                            "path_pattern": "/"}]
         return self.request_ok({
             "action": "session_commit_epoch",
             "session_id": session_id,
             "agent_id": agent_id,
+            "allowed_ops": allowed_ops,
         })
+
+    def session_resolve_epoch(self, session_id: str,
+                              agent_id: str = "rq3-bench",
+                              decision: str = "allow",
+                              allowed_ops: list = None,
+                              policy_metadata: dict = None) -> Dict:
+        """Unified authorization-resolution interface.
+
+        decision='allow' commits with the typed policy;
+        decision='deny' rolls back losslessly.
+        """
+        if allowed_ops is None and decision == "allow":
+            allowed_ops = [{"event_type": "*", "action": "allow",
+                            "path_pattern": "/"}]
+        req = {
+            "action": "session_resolve_epoch",
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "decision": decision,
+        }
+        if allowed_ops is not None:
+            req["allowed_ops"] = allowed_ops
+        if policy_metadata is not None:
+            req["policy_metadata"] = policy_metadata
+        return self.request_ok(req)
 
     def session_rollback_epoch(self, session_id: str,
                                agent_id: str = "rq3-bench") -> Dict:
@@ -170,10 +204,23 @@ class OrchClient:
         return resp, t.elapsed_ns
 
     def timed_commit(self, session_id: str,
-                     agent_id: str = "rq3-bench") -> Tuple[Dict, int]:
+                     agent_id: str = "rq3-bench",
+                     allowed_ops: list = None) -> Tuple[Dict, int]:
         """Commit epoch and return (response, elapsed_ns)."""
         with Timer() as t:
-            resp = self.session_commit_epoch(session_id, agent_id)
+            resp = self.session_commit_epoch(session_id, agent_id,
+                                            allowed_ops=allowed_ops)
+        return resp, t.elapsed_ns
+
+    def timed_resolve(self, session_id: str,
+                      agent_id: str = "rq3-bench",
+                      decision: str = "allow",
+                      allowed_ops: list = None) -> Tuple[Dict, int]:
+        """Resolve epoch (commit or rollback) and return (response, elapsed_ns)."""
+        with Timer() as t:
+            resp = self.session_resolve_epoch(session_id, agent_id,
+                                             decision=decision,
+                                             allowed_ops=allowed_ops)
         return resp, t.elapsed_ns
 
     def timed_rollback(self, session_id: str,

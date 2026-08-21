@@ -177,7 +177,23 @@ def _session_orch(proxy, fs_handler):
     orch._session_agents = {}
     orch._agent_cv = threading.Condition()
     orch._agent_wait_timeout = 5.0
+    # SECURITY: trusted_test_mode allows anonymous sessions for testing.
+    orch._trusted_test_mode = True
+    # Authorized epochs state (required by _fs_group_finalize).
+    orch._authorized_epochs = {}
+    orch._authorized_lock = threading.Lock()
+    orch._pending_groups = {}
+    orch._pending_group_lock = threading.Lock()
+    # Per-cgroup commit locks (parallel finalization optimization).
+    orch._commit_locks = {}
+    orch._commit_locks_guard = threading.Lock()
+    # Graph-sequence lock (eliminates prepare→begin_finalize TOCTOU).
+    orch._graph_sequence_lock = threading.Lock()
     return orch
+
+
+# Default test policy: allow all operations (for testing only).
+_TEST_ALLOWED_OPS = [{"event_type": "*", "action": "allow", "path_pattern": "/"}]
 
 
 class TestSessionCommitEpochFSFirst(unittest.TestCase):
@@ -200,7 +216,7 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
             return {"status": "ok"}
 
         orch = _session_orch(proxy, fs)
-        resp = orch.session_commit_epoch("sid1")
+        resp = orch.session_commit_epoch("sid1", allowed_ops=_TEST_ALLOWED_OPS)
 
         self.assertEqual(resp["status"], "ok")
         self.assertEqual(resp["output"], "OUT")
@@ -229,7 +245,7 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
             return {"status": "error", "message": "fs cannot finalize"}
 
         orch = _session_orch(proxy, fs)
-        resp = orch.session_commit_epoch("sid1")
+        resp = orch.session_commit_epoch("sid1", allowed_ops=_TEST_ALLOWED_OPS)
 
         self.assertNotEqual(resp["status"], "ok")
         self.assertIn("quiesce_for_commit", proxy.calls)
@@ -254,7 +270,7 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
             return {"status": "ok"}
 
         orch = _session_orch(proxy, fs)
-        resp = orch.session_commit_epoch("sid1")
+        resp = orch.session_commit_epoch("sid1", allowed_ops=_TEST_ALLOWED_OPS)
 
         self.assertEqual(resp["status"], "error")
         self.assertEqual(resp.get("decision"), "authorized_pending")

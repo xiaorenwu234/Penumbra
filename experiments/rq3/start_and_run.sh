@@ -154,19 +154,29 @@ export SHADOWFS_STAGING="$STAGING_DIR"
 WORKLOAD="${1:-all}"
 EXTRA_ARGS="${@:2}"
 
-python3 run_all.py --workload "$WORKLOAD" --skip-build $EXTRA_ARGS
+# 支持 "dep" 或 "dep-graph" 参数运行依赖图扩展性实验
+if [ "$WORKLOAD" = "dep" ] || [ "$WORKLOAD" = "dep-graph" ]; then
+    echo "运行依赖图扩展性实验..."
+    python3 dep_graph_scalability.py $EXTRA_ARGS
+else
+    python3 run_all.py --workload "$WORKLOAD" --skip-build $EXTRA_ARGS
+fi
 
 EXIT_CODE=$?
 
 # ─── 清理 ─────────────────────────────────────────────────────────────────────
 echo ""
 echo "清理守护进程..."
-kill $ORCH_PID 2>/dev/null || true
-kill $SP_PID 2>/dev/null || true
-kill $FS_PID 2>/dev/null || true
-wait $ORCH_PID 2>/dev/null || true
-wait $SP_PID 2>/dev/null || true
-wait $FS_PID 2>/dev/null || true
+# 顺序：orchestrator → ShadowProc → ShadowFS（orchestrator 持有前两者的连接）
+# 先 SIGTERM，等 2 秒，不死则 SIGKILL。避免 wait 无限阻塞。
+for pid in $ORCH_PID $SP_PID $FS_PID; do
+    kill "$pid" 2>/dev/null || true
+done
+sleep 2
+for pid in $ORCH_PID $SP_PID $FS_PID; do
+    kill -9 "$pid" 2>/dev/null || true
+done
+# 不 wait（进程可能已被 SIGKILL，wait 可能卡住）
 umount -l "$MNT_DIR" 2>/dev/null || true
 rm -f "$SHADOWFS_SOCK" "$SHADOWPROC_SOCK" "$ORCH_SOCK"
 

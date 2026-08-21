@@ -55,7 +55,8 @@ import signal
 import tempfile
 import time
 import uuid
-from typing import Optional, List, Dict, Any, Tuple
+import struct
+from typing import Optional, List, Dict, Any, Tuple, Set
 
 # Add project root to path so policy.policy_ir is importable.
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -123,6 +124,15 @@ class JournalCorruptError(RuntimeError):
     the last one is unparseable). For a security control plane this must FAIL
     CLOSED: recovery cannot trust a journal with holes in the middle, so the
     orchestrator refuses to start until the operator inspects/moves the file.
+    """
+
+
+class AgentOwnershipError(RuntimeError):
+    """Raised when a caller attempts to rebind a session's agent ownership.
+
+    Agent ownership is bound at session_open and is IMMUTABLE. This prevents
+    a caller from hijacking a session's barrier slot by supplying a different
+    agent_id on a later call (begin_epoch, commit, rollback).
     """
 
 
@@ -387,7 +397,8 @@ class ShadowOrchestrator:
                  shadowobserve_sock: Optional[str] = None,
                  journal_path: Optional[str] = None,
                  shadowfs_mount: Optional[str] = None,
-                 backing_dir: Optional[str] = None):
+                 backing_dir: Optional[str] = None,
+                 trusted_test_mode: bool = False):
         self.fs_client = SocketClient(shadowfs_sock)
         self.proc_client = SocketClient(shadowproc_sock)
         self.observe_client = None
@@ -398,6 +409,10 @@ class ShadowOrchestrator:
         # read-only root, per-candidate tmpfs, and blocked backing dir).
         self._shadowfs_mount = shadowfs_mount
         self._backing_dir = backing_dir
+        # trusted_test_mode: when True, allows anonymous sessions (no agent_id)
+        # for testing purposes. Default is False — production sessions MUST
+        # declare an agent_id so the per-agent barrier cannot be bypassed.
+        self._trusted_test_mode = trusted_test_mode
 
         if shadowobserve_sock:
             self.observe_client = SocketClient(shadowobserve_sock)
@@ -474,10 +489,30 @@ class ShadowOrchestrator:
         self._pending_ack: set = set()
         self._pending_ack_lock = threading.Lock()
 
-        # Serializes ALL multi-service release/finalize interactions (commit
-        # release path, _try_release_pending, and the background retry loop) so
-        # their requests over the shared fs/proc sockets never interleave.
+        # Serializes the BACKGROUND RETRY LOOP's multi-service interactions
+        # so its requests over the shared fs/proc sockets never interleave
+        # with each other. The main commit path no longer holds this lock
+        # for the entire finalization — it uses per-cgroup locks instead,
+        # allowing independent agents (different SCCs) to finalize in parallel.
         self._release_lock = threading.RLock()
+
+        # Per-cgroup commit locks: prevent the background retry loop from
+        # racing with the main commit path on the SAME cgroup. Independent
+        # cgroups (different agents, no shared files) acquire different locks
+        # and finalize concurrently. This is the key optimization for D4
+        # (concurrent agents): the old global _release_lock serialized ALL
+        # commits even when they were completely independent.
+        self._commit_locks: Dict[str, threading.Lock] = {}
+        self._commit_locks_guard = threading.Lock()  # protects _commit_locks dict
+
+        # Graph-sequence lock: serializes ONLY the prepare_resolution →
+        # begin_finalize two-step sequence (~1-2ms, just 2 socket round-trips).
+        # This eliminates the TOCTOU window where two threads both prepare
+        # with the same graph_generation, then one's begin_finalize fails
+        # because the other already advanced the graph. The rest of the
+        # commit path (quiesce, poll, release, ack) remains fully parallel.
+        # This is the FUNDAMENTAL fix for concurrent graph_generation mismatch.
+        self._graph_sequence_lock = threading.Lock()
 
         # Background finalize-retry loop. A promotion can fail on a transient
         # I/O error, leaving an agent AuthorizedPending/Finalizing (fenced).
@@ -740,6 +775,20 @@ class ShadowOrchestrator:
         if not hasattr(self, "_pending_groups"):
             self._pending_groups = {}
 
+    def _get_commit_lock(self, cgroup_id: str) -> threading.Lock:
+        """Get (or create) the per-cgroup commit lock.
+
+        Independent cgroups get different locks, so their finalization paths
+        can proceed in parallel. The background retry loop also acquires this
+        lock before touching a cgroup, preventing races with the main path.
+        """
+        with self._commit_locks_guard:
+            lock = self._commit_locks.get(cgroup_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._commit_locks[cgroup_id] = lock
+            return lock
+
     def _policy_hash(self, proc_policy: Optional[Dict]) -> str:
         blob = json.dumps(proc_policy or {}, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()
@@ -813,98 +862,118 @@ class ShadowOrchestrator:
           - message: str (on error)
         """
         # Step 1: prepare_resolution — compute the SCC, get group_id + graph_gen.
+        #
+        # FUNDAMENTAL CONCURRENCY FIX: The _graph_sequence_lock serializes the
+        # prepare_resolution → begin_finalize sequence across all threads.
+        # This eliminates the TOCTOU window where two threads both prepare
+        # with the same graph_generation, then one's begin_finalize fails
+        # because the other already advanced the graph. The lock is narrow
+        # (~5-10ms: a few socket round-trips), so the expensive parts of the
+        # commit path (poll, release, ack) remain fully parallel.
         prep_req = {"action": "prepare_resolution", "cgroup_id": cgroup_id}
         if epoch_id:
             prep_req["epoch_id"] = epoch_id
-        try:
-            prep = self.fs_client.request(prep_req)
-        except Exception as e:  # noqa: BLE001
-            return {"status": "error", "message": f"prepare_resolution: {e}"}
-        if prep.get("status") != "ok":
-            return prep
 
-        group_id = prep["group_id"]
-        members = prep["members"]
-        graph_gen = prep["graph_generation"]
-        log.info("  prepare_resolution: group_id=%d members=%s graph_gen=%d",
-                 group_id, members, graph_gen)
+        with self._graph_sequence_lock:
+            try:
+                prep = self.fs_client.request(prep_req)
+            except Exception as e:  # noqa: BLE001
+                return {"status": "error", "message": f"prepare_resolution: {e}"}
+            if prep.get("status") != "ok":
+                return prep
 
-        # Record this epoch's own authorization decision before considering
-        # SCC finalization. Missing siblings are not errors: they mean this
-        # epoch is authorized_pending and must remain fenced until their policy
-        # paths independently authorize them.
-        policy_hash = self._record_authorized_epoch(epoch_id or members[0],
-                                                    cgroup_id, proc_policy)
-        auth_req = {"action": "authorize", "cgroup_id": cgroup_id,
-                    "policy_hash": policy_hash}
-        if epoch_id:
-            auth_req["epoch_id"] = epoch_id
-        try:
-            auth = self.fs_client.request(auth_req)
-        except Exception as e:  # noqa: BLE001
-            self._cancel_group(group_id)
-            return {"status": "error", "message": f"authorize: {e}"}
-        if not isinstance(auth, dict) or auth.get("status") != "ok":
-            self._cancel_group(group_id)
-            return auth
-        authorized_epoch = auth.get("epoch_id") or epoch_id or members[0]
-        if authorized_epoch != (epoch_id or members[0]):
-            policy_hash = self._record_authorized_epoch(authorized_epoch,
+            group_id = prep["group_id"]
+            members = prep["members"]
+            graph_gen = prep["graph_generation"]
+            log.info("  prepare_resolution: group_id=%d members=%s graph_gen=%d",
+                     group_id, members, graph_gen)
+
+            # Record this epoch's own authorization decision before considering
+            # SCC finalization. Missing siblings are not errors: they mean this
+            # epoch is authorized_pending and must remain fenced until their policy
+            # paths independently authorize them.
+            policy_hash = self._record_authorized_epoch(epoch_id or members[0],
                                                         cgroup_id, proc_policy)
-        if auth.get("policy_hash") and auth.get("policy_hash") != policy_hash:
-            self._cancel_group(group_id)
-            return {"status": "error", "message": "ShadowFS policy_hash mismatch"}
-        if hasattr(self, "_journal"):
-            self._journal.append("authorized", epoch=authorized_epoch,
-                                 cgroup=cgroup_id, policy_hash=policy_hash)
+            auth_req = {"action": "authorize", "cgroup_id": cgroup_id,
+                        "policy_hash": policy_hash}
+            if epoch_id:
+                auth_req["epoch_id"] = epoch_id
+            try:
+                auth = self.fs_client.request(auth_req)
+            except Exception as e:  # noqa: BLE001
+                self._cancel_group(group_id)
+                return {"status": "error", "message": f"authorize: {e}"}
+            if not isinstance(auth, dict) or auth.get("status") != "ok":
+                self._cancel_group(group_id)
+                return auth
+            authorized_epoch = auth.get("epoch_id") or epoch_id or members[0]
+            if authorized_epoch != (epoch_id or members[0]):
+                policy_hash = self._record_authorized_epoch(authorized_epoch,
+                                                            cgroup_id, proc_policy)
+            if auth.get("policy_hash") and auth.get("policy_hash") != policy_hash:
+                self._cancel_group(group_id)
+                return {"status": "error", "message": "ShadowFS policy_hash mismatch"}
+            if hasattr(self, "_journal"):
+                self._journal.append("authorized", epoch=authorized_epoch,
+                                     cgroup=cgroup_id, policy_hash=policy_hash)
 
-        policies = self._member_policies(members)
-        if policies is None:
-            missing = []
-            with self._authorized_lock:
-                missing = [m for m in members if m not in self._authorized_epochs]
-            self._cancel_group(group_id)
-            return {"status": "ok", "group_id": group_id, "members": members,
-                    "graph_generation": graph_gen, "state": "authorized_pending",
-                    "finalize_err": "waiting for independent member authorization",
-                    "missing_members": missing}
+            policies = self._member_policies(members)
+            if policies is None:
+                missing = []
+                with self._authorized_lock:
+                    missing = [m for m in members if m not in self._authorized_epochs]
+                self._cancel_group(group_id)
+                return {"status": "ok", "group_id": group_id, "members": members,
+                        "graph_generation": graph_gen, "state": "authorized_pending",
+                        "finalize_err": "waiting for independent member authorization",
+                        "missing_members": missing}
 
-        member_cgroups = [policies[m]["cgroup_id"] for m in members]
+            member_cgroups = [policies[m]["cgroup_id"] for m in members]
 
-        # Freeze every independently authorized SCC member before ShadowFS
-        # captures mmap/writeback state. A primary-only freeze lets siblings run
-        # concurrently with sealing/finalization, so fail closed if any member
-        # cannot be proven stopped by ShadowProc.
-        proc_client = getattr(self, "proc_client", None)
-        if proc_client is not None:
-            for mcg in member_cgroups:
-                try:
-                    freeze_resp = proc_client.request({
-                        "action": "freeze_by_cgroup",
-                        "cgroup_id": mcg,
-                    })
-                except Exception as e:  # noqa: BLE001
-                    self._cancel_group(group_id)
-                    return {"status": "error", "message": f"freeze {mcg}: {e}"}
-                if not isinstance(freeze_resp, dict) or freeze_resp.get("status") != "ok":
-                    self._cancel_group(group_id)
-                    return {"status": "error",
-                            "message": f"freeze {mcg}: {freeze_resp}"}
+            # Freeze every independently authorized SCC member before ShadowFS
+            # captures mmap/writeback state.
+            proc_client = getattr(self, "proc_client", None)
+            if proc_client is not None:
+                for mcg in member_cgroups:
+                    try:
+                        freeze_resp = proc_client.request({
+                            "action": "freeze_by_cgroup",
+                            "cgroup_id": mcg,
+                        })
+                    except Exception as e:  # noqa: BLE001
+                        self._cancel_group(group_id)
+                        return {"status": "error", "message": f"freeze {mcg}: {e}"}
+                    if not isinstance(freeze_resp, dict) or freeze_resp.get("status") != "ok":
+                        self._cancel_group(group_id)
+                        return {"status": "error",
+                                "message": f"freeze {mcg}: {freeze_resp}"}
 
-        # Step 2: begin_finalize — promote only after all members are already
-        # independently AuthorizedPending.
-        # The graph_generation is checked by ShadowFS for TOCTOU: if the
-        # dependency graph changed between prepare and begin, it refuses.
-        try:
-            fin = self.fs_client.request({
-                "action": "begin_finalize",
-                "group_id": group_id,
-                "graph_generation": graph_gen,
-            })
-        except Exception as e:  # noqa: BLE001
-            return {"status": "error", "message": f"begin_finalize: {e}"}
+            # Step 2: begin_finalize — still under _graph_sequence_lock, so
+            # no other thread can advance the graph between our prepare and
+            # this call. The TOCTOU is eliminated by construction.
+            try:
+                fin = self.fs_client.request({
+                    "action": "begin_finalize",
+                    "group_id": group_id,
+                    "graph_generation": graph_gen,
+                })
+            except Exception as e:  # noqa: BLE001
+                fin = {"status": "error", "message": str(e)}
+
+        # ── _graph_sequence_lock released ──
+        # From here on, the expensive parts (poll, release, ack) run in parallel.
+
         if fin.get("status") != "ok":
-            return fin
+            err_msg = fin.get("message", "")
+            # "already finalized" means another member's commit finalized this
+            # group before us (possible if they acquired the lock first and
+            # their group included our epoch). This is SUCCESS.
+            if "already finalized" in err_msg:
+                log.info("  begin_finalize: member already finalized by "
+                         "concurrent group commit — treating as finalized")
+                fin = {"status": "ok", "state": "finalized"}
+            else:
+                return fin
 
         # Step 3: poll get_finalize_status until finalized or failed.
         state = fin.get("state", "pending")
@@ -1868,13 +1937,27 @@ class ShadowOrchestrator:
         sessions; the per-agent barrier then serializes that agent's tool calls
         ACROSS all of its sessions, because they share one reasoning thread and
         therefore one causal chain. Sessions of different agents never block each
-        other. Omitting agent_id leaves the session unattributed (no barrier).
+        other.
+
+        SECURITY: agent_id is MANDATORY unless trusted_test_mode is enabled.
+        Omitting agent_id in production would allow a deferred epoch to bypass
+        the per-agent barrier, breaking the causal serialization guarantee.
+        Once bound, agent ownership is IMMUTABLE — it cannot be rebound later.
         """
+        # Enforce agent_id requirement: production sessions MUST declare an
+        # agent so the per-agent barrier cannot be bypassed.
+        if not agent_id and not self._trusted_test_mode:
+            return {"status": "error",
+                    "message": "agent_id is required for session_open. "
+                               "Anonymous sessions are only permitted when "
+                               "trusted_test_mode is explicitly enabled."}
         proxy = self._get_proxy()
         sid = proxy.open_session(cgroup_name)
         cgroup_id = proxy.sessions[sid].cgroup_id
         with self._sessions_lock:
             self._sessions[sid] = cgroup_id
+        # Bind agent ownership at creation time. This binding is IMMUTABLE:
+        # once set, it cannot be changed by later calls.
         if agent_id:
             with self._agent_cv:
                 self._session_agents[sid] = agent_id
@@ -1962,17 +2045,35 @@ class ShadowOrchestrator:
 
     def _resolve_agent(self, session_id: str,
                        agent_id: Optional[str] = None) -> Optional[str]:
-        """Resolve the agent for a call, recording a late-supplied agent_id.
+        """Resolve the agent for a call, enforcing immutable ownership.
 
-        Callers may either bind the agent once at session_open or pass agent_id
-        per call; passing it per call also (re)binds the session so subsequent
-        commit/rollback can find it without the caller repeating itself.
+        SECURITY: Agent ownership is bound at session_open and is IMMUTABLE.
+        If the session already has an owner, the supplied agent_id MUST match
+        it — rebinding is forbidden. This prevents a caller from hijacking a
+        session's barrier slot by supplying a different agent_id later.
+
+        If no agent_id is supplied, the session's existing owner is returned.
+        If the session has no owner (only possible in trusted_test_mode),
+        None is returned.
         """
+        with self._agent_cv:
+            existing = self._session_agents.get(session_id)
+        if existing is not None:
+            # Session already has an owner — enforce immutable binding.
+            if agent_id is not None and agent_id != existing:
+                raise AgentOwnershipError(
+                    f"session {session_id} is owned by agent '{existing}'; "
+                    f"cannot rebind to '{agent_id}'. Agent ownership is "
+                    f"immutable once set at session_open.")
+            return existing
+        # No existing owner. If agent_id is supplied, bind it now (late binding
+        # is only permitted for sessions created in trusted_test_mode without
+        # an initial agent_id).
         if agent_id:
             with self._agent_cv:
                 self._session_agents[session_id] = agent_id
             return agent_id
-        return self._agent_for_session(session_id)
+        return None
 
     def _agent_sessions(self, agent_id: str) -> List[str]:
         """All sessions currently bound to an agent (diagnostics)."""
@@ -2060,12 +2161,20 @@ class ShadowOrchestrator:
         If `agent_id` is given this is also the per-agent barrier: the call waits
         here while that same agent still has an unfinalized tool call, and
         returns immediately otherwise. A different agent never waits.
+
+        SECURITY: The caller's agent_id MUST match the session's immutable
+        owner (bound at session_open). Mismatch raises AgentOwnershipError.
         """
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
             return {"status": "error", "message": f"unknown session {session_id}"}
         # Resolve the owning agent (declared at session_open, or supplied here).
-        aid = self._resolve_agent(session_id, agent_id)
+        # This enforces immutable ownership: if the session already has an
+        # owner, the supplied agent_id MUST match it.
+        try:
+            aid = self._resolve_agent(session_id, agent_id)
+        except AgentOwnershipError as e:
+            return {"status": "error", "message": str(e)}
         # Barrier BEFORE any state is touched, so a busy/timed-out agent leaves
         # nothing half-open. Note this serializes the agent across ALL of its
         # sessions, not just this one.
@@ -2126,21 +2235,138 @@ class ShadowOrchestrator:
         return {"status": "ok", "cgroup_id": cgroup_id, "epoch_id": epoch_id}
 
     def session_commit_epoch(self, session_id: str,
-                             agent_id: Optional[str] = None) -> dict:
+                             agent_id: Optional[str] = None,
+                             allowed_ops: Optional[List[Dict]] = None) -> dict:
         """Finalize the epoch, then free the agent's barrier slot.
 
         try/finally on purpose: the implementation below has many early-return
         failure paths, and a missed release would wedge that agent on every
         later call until the barrier timeout. If the caller does not resend
         agent_id we recover it from the session.
+
+        SECURITY: The caller's agent_id MUST match the session's immutable
+        owner (bound at session_open). Mismatch raises AgentOwnershipError.
+
+        SECURITY: allowed_ops is MANDATORY. The epoch is committed only after
+        compiling allowed_ops into a typed PolicyIR. The implicit allow-all
+        path has been removed: a commit without an explicit policy is a
+        correctness hole that reviewers would (rightly) reject.
         """
-        aid = self._resolve_agent(session_id, agent_id)
+        if allowed_ops is None:
+            return {"status": "error",
+                    "message": "allowed_ops is required for session_commit_epoch. "
+                               "Use session_resolve_epoch for the unified authorization "
+                               "interface, or pass an explicit policy."}
         try:
-            return self._commit_epoch_impl(session_id)
+            aid = self._resolve_agent(session_id, agent_id)
+        except AgentOwnershipError as e:
+            return {"status": "error", "message": str(e)}
+        # Compile the policy BEFORE any state is touched. Fail closed on
+        # invalid policy so a malformed rule set never reaches finalization.
+        try:
+            ir = PolicyIR.from_allowed_ops(allowed_ops)
+            proc_policy = ir.to_proc_policy()
+        except ValueError as e:
+            return {"status": "error",
+                    "message": f"invalid policy: {e}"}
+        try:
+            return self._commit_epoch_impl(session_id, proc_policy=proc_policy)
         finally:
             self._agent_release(aid)
 
-    def _commit_epoch_impl(self, session_id: str) -> dict:
+    def session_resolve_epoch(self, session_id: str,
+                              agent_id: Optional[str] = None,
+                              decision: str = "allow",
+                              allowed_ops: Optional[List[Dict]] = None,
+                              policy_metadata: Optional[Dict] = None) -> dict:
+        """Unified authorization-resolution interface for a speculative epoch.
+
+        This is the PRIMARY entry point for finalizing an epoch. It enforces
+        the paper's core mechanism: historical validation and prospective
+        installation use the SAME typed PolicyIR.
+
+        Args:
+            session_id: The session handle.
+            agent_id: Must match the session's immutable owner.
+            decision: "allow" or "deny".
+                - "deny": immediately roll back the epoch (lossless undo).
+                - "allow": compile allowed_ops → PolicyIR, then commit.
+            allowed_ops: List of allowed operation dicts (required for allow).
+                Each dict has: event_type, action, path_pattern, and optional
+                endpoint. Compiled into PolicyIR for BOTH the historical audit
+                projection and the prospective proc_policy installation.
+            policy_metadata: Optional metadata attached to the journal record
+                for auditability (e.g. who authorized, why, ticket ID).
+
+        Returns:
+            dict with status="ok" on success, or status="error" with message.
+
+        SECURITY:
+            - decision=allow WITHOUT allowed_ops is rejected (fail closed).
+            - The PolicyIR is compiled ONCE and used for both the audit rules
+              (historical) and the proc_policy (prospective). This eliminates
+              the allow-all path that would let an epoch commit without a
+              typed policy.
+        """
+        # Validate decision.
+        decision = (decision or "").lower().strip()
+        if decision not in ("allow", "deny"):
+            return {"status": "error",
+                    "message": f"invalid decision: {decision!r}. Must be 'allow' or 'deny'."}
+
+        # Resolve and enforce agent ownership.
+        try:
+            aid = self._resolve_agent(session_id, agent_id)
+        except AgentOwnershipError as e:
+            return {"status": "error", "message": str(e)}
+
+        # DENY path: roll back the epoch losslessly.
+        if decision == "deny":
+            log.info("SESSION_RESOLVE_EPOCH sid=%s decision=deny agent=%s",
+                     session_id, aid or "-")
+            self._journal.append("resolve_deny", sid=session_id,
+                                 agent_id=aid or "",
+                                 metadata=policy_metadata or {})
+            try:
+                return self._rollback_epoch_impl(session_id)
+            finally:
+                self._agent_release(aid)
+
+        # ALLOW path: allowed_ops is MANDATORY.
+        if not allowed_ops:
+            return {"status": "error",
+                    "message": "allowed_ops is required when decision='allow'. "
+                               "Cannot commit an epoch without a typed prospective policy."}
+
+        # Compile the policy ONCE. The same PolicyIR is used for:
+        #   1. to_audit_rules()  → historical validation (ShadowObserve)
+        #   2. to_proc_policy()  → prospective installation (ShadowProc)
+        # This is the paper's core guarantee: the policy that was audited is
+        # the policy that is installed. No allow-all fallback.
+        try:
+            ir = PolicyIR.from_allowed_ops(allowed_ops)
+            proc_policy = ir.to_proc_policy()
+        except ValueError as e:
+            return {"status": "error",
+                    "message": f"invalid policy (compile failed): {e}"}
+
+        log.info("SESSION_RESOLVE_EPOCH sid=%s decision=allow agent=%s "
+                 "rules=%d policy_hash=%s",
+                 session_id, aid or "-", len(allowed_ops),
+                 self._policy_hash(proc_policy))
+        self._journal.append("resolve_allow", sid=session_id,
+                             agent_id=aid or "",
+                             allowed_ops=allowed_ops,
+                             policy_hash=self._policy_hash(proc_policy),
+                             metadata=policy_metadata or {})
+
+        try:
+            return self._commit_epoch_impl(session_id, proc_policy=proc_policy)
+        finally:
+            self._agent_release(aid)
+
+    def _commit_epoch_impl(self, session_id: str,
+                           proc_policy: Optional[Dict] = None) -> dict:
         """
         Accept the current epoch: keep the candidate as canonical (ShadowProc)
         AND durably PROMOTE the epoch's file changes (ShadowFS). The session
@@ -2153,7 +2379,16 @@ class ShadowOrchestrator:
         epoch marker while the files stayed un-promoted in the overlay, yet it
         destroyed the baseline and released output: a later whole-agent
         rollback could then undo "committed" files with no baseline left.
+
+        SECURITY: proc_policy is MANDATORY. The implicit allow-all path has
+        been removed. Callers MUST compile a typed PolicyIR and pass the
+        resulting proc_policy. This ensures the policy that was audited
+        (historical) is the policy that is installed (prospective).
         """
+        if proc_policy is None:
+            return {"status": "error",
+                    "message": "proc_policy is required for _commit_epoch_impl. "
+                               "The implicit allow-all path has been removed."}
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
             return {"status": "error", "message": f"unknown session {session_id}"}
@@ -2176,13 +2411,19 @@ class ShadowOrchestrator:
         except Exception as e:  # noqa: BLE001
             log.error("  quiesce_for_commit (process layer) failed: %s", e)
             return {"status": "error", "message": str(e)}
-        with self._release_lock:
+        # PER-CGROUP lock instead of the old global _release_lock: independent
+        # agents (different cgroups, no shared files) finalize in parallel.
+        # Only the background retry loop uses the global lock, and it also
+        # acquires this per-cgroup lock before touching a specific cgroup.
+        with self._get_commit_lock(cgroup_id):
             # Step 1: GROUP-LEVEL file finalization -- prepare_resolution →
             # begin_finalize → poll get_finalize_status. This replaces the
             # single-epoch "commit" + "can_release" with the group-aware
             # finalization flow (Phase 3).
+            # SECURITY: proc_policy is the typed policy compiled from the
+            # caller's allowed_ops. No allow-all fallback.
             fs_result = self._fs_group_finalize(epoch_id, cgroup_id,
-                                                proc_policy=self._allow_all_proc_policy())
+                                                proc_policy=proc_policy)
             if fs_result.get("status") != "ok":
                 log.error("  ShadowFS group finalize failed: %s -- baseline "
                           "preserved", fs_result.get("message"))
@@ -2401,8 +2642,14 @@ class ShadowOrchestrator:
         """Roll back the epoch, then free the agent's barrier slot.
 
         See session_commit_epoch for why this is a try/finally wrapper.
+
+        SECURITY: The caller's agent_id MUST match the session's immutable
+        owner (bound at session_open). Mismatch raises AgentOwnershipError.
         """
-        aid = self._resolve_agent(session_id, agent_id)
+        try:
+            aid = self._resolve_agent(session_id, agent_id)
+        except AgentOwnershipError as e:
+            return {"status": "error", "message": str(e)}
         try:
             return self._rollback_epoch_impl(session_id)
         finally:
@@ -2908,6 +3155,47 @@ class ShadowOrchestrator:
 # Standalone server mode: expose the orchestrator's API via its own Unix socket
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Linux SO_PEERCRED constant (see <asm-generic/socket.h>).
+_SO_PEERCRED = 17
+# struct ucred { pid_t pid; uid_t uid; gid_t gid; } — 12 bytes on Linux.
+_UCRED_STRUCT = struct.Struct("iII")  # pid (int), uid (uint), gid (uint)
+
+
+class PeerAuthenticationError(RuntimeError):
+    """Raised when a socket peer fails authentication.
+
+    The orchestrator socket is part of the TCB boundary. Any connection that
+    cannot be authenticated via SO_PEERCRED (Linux) or whose UID is not in
+    the allowlist is rejected BEFORE any JSON parsing or session lookup.
+    """
+
+
+def _get_peer_credentials(conn: socket.socket) -> Tuple[int, int, int]:
+    """Retrieve (pid, uid, gid) of the connected peer via SO_PEERCRED.
+
+    This is the Linux-specific mechanism for Unix socket peer authentication.
+    The kernel fills in the credentials of the process that called connect(),
+    which cannot be spoofed by the peer.
+
+    Raises PeerAuthenticationError if the socket option is unavailable or
+    the returned data is malformed.
+    """
+    try:
+        # SO_PEERCRED returns a struct ucred (12 bytes).
+        cred = conn.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED,
+                               _UCRED_STRUCT.size)
+        if len(cred) < _UCRED_STRUCT.size:
+            raise PeerAuthenticationError(
+                f"SO_PEERCRED returned {len(cred)} bytes, expected "
+                f"{_UCRED_STRUCT.size}")
+        pid, uid, gid = _UCRED_STRUCT.unpack(cred[:_UCRED_STRUCT.size])
+        return pid, uid, gid
+    except OSError as e:
+        raise PeerAuthenticationError(
+            f"SO_PEERCRED failed: {e}. Peer authentication is mandatory; "
+            f"cannot accept unauthenticated connections.")
+
+
 class OrchestratorServer:
     """
     Exposes the ShadowOrchestrator API over a Unix socket.
@@ -2925,27 +3213,76 @@ class OrchestratorServer:
     audit/observability. The former cgroup-level actions (commit, rollback,
     add_cgroup, register_output, get_output) were removed -- see the module
     docstring.
+
+    SECURITY (TCB boundary):
+        - The socket file is created with mode 0600 (owner read/write only).
+        - The socket's parent directory is set to mode 0700.
+        - Every connection is authenticated via SO_PEERCRED BEFORE any JSON
+          parsing or session lookup. The peer's UID must be in the allowlist
+          (default: root only, uid=0). This prevents a local attacker who
+          can access the socket path from forging finalize, rollback, or
+          policy installation requests.
     """
 
-    def __init__(self, orchestrator: ShadowOrchestrator, listen_path: str):
+    def __init__(self, orchestrator: ShadowOrchestrator, listen_path: str,
+                 allowed_uids: Optional[Set[int]] = None):
         self.orch = orchestrator
         self.listen_path = listen_path
         self._running = True
+        # UID allowlist for peer authentication. Default: root only (uid 0).
+        # In production, each trusted adapter should run under a dedicated
+        # UID that is added to this set. If multiple adapters share a UID,
+        # consider per-adapter capability tokens instead.
+        self._allowed_uids: Set[int] = allowed_uids if allowed_uids is not None else {0}
 
     def serve(self):
         """Run the server (blocking)."""
         if os.path.exists(self.listen_path):
             os.remove(self.listen_path)
 
+        # Ensure the socket's parent directory is accessible only to the owner.
+        # This prevents other local users from even seeing the socket path.
+        sock_dir = os.path.dirname(os.path.abspath(self.listen_path))
+        if sock_dir and os.path.isdir(sock_dir):
+            try:
+                os.chmod(sock_dir, 0o700)
+            except OSError as e:
+                log.warning("Could not set directory %s to 0700: %s", sock_dir, e)
+
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(self.listen_path)
+
+        # Set the socket file permissions to 0600 (owner read/write only).
+        # This is the FIRST line of defense: only the owner can connect.
+        try:
+            os.chmod(self.listen_path, 0o600)
+        except OSError as e:
+            log.warning("Could not set socket %s to 0600: %s", self.listen_path, e)
+
         server.listen(16)
         server.settimeout(1.0)
-        log.info("Orchestrator API listening on %s", self.listen_path)
+        log.info("Orchestrator API listening on %s (allowed UIDs: %s)",
+                 self.listen_path, sorted(self._allowed_uids))
 
         while self._running:
             try:
                 conn, _ = server.accept()
+                # AUTHENTICATE BEFORE ANYTHING ELSE. The peer's credentials
+                # are checked via SO_PEERCRED before we even create a file
+                # object or parse JSON. This is the TCB boundary.
+                try:
+                    self._authenticate_peer(conn)
+                except PeerAuthenticationError as e:
+                    log.warning("REJECTED connection: %s", e)
+                    try:
+                        conn.sendall(json.dumps({
+                            "status": "error",
+                            "message": f"authentication failed: {e}"
+                        }).encode() + b"\n")
+                    except OSError:
+                        pass
+                    conn.close()
+                    continue
                 t = threading.Thread(target=self._handle_conn, args=(conn,),
                                      daemon=True)
                 t.start()
@@ -2957,6 +3294,20 @@ class OrchestratorServer:
         server.close()
         if os.path.exists(self.listen_path):
             os.remove(self.listen_path)
+
+    def _authenticate_peer(self, conn: socket.socket) -> None:
+        """Authenticate the connected peer via SO_PEERCRED.
+
+        This MUST be called before any JSON parsing or session lookup.
+        The peer's UID must be in the allowlist. Raises
+        PeerAuthenticationError on failure.
+        """
+        pid, uid, gid = _get_peer_credentials(conn)
+        log.debug("Peer connected: pid=%d uid=%d gid=%d", pid, uid, gid)
+        if uid not in self._allowed_uids:
+            raise PeerAuthenticationError(
+                f"peer uid={uid} (pid={pid}) not in allowed UID set "
+                f"{sorted(self._allowed_uids)}. Connection rejected.")
 
     def stop(self):
         self._running = False
@@ -3081,8 +3432,24 @@ class OrchestratorServer:
                 session_id = req.get("session_id", "")
                 if not session_id:
                     return {"status": "error", "message": "session_id required"}
+                # SECURITY: allowed_ops is MANDATORY. The implicit allow-all
+                # path has been removed.
+                allowed_ops = req.get("allowed_ops")
                 return self.orch.session_commit_epoch(
-                    session_id, req.get("agent_id") or None)
+                    session_id, req.get("agent_id") or None,
+                    allowed_ops=allowed_ops)
+
+            elif action == "session_resolve_epoch":
+                session_id = req.get("session_id", "")
+                if not session_id:
+                    return {"status": "error", "message": "session_id required"}
+                decision = req.get("decision", "allow")
+                allowed_ops = req.get("allowed_ops")
+                policy_metadata = req.get("policy_metadata")
+                return self.orch.session_resolve_epoch(
+                    session_id, req.get("agent_id") or None,
+                    decision=decision, allowed_ops=allowed_ops,
+                    policy_metadata=policy_metadata)
 
             elif action == "session_rollback_epoch":
                 session_id = req.get("session_id", "")

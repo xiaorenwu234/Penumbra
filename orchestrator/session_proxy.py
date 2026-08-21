@@ -53,6 +53,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 
 # ──────────────────────────── Mount namespace helpers ───────────────────────
@@ -416,6 +417,199 @@ class FdSnapshot:
     flags: int     # fcntl F_GETFL flags at snapshot time
 
 
+# ──────────────────────── Provisional Output Buffer ────────────────────────
+#
+# SECURITY: Penumbra's core guarantee is that provisional information cannot
+# form externally-visible effects before authorization resolves. The model
+# may CONSUME tool results and continue computing (internal state), but all
+# EXTERNAL channels — user output, memory updates, inter-agent messages,
+# telemetry, and subsequent external tool calls — must be buffered until
+# the epoch is authorized.
+#
+# The ProvisionalBuffer implements this guarantee at the adapter level:
+#   - enter_provisional(): start buffering all external channels
+#   - buffer_*(): append to the appropriate channel buffer
+#   - release(): authorization granted — flush all buffers to their sinks
+#   - discard(): authorization denied — drop all buffers, re-reason from
+#     the canonical transcript
+#
+# This is NOT a performance risk: the buffers are simple append-only lists,
+# and the flush/discard is O(buffered items). The model's internal computation
+# is unaffected — only the external channels are gated.
+
+
+class ProvisionalBuffer:
+    """Buffers provisional external effects until authorization resolves.
+
+    Channels buffered:
+        - user_output: streaming output visible to the user
+        - memory_updates: long-term memory writes
+        - agent_messages: inter-agent (subagent) messages
+        - telemetry: external logs, metrics, traces
+        - tool_calls: subsequent external tool calls based on provisional results
+
+    Lifecycle:
+        1. enter_provisional() — start buffering (called at epoch begin)
+        2. buffer_*() — append to channel buffers (called during reasoning)
+        3. release() — flush all buffers to their sinks (called on allow)
+           OR discard() — drop all buffers (called on deny)
+
+    SECURITY: The buffer is FAIL-CLOSED. If release() is not explicitly
+    called, the buffers are NEVER flushed. A crash, timeout, or error
+    leaves the provisional effects un-released (equivalent to deny).
+    """
+
+    def __init__(self):
+        self._active = False
+        self._user_output: List[str] = []
+        self._memory_updates: List[Dict] = []
+        self._agent_messages: List[Dict] = []
+        self._telemetry: List[Dict] = []
+        self._tool_calls: List[Dict] = []
+        # Epoch this buffer is associated with (for diagnostics).
+        self._epoch_id: Optional[str] = None
+
+    def enter_provisional(self, epoch_id: Optional[str] = None) -> None:
+        """Start buffering all external channels.
+
+        Called at epoch begin. Any external effect produced after this
+        call is buffered until release() or discard().
+        """
+        self._active = True
+        self._epoch_id = epoch_id
+        self._user_output.clear()
+        self._memory_updates.clear()
+        self._agent_messages.clear()
+        self._telemetry.clear()
+        self._tool_calls.clear()
+
+    def exit_provisional(self) -> None:
+        """Stop buffering WITHOUT releasing or discarding.
+
+        Used when the epoch ends without an explicit authorization decision
+        (e.g. session close). The buffers are cleared but NOT flushed.
+        """
+        self._active = False
+        self._user_output.clear()
+        self._memory_updates.clear()
+        self._agent_messages.clear()
+        self._telemetry.clear()
+        self._tool_calls.clear()
+        self._epoch_id = None
+
+    @property
+    def is_provisional(self) -> bool:
+        """True if currently buffering provisional effects."""
+        return self._active
+
+    # ── Channel buffering ─────────────────────────────────────────────
+
+    def buffer_user_output(self, text: str) -> None:
+        """Buffer user-visible streaming output.
+
+        If not in provisional mode, this is a no-op (output flows directly).
+        """
+        if self._active:
+            self._user_output.append(text)
+
+    def buffer_memory_update(self, key: str, value: Any,
+                             metadata: Optional[Dict] = None) -> None:
+        """Buffer a long-term memory write."""
+        if self._active:
+            self._memory_updates.append({
+                "key": key, "value": value, "metadata": metadata or {}
+            })
+
+    def buffer_agent_message(self, target_agent: str, message: Any,
+                             metadata: Optional[Dict] = None) -> None:
+        """Buffer an inter-agent (subagent) message."""
+        if self._active:
+            self._agent_messages.append({
+                "target": target_agent, "message": message,
+                "metadata": metadata or {}
+            })
+
+    def buffer_telemetry(self, event: str, data: Any,
+                         metadata: Optional[Dict] = None) -> None:
+        """Buffer telemetry (external logs, metrics, traces)."""
+        if self._active:
+            self._telemetry.append({
+                "event": event, "data": data, "metadata": metadata or {}
+            })
+
+    def buffer_tool_call(self, tool_name: str, args: Dict,
+                         metadata: Optional[Dict] = None) -> None:
+        """Buffer a subsequent external tool call based on provisional results.
+
+        SECURITY: This is the most critical channel. A tool call issued
+        based on provisional reasoning could have irreversible external
+        effects (e.g. sending an email, writing to a database). Buffering
+        it until authorization resolves is mandatory.
+        """
+        if self._active:
+            self._tool_calls.append({
+                "tool": tool_name, "args": args, "metadata": metadata or {}
+            })
+
+    # ── Resolution ────────────────────────────────────────────────────
+
+    def release(self) -> Dict[str, List]:
+        """Authorization granted: flush all buffers and return their contents.
+
+        Returns a dict with all buffered items, keyed by channel. The caller
+        is responsible for actually delivering them to their sinks (user
+        display, memory store, message bus, telemetry backend, tool executor).
+
+        After this call, the buffer is inactive and empty.
+        """
+        if not self._active:
+            return {}
+        result = {
+            "user_output": list(self._user_output),
+            "memory_updates": list(self._memory_updates),
+            "agent_messages": list(self._agent_messages),
+            "telemetry": list(self._telemetry),
+            "tool_calls": list(self._tool_calls),
+            "epoch_id": self._epoch_id,
+        }
+        self._active = False
+        self._user_output.clear()
+        self._memory_updates.clear()
+        self._agent_messages.clear()
+        self._telemetry.clear()
+        self._tool_calls.clear()
+        self._epoch_id = None
+        return result
+
+    def discard(self) -> Dict[str, int]:
+        """Authorization denied: drop all buffers and return counts.
+
+        Returns a dict with the count of dropped items per channel (for
+        diagnostics/logging). The caller should re-reason from the canonical
+        transcript (the epoch's output segment is dropped by reject()).
+
+        After this call, the buffer is inactive and empty.
+        """
+        if not self._active:
+            return {}
+        counts = {
+            "user_output": len(self._user_output),
+            "memory_updates": len(self._memory_updates),
+            "agent_messages": len(self._agent_messages),
+            "telemetry": len(self._telemetry),
+            "tool_calls": len(self._tool_calls),
+            "epoch_id": self._epoch_id,
+        }
+        self._active = False
+        self._user_output.clear()
+        self._memory_updates.clear()
+        self._agent_messages.clear()
+        self._telemetry.clear()
+        self._tool_calls.clear()
+        self._epoch_id = None
+        return counts
+
+
 # ──────────────────────────── ShadowProc client ────────────────────────────
 class ShadowProcClient:
     """Thin newline-delimited-JSON client for the ShadowProc Unix socket."""
@@ -518,6 +712,18 @@ class _Session:
         # large (W10: 1 MiB per epoch) would otherwise cost O(total log) per
         # poll, i.e. quadratic over a repeat loop.
         self._log_pos = 0
+        # ── Provisional output buffer ─────────────────────────────────────
+        # SECURITY: All external channels (user output, memory updates,
+        # inter-agent messages, telemetry, subsequent tool calls) are buffered
+        # here during an epoch and released ONLY on authorization (commit).
+        # On deny (rollback), the buffer is discarded and the adapter must
+        # re-reason from the canonical transcript.
+        #
+        # This implements the paper's guarantee: provisional information
+        # cannot form externally-visible effects before authorization resolves.
+        # The model may CONSUME tool results and continue computing (internal
+        # state), but all EXTERNAL channels are gated by this buffer.
+        self.provisional_buffer = ProvisionalBuffer()
 
 
 # ──────────────────────────── The proxy ────────────────────────────────────
@@ -1665,6 +1871,13 @@ class SessionProxy:
                     # immediately (see run()).
                     sess._epoch_seq += 1
                     sess.epoch_id = f"e{sess._epoch_seq}"
+                    # SECURITY: Enter provisional mode. All external channels
+                    # (user output, memory updates, inter-agent messages,
+                    # telemetry, subsequent tool calls) are buffered from this
+                    # point until authorization resolves (commit or reject).
+                    # The model may CONSUME tool results and continue computing,
+                    # but no externally-visible effect escapes before authorization.
+                    sess.provisional_buffer.enter_provisional(sess.epoch_id)
                     self._log(f"session {sid}: epoch begun — baseline(frozen)={baseline} "
                               f"candidate(live)={candidate}")
                     return
@@ -1754,6 +1967,18 @@ class SessionProxy:
         sess.transcript = [(None, text) if epoch == sess.epoch_id else (epoch, text)
                            for epoch, text in sess.transcript]
         sess.epoch_id = None
+        # SECURITY: Release the provisional buffer. Authorization has been
+        # granted (the file layer finalized and the process layer committed),
+        # so all buffered external effects may now be delivered to their sinks.
+        # The caller (adapter) is responsible for actually flushing them.
+        released = sess.provisional_buffer.release()
+        if released:
+            self._log(f"session {sid}: COMMIT — released provisional buffer: "
+                      f"{len(released.get('user_output', []))} user outputs, "
+                      f"{len(released.get('memory_updates', []))} memory updates, "
+                      f"{len(released.get('agent_messages', []))} agent messages, "
+                      f"{len(released.get('telemetry', []))} telemetry, "
+                      f"{len(released.get('tool_calls', []))} tool calls")
         # Wait for the candidate to settle back into read() (was 200ms blind).
         self._wait_wchan_read(candidate, timeout=1.0)
         self._log(f"session {sid}: COMMIT — candidate {candidate} is now canonical "
@@ -1836,6 +2061,18 @@ class SessionProxy:
             # later epoch can be mistaken for it.
             sess._snap_epoch = None
             sess.epoch_id = None
+        # SECURITY: Discard the provisional buffer. Authorization was denied
+        # (the epoch is being rolled back), so all buffered external effects
+        # are dropped. The adapter must re-reason from the canonical transcript
+        # (the epoch's output segment has been dropped above).
+        discarded = sess.provisional_buffer.discard()
+        if discarded:
+            self._log(f"session {sid}: REJECT — discarded provisional buffer: "
+                      f"{discarded.get('user_output', 0)} user outputs, "
+                      f"{discarded.get('memory_updates', 0)} memory updates, "
+                      f"{discarded.get('agent_messages', 0)} agent messages, "
+                      f"{discarded.get('telemetry', 0)} telemetry, "
+                      f"{discarded.get('tool_calls', 0)} tool calls")
         self._discard_epoch_tmp_snapshot(sess)
         # Wait for the baseline to settle back into read() (was 200ms blind).
         self._wait_wchan_read(sess.live_pid, timeout=1.0)

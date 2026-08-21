@@ -1,5 +1,6 @@
-nohup: 忽略输入
-══════════════════════════════════════════════════════════
+sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper
+sudo: 需要密码
+�═════════════
   RQ3 Performance Experiment Launcher
 ══════════════════════════════════════════════════════════
 [1/7] 清理旧进程和挂载...

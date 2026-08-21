@@ -1,0 +1,129 @@
+{
+  "experiment": "rq3_dep_graph_scalability",
+  "timestamp": 1787280671.1346273,
+  "dimensions": [
+    {
+      "dimension": "D4",
+      "topology": "concurrent",
+      "size": 1,
+      "decision": "allow",
+      "repeats": 3,
+      "errors": [],
+      "wall_time_s": 2.026921033859253,
+      "stats": {
+        "finalize_ns": {
+          "mean_us": 675466.3683333334,
+          "median_us": 672176.65,
+          "p95_us": 681256.768,
+          "p99_us": 682063.8896,
+          "min_us": 671956.785,
+          "max_us": 682265.67,
+          "n": 3
+        },
+        "total_ns": {
+          "mean_us": 675466.3683333334,
+          "median_us": 672176.65,
+          "p95_us": 681256.768,
+          "p99_us": 682063.8896,
+          "min_us": 671956.785,
+          "max_us": 682265.67,
+          "n": 3
+        },
+        "per_epoch_finalize_ns": {
+          "mean_us": 130208.31366666667,
+          "median_us": 129116.063,
+          "p95_us": 132746.402,
+          "p99_us": 133069.0988,
+          "min_us": 128359.105,
+          "max_us": 133149.773,
+          "n": 3
+        }
+      }
+    },
+    {
+      "dimension": "D4",
+      "topology": "concurrent",
+      "size": 4,
+      "decision": "allow",
+      "repeats": 3,
+      "errors": [
+        "Orchestrator session_commit_epoch failed: begin_finalize: graph_generation mismatch (caller=26, current=27): dependency graph changed (TOCTOU)",
+        "Orchestrator session_commit_epoch failed: begin_finalize: graph_generation mismatch (caller=27, current=28): dependency graph changed (TOCTOU)"
+      ],
+      "wall_time_s": 2.3819098472595215,
+      "stats": {
+        "finalize_ns": {
+          "mean_us": 793752.999,
+          "median_us": 815457.834,
+          "p95_us": 825743.0817000001,
+          "p99_us": 826657.32594,
+          "min_us": 738915.276,
+          "max_us": 826885.887,
+          "n": 3
+        },
+        "total_ns": {
+          "mean_us": 793752.999,
+          "median_us": 815457.834,
+          "p95_us": 825743.0817000001,
+          "p99_us": 826657.32594,
+          "min_us": 738915.276,
+          "max_us": 826885.887,
+          "n": 3
+        },
+        "per_epoch_finalize_ns": {
+          "mean_us": 219870.1489,
+          "median_us": 217739.1435,
+          "p95_us": 268279.35345,
+          "p99_us": 269970.30189,
+          "min_us": 172647.841,
+          "max_us": 270393.039,
+          "n": 10
+        }
+      }
+    },
+    {
+      "dimension": "D4",
+      "topology": "concurrent",
+      "size": 8,
+      "decision": "allow",
+      "repeats": 3,
+      "errors": [
+        "Orchestrator session_commit_epoch failed: begin_finalize: graph_generation mismatch (caller=55, current=56): dependency graph changed (TOCTOU)",
+        "Orchestrator session_commit_epoch failed: begin_finalize: graph_generation mismatch (caller=58, current=59): dependency graph changed (TOCTOU)",
+        "Orchestrator session_commit_epoch failed: begin_finalize: graph_generation mismatch (caller=70, current=71): dependency graph changed (TOCTOU)",
+        "Orchestrator session_commit_epoch failed: begin_finalize: graph_generation mismatch (caller=71, current=72): dependency graph changed (TOCTOU)",
+        "Orchestrator session_commit_epoch failed: begin_finalize: graph_generation mismatch (caller=72, current=73): dependency graph changed (TOCTOU)"
+      ],
+      "wall_time_s": 3.0791821479797363,
+      "stats": {
+        "finalize_ns": {
+          "mean_us": 1026063.8156666666,
+          "median_us": 1020742.645,
+          "p95_us": 1062170.5818999999,
+          "p99_us": 1065853.06518,
+          "min_us": 990675.116,
+          "max_us": 1066773.686,
+          "n": 3
+        },
+        "total_ns": {
+          "mean_us": 1026063.8156666666,
+          "median_us": 1020742.645,
+          "p95_us": 1062170.5818999999,
+          "p99_us": 1065853.06518,
+          "min_us": 990675.116,
+          "max_us": 1066773.686,
+          "n": 3
+        },
+        "per_epoch_finalize_ns": {
+          "mean_us": 397240.58105263155,
+          "median_us": 396462.759,
+          "p95_us": 481769.3049,
+          "p99_us": 502786.42098,
+          "min_us": 315472.884,
+          "max_us": 508040.7,
+          "n": 19
+        }
+      }
+    }
+  ]
+}
