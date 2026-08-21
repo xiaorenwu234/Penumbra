@@ -1980,7 +1980,8 @@ class ShadowOrchestrator:
             return sorted(sid for sid, aid in self._session_agents.items()
                           if aid == agent_id)
 
-    def session_run(self, session_id: str, command: str) -> dict:
+    def session_run(self, session_id: str, command: str,
+                    timeout: float = 10.0) -> dict:
         """Feed one command to the session's current live shell.
 
         Returns the command's shell exit status in ``exit_code`` so callers
@@ -1997,9 +1998,11 @@ class ShadowOrchestrator:
         """
         proxy = self._get_proxy()
         try:
-            out, rc = proxy.run(session_id, command)
+            out, rc = proxy.run(session_id, command, timeout=timeout)
         except KeyError:
             return {"status": "error", "message": f"unknown session {session_id}"}
+        except TimeoutError as exc:
+            return {"status": "error", "message": f"timeout: {exc}"}
 
         # WAL barrier: flush FUSE mutation records BEFORE releasing output.
         # This ensures crash consistency — if we crash after returning output,
@@ -3051,7 +3054,9 @@ class OrchestratorServer:
                     return {"status": "error", "message": "session_id required"}
                 if not command:
                     return {"status": "error", "message": "command required"}
-                return self.orch.session_run(session_id, command)
+                timeout = float(req.get("timeout", 10.0))
+                return self.orch.session_run(session_id, command,
+                                             timeout=timeout)
 
             elif action == "session_pin_epoch_cpu":
                 session_id = req.get("session_id", "")
