@@ -80,7 +80,7 @@ class DepGraphResult:
     per_epoch_finalize_ns: List[float] = field(default_factory=list)
 
     # Dependency verification
-    verified_deps: int = 0   # number of verified dependency edges
+    affected_epochs: int = 0  # affected cgroup count from get_affected
     group_sizes: List[int] = field(default_factory=list)
 
     # Metadata
@@ -110,7 +110,7 @@ class DepGraphResult:
             "size": self.size,
             "decision": self.decision,
             "repeats": self.repeats,
-            "verified_deps": self.verified_deps,
+            "affected_epochs": self.affected_epochs,
             "group_sizes": self.group_sizes[:10],
             "errors": self.errors[:10],
             "wall_time_s": self.wall_time_s,
@@ -181,28 +181,32 @@ def open_epoch_node(client: OrchClient, node_id: str,
 
 
 def verify_dependencies(client: OrchClient, nodes: List[EpochNode],
-                        expected_min_edges: int) -> Tuple[int, List[str]]:
+                        expected_affected: int) -> Tuple[int, List[str]]:
     """Verify that cross-epoch dependencies actually formed.
 
-    Uses get_affected (dry-run rollback) on the root node to check how
-    many downstream epochs would be cascaded. Returns (verified_count, errors).
+    Calls get_affected (dry-run rollback) on the FIRST node and checks
+    how many other cgroups would be cascaded. The returned count includes
+    the target itself (ShadowFS semantics), so a chain of N should return
+    N affected cgroups when querying the root.
+
+    Returns (affected_count, errors).
     """
     if not nodes:
         return 0, ["no nodes to verify"]
     errors = []
-    verified = 0
+    affected_count = 0
     root = nodes[0]
     try:
         resp = client.get_affected(root.cgroup_id)
         affected = resp.get("affected", [])
-        verified = len(affected)
-        if verified < expected_min_edges:
+        affected_count = len(affected)
+        if affected_count < expected_affected:
             errors.append(
-                f"dependency verification: expected >= {expected_min_edges} "
-                f"affected, got {verified}")
+                f"dependency verification: expected >= {expected_affected} "
+                f"affected cgroups from root, got {affected_count}")
     except Exception as e:
         errors.append(f"get_affected failed: {e}")
-    return verified, errors
+    return affected_count, errors
 
 
 def close_all_nodes(client: OrchClient, nodes: List[EpochNode]):
@@ -274,7 +278,7 @@ def run_d1_chain(sizes: List[int], repeats: int) -> List[DepGraphResult]:
                 # Verify dependencies formed before timing finalization
                 verified, verrs = verify_dependencies(
                     client, nodes, max(1, n - 1))
-                r.verified_deps = verified
+                r.affected_epochs = verified
                 if verrs:
                     r.errors.extend(verrs)
 
@@ -373,7 +377,7 @@ def run_d2_fan(sizes: List[int], repeats: int) -> List[DepGraphResult]:
 
                 verified, verrs = verify_dependencies(
                     client, nodes, max(1, n))
-                r.verified_deps = verified
+                r.affected_epochs = verified
                 if verrs:
                     r.errors.extend(verrs)
 
@@ -451,7 +455,7 @@ def run_d2_fan(sizes: List[int], repeats: int) -> List[DepGraphResult]:
                 # Fan-in: rolling back one source cascades to the sink (1 node)
                 verified, verrs = verify_dependencies(
                     client, nodes, 1)
-                r2.verified_deps = verified
+                r2.affected_epochs = verified
                 if verrs:
                     r2.errors.extend(verrs)
 
@@ -552,26 +556,28 @@ def run_d3_scc(sizes: List[int], repeats: int) -> List[DepGraphResult]:
                 # Verify: in an SCC, rolling back any node should affect all
                 verified, verrs = verify_dependencies(
                     client, nodes, max(1, n - 1))
-                r.verified_deps = verified
+                r.affected_epochs = verified
                 if verrs:
                     r.errors.extend(verrs)
 
                 # Measure cascade rollback: deny ONE epoch, ShadowFS
                 # cascades to the entire SCC atomically.
+                # Timer covers ONLY the single deny RPC — the cascade is
+                # handled internally by ShadowFS within that one call.
                 with Timer() as fin_t:
-                    # Deny the first epoch → triggers SCC-wide rollback
                     client.session_resolve_epoch(
                         nodes[0].session_id,
                         agent_id=nodes[0].agent_id,
                         decision="deny")
-                    # Rollback remaining epochs (may already be cascaded)
-                    for node in nodes[1:]:
-                        try:
-                            client.session_rollback_epoch(
-                                node.session_id,
-                                agent_id=node.agent_id)
-                        except Exception:
-                            pass  # already rolled back by cascade
+
+                # Cleanup outside timer: rollback any surviving epochs
+                for node in nodes[1:]:
+                    try:
+                        client.session_rollback_epoch(
+                            node.session_id,
+                            agent_id=node.agent_id)
+                    except Exception:
+                        pass  # already rolled back by cascade
 
                 r.setup_ns.append(setup_t.elapsed_ns)
                 r.finalize_ns.append(fin_t.elapsed_ns)
@@ -705,7 +711,7 @@ def run_d4_concurrent(sizes: List[int], repeats: int) -> List[DepGraphResult]:
                 # Verify dependency: root rollback should affect all agents
                 verified, verrs = verify_dependencies(
                     root_client, [root_node], max(1, len(ready)))
-                r.verified_deps = verified
+                r.affected_epochs = verified
                 if verrs:
                     r.errors.extend(verrs)
 
@@ -835,11 +841,22 @@ def run_d5_decisions(chain_size: int, repeats: int) -> List[DepGraphResult]:
                 # Verify dependencies formed
                 verified, verrs = verify_dependencies(
                     client, nodes, max(1, chain_size - 1))
-                r.verified_deps = verified
+                r.affected_epochs = verified
                 if verrs:
                     r.errors.extend(verrs)
 
-                # Apply the decision at the correct graph position
+                # Apply the decision at the correct graph position.
+                # Timer covers ONLY the decision RPC whose cost we want
+                # to measure; setup commits and cleanup rollbacks are
+                # outside the timed interval.
+                if decision_mode == "middle-deny":
+                    # Pre-commit upstream epochs BEFORE timing
+                    mid = chain_size // 2
+                    for node in nodes[:mid]:
+                        client.session_commit_epoch(
+                            node.session_id, agent_id=node.agent_id,
+                            allowed_ops=ALLOW_ALL_OPS)
+
                 with Timer() as fin_t:
                     if decision_mode == "allow":
                         # Commit all epochs
@@ -848,41 +865,38 @@ def run_d5_decisions(chain_size: int, repeats: int) -> List[DepGraphResult]:
                                 node.session_id, agent_id=node.agent_id,
                                 allowed_ops=ALLOW_ALL_OPS)
                     elif decision_mode == "root-deny":
-                        # Deny the ROOT epoch (epoch[0]) → full cascade
+                        # Deny the ROOT epoch → cascade rolls back all
                         client.session_resolve_epoch(
                             nodes[0].session_id,
                             agent_id=nodes[0].agent_id,
                             decision="deny")
-                        # Remaining epochs must also be rolled back
-                        # (they depend on the denied root)
-                        for node in nodes[1:]:
-                            try:
-                                client.session_rollback_epoch(
-                                    node.session_id,
-                                    agent_id=node.agent_id)
-                            except Exception:
-                                pass  # already cascaded
                     elif decision_mode == "middle-deny":
-                        # Deny a MIDDLE epoch → partial cascade
+                        # Deny ONLY the middle epoch (upstream already
+                        # committed above; downstream cascades from deny)
                         mid = chain_size // 2
-                        # Commit epochs before the middle (they're independent)
-                        for node in nodes[:mid]:
-                            client.session_commit_epoch(
-                                node.session_id, agent_id=node.agent_id,
-                                allowed_ops=ALLOW_ALL_OPS)
-                        # Deny the middle epoch
                         client.session_resolve_epoch(
                             nodes[mid].session_id,
                             agent_id=nodes[mid].agent_id,
                             decision="deny")
-                        # Rollback downstream of middle
-                        for node in nodes[mid + 1:]:
-                            try:
-                                client.session_rollback_epoch(
-                                    node.session_id,
-                                    agent_id=node.agent_id)
-                            except Exception:
-                                pass  # already cascaded
+
+                # Cleanup outside timer: rollback any surviving epochs
+                if decision_mode == "root-deny":
+                    for node in nodes[1:]:
+                        try:
+                            client.session_rollback_epoch(
+                                node.session_id,
+                                agent_id=node.agent_id)
+                        except Exception:
+                            pass
+                elif decision_mode == "middle-deny":
+                    mid = chain_size // 2
+                    for node in nodes[mid + 1:]:
+                        try:
+                            client.session_rollback_epoch(
+                                node.session_id,
+                                agent_id=node.agent_id)
+                        except Exception:
+                            pass
 
                 r.setup_ns.append(setup_t.elapsed_ns)
                 r.finalize_ns.append(fin_t.elapsed_ns)
@@ -929,8 +943,8 @@ QUICK_SCC_SIZES = [2, 4]
 QUICK_CONCURRENT_SIZES = [1, 4]
 QUICK_DECISION_CHAIN = 4
 
-DEFAULT_REPEATS = 5
-QUICK_REPEATS = 2
+DEFAULT_REPEATS = 10
+QUICK_REPEATS = 3
 
 
 def _is_fuse_mounted(mount_point: str) -> bool:
@@ -1068,7 +1082,7 @@ def main():
         print("═" * 70)
         print(f"{'Dim':<4} {'Topology':<12} {'Size':<6} {'Decision':<12} "
               f"{'Finalize mean(ms)':<18} {'P95(ms)':<10} "
-              f"{'Deps':<5} {'Errors'}")
+              f"{'Aff':<5} {'Errors'}")
         print("─" * 78)
         for r in all_results:
             if r.finalize_ns:
@@ -1076,11 +1090,11 @@ def main():
                 print(f"{r.dimension:<4} {r.topology:<12} {r.size:<6} "
                       f"{r.decision:<12} {s.mean_ns/1e6:<18.3f} "
                       f"{s.p95_ns/1e6:<10.3f} "
-                      f"{r.verified_deps:<5} {len(r.errors)}")
+                      f"{r.affected_epochs:<5} {len(r.errors)}")
             else:
                 print(f"{r.dimension:<4} {r.topology:<12} {r.size:<6} "
                       f"{r.decision:<12} {'N/A':<18} {'N/A':<10} "
-                      f"{r.verified_deps:<5} {len(r.errors)}")
+                      f"{r.affected_epochs:<5} {len(r.errors)}")
 
     cleanup_dep_dir()
     print("\n[done] Dependency graph scalability experiment complete.")
