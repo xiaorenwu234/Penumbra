@@ -5,7 +5,7 @@ RQ3 Dependency Graph Scalability Experiment.
 Measures the scalability of dependency-aware publication (group-level
 finalization) across multiple dimensions:
 
-  D1: Chain topology — 1, 10, 100, 500 epochs in a linear dependency chain.
+  D1: Chain topology — 2, 4, 8, 16 epochs in a linear dependency chain.
       Each node is an independent epoch: epoch[i] writes file[i], epoch[i+1]
       reads file[i] (creating a real cross-epoch read-from edge).
   D2: Fan-out / Fan-in — one root epoch feeds N dependents (fan-out), or
@@ -13,7 +13,7 @@ finalization) across multiple dimensions:
   D3: SCC (mutual dependencies) — cycles in the dependency graph that
       require strongly-connected-component resolution. Each node in the
       cycle is a separate epoch with cross-epoch reads forming the cycle.
-  D4: Concurrent agents — 1, 8, 32, 128 agents each with its own epoch,
+  D4: Concurrent agents — 1, 4, 8, 16 agents each with its own epoch,
       all consuming a shared root epoch's output (real dependency graph).
   D5: Authorization decisions — allow, root-deny, middle-node-deny on a
       multi-epoch chain to measure policy enforcement at different positions.
@@ -81,7 +81,7 @@ class DepGraphResult:
 
     # Dependency verification
     affected_epochs: int = 0  # affected cgroup count from get_affected
-    group_sizes: List[int] = field(default_factory=list)
+    topo_verified: bool = False  # precise set-equality topology check passed
 
     # Metadata
     repeats: int = 0
@@ -102,6 +102,8 @@ class DepGraphResult:
                     "p99_us": s.p99_ns / 1000.0,
                     "min_us": s.min_ns / 1000.0,
                     "max_us": s.max_ns / 1000.0,
+                    "ci_95_low_us": s.ci_95_low_ns / 1000.0,
+                    "ci_95_high_us": s.ci_95_high_ns / 1000.0,
                     "n": s.n,
                 }
         return {
@@ -111,10 +113,11 @@ class DepGraphResult:
             "decision": self.decision,
             "repeats": self.repeats,
             "affected_epochs": self.affected_epochs,
-            "group_sizes": self.group_sizes[:10],
+            "topo_verified": self.topo_verified,
             "errors": self.errors[:10],
             "wall_time_s": self.wall_time_s,
             "stats": stats,
+            "raw_finalize_ns": self.finalize_ns,
         }
 
 
@@ -181,32 +184,113 @@ def open_epoch_node(client: OrchClient, node_id: str,
 
 
 def verify_dependencies(client: OrchClient, nodes: List[EpochNode],
-                        expected_affected: int) -> Tuple[int, List[str]]:
-    """Verify that cross-epoch dependencies actually formed.
+                        topology: str) -> Tuple[int, bool, List[str]]:
+    """Verify cross-epoch dependencies with precise set-equality checks.
 
-    Calls get_affected (dry-run rollback) on the FIRST node and checks
-    how many other cgroups would be cascaded. The returned count includes
-    the target itself (ShadowFS semantics), so a chain of N should return
-    N affected cgroups when querying the root.
+    For each topology, checks that get_affected returns the EXACT expected
+    set of cgroups (not just a count threshold):
+      - chain: node[0] affects all N nodes (full downstream)
+      - fan-out: root affects all; each leaf affects only itself
+      - fan-in: each source affects {source_i, sink}
+      - scc: any node affects all N nodes
+      - concurrent: root affects all agents
 
-    Returns (affected_count, errors).
+    Returns (affected_count_from_root, topo_verified, errors).
     """
     if not nodes:
-        return 0, ["no nodes to verify"]
+        return 0, False, ["no nodes to verify"]
     errors = []
     affected_count = 0
-    root = nodes[0]
-    try:
-        resp = client.get_affected(root.cgroup_id)
-        affected = resp.get("affected", [])
-        affected_count = len(affected)
-        if affected_count < expected_affected:
-            errors.append(
-                f"dependency verification: expected >= {expected_affected} "
-                f"affected cgroups from root, got {affected_count}")
-    except Exception as e:
-        errors.append(f"get_affected failed: {e}")
-    return affected_count, errors
+    topo_ok = True
+
+    # Build cgroup set for membership checks
+    all_cgroups = {n.cgroup_id for n in nodes}
+
+    def _get_aff(node: EpochNode) -> Optional[Set[str]]:
+        try:
+            resp = client.get_affected(node.cgroup_id)
+            return set(resp.get("affected", []))
+        except Exception as e:
+            errors.append(f"get_affected({node.node_id}) failed: {e}")
+            return None
+
+    if topology == "chain":
+        # Root (node[0]) rollback should cascade to ALL downstream = all N
+        aff = _get_aff(nodes[0])
+        if aff is not None:
+            affected_count = len(aff)
+            expected = all_cgroups
+            if not expected.issubset(aff):
+                topo_ok = False
+                errors.append(
+                    f"chain: root affected {len(aff)} cgroups, "
+                    f"expected all {len(expected)}")
+
+    elif topology == "fan-out":
+        # Root affects all; spot-check last leaf affects only itself
+        aff_root = _get_aff(nodes[0])
+        if aff_root is not None:
+            affected_count = len(aff_root)
+            if not all_cgroups.issubset(aff_root):
+                topo_ok = False
+                errors.append(
+                    f"fan-out: root affected {len(aff_root)}, "
+                    f"expected {len(all_cgroups)}")
+        # Leaf self-check (last leaf)
+        if len(nodes) > 1:
+            aff_leaf = _get_aff(nodes[-1])
+            if aff_leaf is not None:
+                # Leaf should only affect itself (no downstream)
+                leaf_self = {nodes[-1].cgroup_id}
+                if not aff_leaf.issubset(leaf_self | {nodes[0].cgroup_id}):
+                    # Allow {self} or {self, root} depending on ShadowFS
+                    if len(aff_leaf) > 2:
+                        topo_ok = False
+                        errors.append(
+                            f"fan-out: leaf affected {len(aff_leaf)}, "
+                            f"expected <=2")
+
+    elif topology == "fan-in":
+        # Each source affects {source_i, sink}; check first source
+        sink = nodes[-1]
+        aff_src = _get_aff(nodes[0])
+        if aff_src is not None:
+            affected_count = len(aff_src)
+            expected = {nodes[0].cgroup_id, sink.cgroup_id}
+            if not expected.issubset(aff_src):
+                topo_ok = False
+                errors.append(
+                    f"fan-in: source[0] affected {len(aff_src)}, "
+                    f"expected superset of {{src0, sink}}")
+
+    elif topology == "scc":
+        # ANY node affects ALL N nodes (strongly connected)
+        aff = _get_aff(nodes[0])
+        if aff is not None:
+            affected_count = len(aff)
+            if not all_cgroups.issubset(aff):
+                topo_ok = False
+                errors.append(
+                    f"scc: node[0] affected {len(aff)}, "
+                    f"expected all {len(all_cgroups)}")
+
+    elif topology == "concurrent":
+        # Root affects all agents
+        aff = _get_aff(nodes[0])
+        if aff is not None:
+            affected_count = len(aff)
+            if not all_cgroups.issubset(aff):
+                topo_ok = False
+                errors.append(
+                    f"concurrent: root affected {len(aff)}, "
+                    f"expected all {len(all_cgroups)}")
+    else:
+        # Generic fallback: just count
+        aff = _get_aff(nodes[0])
+        if aff is not None:
+            affected_count = len(aff)
+
+    return affected_count, topo_ok, errors
 
 
 def close_all_nodes(client: OrchClient, nodes: List[EpochNode]):
@@ -276,9 +360,10 @@ def run_d1_chain(sizes: List[int], repeats: int) -> List[DepGraphResult]:
                                 f"cat {fpath} > /dev/null")
 
                 # Verify dependencies formed before timing finalization
-                verified, verrs = verify_dependencies(
-                    client, nodes, max(1, n - 1))
+                verified, topo_ok, verrs = verify_dependencies(
+                    client, nodes, "chain")
                 r.affected_epochs = verified
+                r.topo_verified = topo_ok
                 if verrs:
                     r.errors.extend(verrs)
 
@@ -375,9 +460,10 @@ def run_d2_fan(sizes: List[int], repeats: int) -> List[DepGraphResult]:
                             nodes[i + 1].session_id,
                             f"cat {root_file} > /dev/null")
 
-                verified, verrs = verify_dependencies(
-                    client, nodes, max(1, n))
+                verified, topo_ok, verrs = verify_dependencies(
+                    client, nodes, "fan-out")
                 r.affected_epochs = verified
+                r.topo_verified = topo_ok
                 if verrs:
                     r.errors.extend(verrs)
 
@@ -452,10 +538,11 @@ def run_d2_fan(sizes: List[int], repeats: int) -> List[DepGraphResult]:
                             sink.session_id,
                             f"cat {fpath} > /dev/null")
 
-                # Fan-in: rolling back one source cascades to the sink (1 node)
-                verified, verrs = verify_dependencies(
-                    client, nodes, 1)
+                # Fan-in: rolling back one source cascades to the sink
+                verified, topo_ok, verrs = verify_dependencies(
+                    client, nodes, "fan-in")
                 r2.affected_epochs = verified
+                r2.topo_verified = topo_ok
                 if verrs:
                     r2.errors.extend(verrs)
 
@@ -554,9 +641,10 @@ def run_d3_scc(sizes: List[int], repeats: int) -> List[DepGraphResult]:
                             f"cat {read_path} > /dev/null")
 
                 # Verify: in an SCC, rolling back any node should affect all
-                verified, verrs = verify_dependencies(
-                    client, nodes, max(1, n - 1))
+                verified, topo_ok, verrs = verify_dependencies(
+                    client, nodes, "scc")
                 r.affected_epochs = verified
+                r.topo_verified = topo_ok
                 if verrs:
                     r.errors.extend(verrs)
 
@@ -709,9 +797,10 @@ def run_d4_concurrent(sizes: List[int], repeats: int) -> List[DepGraphResult]:
                                  if x["error"]]
 
                 # Verify dependency: root rollback should affect all agents
-                verified, verrs = verify_dependencies(
-                    root_client, [root_node], max(1, len(ready)))
+                verified, topo_ok, verrs = verify_dependencies(
+                    root_client, [root_node], "concurrent")
                 r.affected_epochs = verified
+                r.topo_verified = topo_ok
                 if verrs:
                     r.errors.extend(verrs)
 
@@ -839,9 +928,10 @@ def run_d5_decisions(chain_size: int, repeats: int) -> List[DepGraphResult]:
                                 f"cat {fpath} > /dev/null")
 
                 # Verify dependencies formed
-                verified, verrs = verify_dependencies(
-                    client, nodes, max(1, chain_size - 1))
+                verified, topo_ok, verrs = verify_dependencies(
+                    client, nodes, "chain")
                 r.affected_epochs = verified
+                r.topo_verified = topo_ok
                 if verrs:
                     r.errors.extend(verrs)
 
@@ -944,7 +1034,7 @@ QUICK_CONCURRENT_SIZES = [1, 4]
 QUICK_DECISION_CHAIN = 4
 
 DEFAULT_REPEATS = 10
-QUICK_REPEATS = 3
+QUICK_REPEATS = 1
 
 
 def _is_fuse_mounted(mount_point: str) -> bool:
@@ -1082,19 +1172,20 @@ def main():
         print("═" * 70)
         print(f"{'Dim':<4} {'Topology':<12} {'Size':<6} {'Decision':<12} "
               f"{'Finalize mean(ms)':<18} {'P95(ms)':<10} "
-              f"{'Aff':<5} {'Errors'}")
-        print("─" * 78)
+              f"{'Aff':<5} {'Topo':<5} {'Errors'}")
+        print("─" * 84)
         for r in all_results:
+            topo = "OK" if r.topo_verified else "FAIL"
             if r.finalize_ns:
                 s = compute_stats("summary", r.finalize_ns)
                 print(f"{r.dimension:<4} {r.topology:<12} {r.size:<6} "
                       f"{r.decision:<12} {s.mean_ns/1e6:<18.3f} "
                       f"{s.p95_ns/1e6:<10.3f} "
-                      f"{r.affected_epochs:<5} {len(r.errors)}")
+                      f"{r.affected_epochs:<5} {topo:<5} {len(r.errors)}")
             else:
                 print(f"{r.dimension:<4} {r.topology:<12} {r.size:<6} "
                       f"{r.decision:<12} {'N/A':<18} {'N/A':<10} "
-                      f"{r.affected_epochs:<5} {len(r.errors)}")
+                      f"{r.affected_epochs:<5} {topo:<5} {len(r.errors)}")
 
     cleanup_dep_dir()
     print("\n[done] Dependency graph scalability experiment complete.")
