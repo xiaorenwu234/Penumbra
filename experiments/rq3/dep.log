@@ -10,12 +10,12 @@ make: 对“all”无需做任何事。
 make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/benchmarks”
   Done
 [4/7] 启动 ShadowFS...
-  ShadowFS PID=59124 OK
+  ShadowFS PID=65708 OK
   FUSE 挂载: /tmp/shadow-rq2-test/mnt OK
 [5/7] 启动 ShadowProc...
-  ShadowProc PID=59167 OK
+  ShadowProc PID=65747 OK
 [6/7] 启动 Orchestrator...
-  Orchestrator PID=59200 OK
+  Orchestrator PID=65786 OK
   Socket: /tmp/shadow-orch.sock OK
   Orchestrator 连接测试: OK
 [7/7] 运行 RQ3 实验...
@@ -29,54 +29,54 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
 [D1] Chain topology (linear dependency, cross-epoch)
   [D1] chain length=2
     rep 1/1 done (1.4s)
-    finalize: mean=163.60ms p95=163.60ms (n=1)
+    finalize: mean=162.90ms p95=162.90ms (n=1)
   [D1] chain length=4
     rep 1/1 done (2.7s)
-    finalize: mean=326.75ms p95=326.75ms (n=1)
+    finalize: mean=324.07ms p95=324.07ms (n=1)
   [D1] chain length=8
-    rep 1/1 done (5.5s)
-    finalize: mean=651.81ms p95=651.81ms (n=1)
+    rep 1/1 done (5.4s)
+    finalize: mean=649.82ms p95=649.82ms (n=1)
 
 [D2] Fan-out / Fan-in topology (cross-epoch)
   [D2] fan-out width=2
-    rep 1/1 done (2.0s)
+    rep 1/1 done (2.1s)
     fan-out finalize: mean=239.04ms p95=239.04ms
   [D2] fan-in width=2
-    rep 1/1 done (2.1s)
-    fan-in finalize: mean=241.56ms p95=241.56ms
+    rep 1/1 done (2.0s)
+    fan-in finalize: mean=241.23ms p95=241.23ms
   [D2] fan-out width=4
     rep 1/1 done (3.4s)
-    fan-out finalize: mean=399.45ms p95=399.45ms
+    fan-out finalize: mean=398.24ms p95=398.24ms
   [D2] fan-in width=4
     rep 1/1 done (3.4s)
-    fan-in finalize: mean=405.76ms p95=405.76ms
+    fan-in finalize: mean=404.51ms p95=404.51ms
 
 [D3] SCC (mutual dependencies, cascade rollback)
   [D3] SCC size=2 (cycle of 2 epochs)
     rep 1/1 done (1.3s)
-    SCC cascade rollback: mean=52.21ms p95=52.21ms
+    SCC cascade rollback: mean=51.94ms p95=51.94ms
   [D3] SCC size=4 (cycle of 4 epochs)
     rep 1/1 done (2.6s)
-    SCC cascade rollback: mean=54.31ms p95=54.31ms
+    SCC cascade rollback: mean=54.50ms p95=54.50ms
 
 [D4] Concurrent agents (shared dependency)
   [D4] agents=1
     rep 1/1 done (1.4s)
-    batch total: mean=167.33ms p95=167.33ms
+    batch total: mean=163.56ms p95=163.56ms
   [D4] agents=4
     rep 1/1 done (1.6s)
-    batch total: mean=281.27ms p95=281.27ms
+    batch total: mean=277.93ms p95=277.93ms
 
 [D5] Authorization decisions (chain_size=4)
   [D5] decision=allow
     rep 1/1 done (2.7s)
-    allow finalize: mean=327.52ms p95=327.52ms
+    allow finalize: mean=330.00ms p95=330.00ms
   [D5] decision=root-deny
     rep 1/1 done (2.6s)
-    root-deny finalize: mean=54.92ms p95=54.92ms
+    root-deny finalize: mean=54.65ms p95=54.65ms
   [D5] decision=middle-deny
     rep 1/1 done (2.7s)
-    middle-deny finalize: mean=52.60ms p95=52.60ms
+    middle-deny finalize: mean=52.30ms p95=52.30ms
 
 [save] Results written to ./results/dep_graph_scalability.json
 
@@ -85,20 +85,20 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
 ══════════════════════════════════════════════════════════════════════
 Dim  Topology     Size   Decision     Finalize mean(ms)  P95(ms)    Aff   Topo  Errors
 ────────────────────────────────────────────────────────────────────────────────────
-D1   chain        2      allow        163.601            163.601    2     OK    0
-D1   chain        4      allow        326.745            326.745    4     OK    0
-D1   chain        8      allow        651.812            651.812    8     OK    0
+D1   chain        2      allow        162.896            162.896    2     OK    0
+D1   chain        4      allow        324.068            324.068    4     OK    0
+D1   chain        8      allow        649.819            649.819    8     OK    0
 D2   fan-out      2      allow        239.036            239.036    3     OK    0
-D2   fan-in       2      allow        241.557            241.557    2     OK    0
-D2   fan-out      4      allow        399.452            399.452    5     OK    0
-D2   fan-in       4      allow        405.764            405.764    2     OK    0
-D3   scc          2      rollback-cascade 52.205             52.205     2     OK    0
-D3   scc          4      rollback-cascade 54.314             54.314     4     OK    0
-D4   concurrent   1      allow        167.329            167.329    2     OK    0
-D4   concurrent   4      allow        281.267            281.267    5     OK    0
-D5   chain        4      allow        327.517            327.517    4     OK    0
-D5   chain        4      root-deny    54.918             54.918     4     OK    0
-D5   chain        4      middle-deny  52.603             52.603     4     OK    0
+D2   fan-in       2      allow        241.234            241.234    2     OK    0
+D2   fan-out      4      allow        398.237            398.237    5     OK    0
+D2   fan-in       4      allow        404.507            404.507    2     OK    0
+D3   scc          2      rollback-cascade 51.937             51.937     2     OK    0
+D3   scc          4      rollback-cascade 54.498             54.498     4     OK    0
+D4   concurrent   1      allow        163.565            163.565    2     OK    0
+D4   concurrent   4      allow        277.931            277.931    5     OK    0
+D5   chain        4      allow        329.998            329.998    4     OK    0
+D5   chain        4      root-deny    54.651             54.651     4     OK    0
+D5   chain        4      middle-deny  52.302             52.302     2     OK    0
 
 [done] Dependency graph scalability experiment complete.
 
