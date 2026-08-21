@@ -1,6 +1,5 @@
-sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper
-sudo: 需要密码
-�═════════════
+nohup: 忽略输入
+══════════════════════════════════════════════════════════
   RQ3 Performance Experiment Launcher
 ══════════════════════════════════════════════════════════
 [1/7] 清理旧进程和挂载...
@@ -11,12 +10,12 @@ make: 对“all”无需做任何事。
 make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/benchmarks”
   Done
 [4/7] 启动 ShadowFS...
-  ShadowFS PID=2381711 OK
+  ShadowFS PID=53611 OK
   FUSE 挂载: /tmp/shadow-rq2-test/mnt OK
 [5/7] 启动 ShadowProc...
-  ShadowProc PID=2381754 OK
+  ShadowProc PID=53656 OK
 [6/7] 启动 Orchestrator...
-  Orchestrator PID=2381809 OK
+  Orchestrator PID=53696 OK
   Socket: /tmp/shadow-orch.sock OK
   Orchestrator 连接测试: OK
 [7/7] 运行 RQ3 实验...
@@ -46,7 +45,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 600/1000
   [harness]   spec(rollback) progress: 800/1000
   [harness]   spec(rollback) progress: 1000/1000
-  [harness]   Done in 224.5s
+  [harness]   Done in 227.6s
 
 ######################################################################
   WORKLOAD W2 (repeats=1000)
@@ -72,7 +71,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 600/1000
   [harness]   spec(rollback) progress: 800/1000
   [harness]   spec(rollback) progress: 1000/1000
-  [harness]   Done in 255.7s
+  [harness]   Done in 258.0s
   [harness] Starting W2 [100ms] repeats=1000
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 200/1000
@@ -92,7 +91,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 600/1000
   [harness]   spec(rollback) progress: 800/1000
   [harness]   spec(rollback) progress: 1000/1000
-  [harness]   Done in 552.5s
+  [harness]   Done in 550.0s
   [harness] Starting W2 [1000ms] repeats=1000
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 200/1000
@@ -112,7 +111,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 600/1000
   [harness]   spec(rollback) progress: 800/1000
   [harness]   spec(rollback) progress: 1000/1000
-  [harness]   Done in 3275.7s
+  [harness]   Done in 3280.2s
 
 ######################################################################
   WORKLOAD W3 (repeats=200)
@@ -138,7 +137,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 48.3s
+  [harness]   Done in 48.8s
   [harness] Starting W3a [read_1MiB] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -158,7 +157,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 48.9s
+  [harness]   Done in 49.2s
   [harness] Starting W3a [read_64MiB] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -178,7 +177,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 64.1s
+  [harness]   Done in 62.9s
   [harness] Starting W3b [repeat_read_1MiB_x100] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -198,7 +197,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 72.0s
+  [harness]   Done in 71.9s
 
 ######################################################################
   WORKLOAD W4 (repeats=200)
@@ -224,7 +223,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 49.4s
+  [harness]   Done in 49.1s
   [harness] Starting W4 [new_1MiB] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -244,7 +243,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 50.3s
+  [harness]   Done in 50.5s
   [harness] Starting W4 [new_16MiB] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -264,7 +263,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 60.1s
+  [harness]   Done in 60.2s
 
 ######################################################################
   WORKLOAD W5 (repeats=200)
@@ -290,7 +289,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 49.2s
+  [harness]   Done in 49.8s
   [harness] Starting W5 [overwrite4K_orig1MiB] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -310,7 +309,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 50.8s
+  [harness]   Done in 51.3s
   [harness] Starting W5 [overwrite4K_orig16MiB] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -330,7 +329,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 69.4s
+  [harness]   Done in 68.8s
 
 ######################################################################
   WORKLOAD W6 (repeats=200)
@@ -356,7 +355,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 52.1s
+  [harness]   Done in 51.1s
   [harness] Starting W6 [writes_x10] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -376,7 +375,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 51.6s
+  [harness]   Done in 52.4s
   [harness] Starting W6 [writes_x100] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -396,7 +395,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 53.0s
+  [harness]   Done in 53.2s
   [harness] Starting W6 [writes_x1000] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -416,7 +415,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 63.1s
+  [harness]   Done in 64.0s
 
 ######################################################################
   WORKLOAD W7 (repeats=100)
@@ -462,7 +461,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 60/100
   [harness]   spec(rollback) progress: 80/100
   [harness]   spec(rollback) progress: 100/100
-  [harness]   Done in 28.0s
+  [harness]   Done in 28.1s
   [harness] Starting W7 [files_x100] repeats=100
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 20/100
@@ -482,7 +481,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 60/100
   [harness]   spec(rollback) progress: 80/100
   [harness]   spec(rollback) progress: 100/100
-  [harness]   Done in 49.4s
+  [harness]   Done in 48.6s
   [harness] Starting W7 [files_x500] repeats=100
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 20/100
@@ -502,7 +501,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 60/100
   [harness]   spec(rollback) progress: 80/100
   [harness]   spec(rollback) progress: 100/100
-  [harness]   Done in 145.4s
+  [harness]   Done in 151.1s
 
 ######################################################################
   WORKLOAD W8 (repeats=100)
@@ -528,7 +527,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 60/100
   [harness]   spec(rollback) progress: 80/100
   [harness]   spec(rollback) progress: 100/100
-  [harness]   Done in 26.0s
+  [harness]   Done in 26.3s
   [harness] Starting W8 [rename_x10] repeats=100
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 20/100
@@ -548,7 +547,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 60/100
   [harness]   spec(rollback) progress: 80/100
   [harness]   spec(rollback) progress: 100/100
-  [harness]   Done in 26.5s
+  [harness]   Done in 26.7s
   [harness] Starting W8 [rename_x100] repeats=100
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 20/100
@@ -568,7 +567,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 60/100
   [harness]   spec(rollback) progress: 80/100
   [harness]   spec(rollback) progress: 100/100
-  [harness]   Done in 33.7s
+  [harness]   Done in 33.9s
   [harness] Starting W8 [rename_x500] repeats=100
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 20/100
@@ -588,7 +587,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 60/100
   [harness]   spec(rollback) progress: 80/100
   [harness]   spec(rollback) progress: 100/100
-  [harness]   Done in 81.8s
+  [harness]   Done in 81.2s
 
 ######################################################################
   WORKLOAD W10 (repeats=200)
@@ -614,7 +613,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 276.8s
+  [harness]   Done in 277.7s
   [harness] Starting W10a [single_10KiB] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -634,7 +633,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 278.2s
+  [harness]   Done in 278.8s
   [harness] Starting W10a [single_100KiB] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -654,7 +653,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 278.9s
+  [harness]   Done in 280.7s
   [harness] Starting W10a [single_1MiB] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -674,7 +673,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 294.4s
+  [harness]   Done in 294.5s
   [harness] Starting W10b [entries_x10] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -694,7 +693,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 294.3s
+  [harness]   Done in 294.8s
   [harness] Starting W10b [entries_x100] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -714,7 +713,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 346.2s
+  [harness]   Done in 346.1s
   [harness] Starting W10b [entries_x1000] repeats=200
   [harness]   Measuring raw execution ...
   [harness]   raw progress: 40/200
@@ -734,7 +733,7 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
   [harness]   spec(rollback) progress: 120/200
   [harness]   spec(rollback) progress: 160/200
   [harness]   spec(rollback) progress: 200/200
-  [harness]   Done in 867.8s
+  [harness]   Done in 867.3s
 
 ==============================================================================
   RQ3 PERFORMANCE SUMMARY
@@ -742,237 +741,237 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
 
   Workload                       Metric                 Median(ms)    P95(ms)    P99(ms)
   ------------------------------ -------------------- ------------ ---------- ----------
-  W1:noop                        raw_tool                    0.958      1.114      1.200
-  W1:noop                        spec_begin                 42.944     43.660     44.423
-  W1:noop                        spec_run                    3.179      3.381      3.613
-  W1:noop                        spec_commit                77.935     79.101     81.954
-  W1:noop                        spec_rollback              49.498     50.413     52.395
-  W1:noop                        spec_total_commit         124.107    126.165    128.243
-  W1:noop                        spec_total_rollback        95.567     97.281     99.568
-  W2:10ms                        raw_tool                   11.132     11.325     11.498
-  W2:10ms                        spec_begin                 43.066     43.887     44.588
-  W2:10ms                        spec_run                   13.280     13.500     13.643
-  W2:10ms                        spec_commit                78.282     79.717     82.026
-  W2:10ms                        spec_rollback              49.607     50.477     51.228
-  W2:10ms                        spec_total_commit         134.671    136.975    138.733
-  W2:10ms                        spec_total_rollback       105.789    107.374    109.168
-  W2:100ms                       raw_tool                  101.352    101.552    101.686
-  W2:100ms                       spec_begin                 43.115     43.897     44.396
-  W2:100ms                       spec_run                  111.763    120.452    123.538
-  W2:100ms                       spec_commit                79.155     95.701     99.594
-  W2:100ms                       spec_rollback              50.643     67.033     72.520
-  W2:100ms                       spec_total_commit         234.432    254.329    257.480
-  W2:100ms                       spec_total_rollback       205.865    223.666    229.432
-  W2:1000ms                      raw_tool                 1001.579   1001.755   1002.057
-  W2:1000ms                      spec_begin                 43.341     44.265     44.967
-  W2:1000ms                      spec_run                 1011.442   1014.199   1022.179
-  W2:1000ms                      spec_commit                79.699     91.604     99.607
-  W2:1000ms                      spec_rollback              50.737     65.431     71.006
-  W2:1000ms                      spec_total_commit        1134.160   1147.642   1155.200
-  W2:1000ms                      spec_total_rollback      1105.486   1121.017   1126.401
-  W3a:read_4KiB                  raw_tool                    1.002      1.155      1.257
-  W3a:read_4KiB                  spec_begin                 43.475     44.568     45.027
-  W3a:read_4KiB                  spec_run                    3.466      3.780      5.673
-  W3a:read_4KiB                  spec_commit                78.902     82.307     86.075
-  W3a:read_4KiB                  spec_rollback              50.053     51.511     54.491
-  W3a:read_4KiB                  spec_total_commit         125.818    130.180    136.416
-  W3a:read_4KiB                  spec_total_rollback        97.070     99.845    102.476
-  W3a:read_1MiB                  raw_tool                    1.880      2.888      3.507
-  W3a:read_1MiB                  spec_begin                 43.467     44.505     46.457
-  W3a:read_1MiB                  spec_run                    4.412      4.924      8.435
-  W3a:read_1MiB                  spec_commit                78.614     81.992     83.990
-  W3a:read_1MiB                  spec_rollback              50.021     52.233     54.219
-  W3a:read_1MiB                  spec_total_commit         126.588    130.576    132.173
-  W3a:read_1MiB                  spec_total_rollback        97.968    101.322    102.376
-  W3a:read_64MiB                 raw_tool                   26.028     35.513     40.335
-  W3a:read_64MiB                 spec_begin                 43.343     44.357     47.164
-  W3a:read_64MiB                 spec_run                   28.542     29.931     32.937
-  W3a:read_64MiB                 spec_commit                78.483     82.288     84.423
-  W3a:read_64MiB                 spec_rollback              49.941     50.669     51.310
-  W3a:read_64MiB                 spec_total_commit         150.368    154.837    159.597
-  W3a:read_64MiB                 spec_total_rollback       121.458    122.673    125.487
-  W3b:repeat_read_1MiB_x100      raw_tool                   34.927     35.495     37.006
-  W3b:repeat_read_1MiB_x100      spec_begin                 43.203     43.809     44.489
-  W3b:repeat_read_1MiB_x100      spec_run                   43.568     45.665     46.699
-  W3b:repeat_read_1MiB_x100      spec_commit                78.260     79.592     83.076
-  W3b:repeat_read_1MiB_x100      spec_rollback              49.976     50.663     51.042
-  W3b:repeat_read_1MiB_x100      spec_total_commit         165.255    168.770    172.671
-  W3b:repeat_read_1MiB_x100      spec_total_rollback       137.083    139.557    143.169
-  W4:new_4KiB                    raw_tool                    1.591      1.748      1.780
-  W4:new_4KiB                    spec_begin                 43.172     43.965     44.459
-  W4:new_4KiB                    spec_run                    4.477      4.780      4.937
-  W4:new_4KiB                    spec_commit                80.493     87.536     89.441
-  W4:new_4KiB                    spec_rollback              51.010     52.771     55.996
-  W4:new_4KiB                    spec_total_commit         128.221    135.133    136.936
-  W4:new_4KiB                    spec_total_rollback        98.959    101.201    103.858
-  W4:new_1MiB                    raw_tool                    2.356      2.745      3.620
-  W4:new_1MiB                    spec_begin                 43.457     44.225     44.624
-  W4:new_1MiB                    spec_run                    5.184      5.635      6.124
-  W4:new_1MiB                    spec_commit                82.080     87.210     88.307
-  W4:new_1MiB                    spec_rollback              50.594     52.428     55.143
-  W4:new_1MiB                    spec_total_commit         130.979    136.020    137.481
-  W4:new_1MiB                    spec_total_rollback        99.424    102.199    104.697
-  W4:new_16MiB                   raw_tool                   11.968     12.849     15.319
-  W4:new_16MiB                   spec_begin                 43.472     44.398     46.234
-  W4:new_16MiB                   spec_run                   15.648     16.126     17.953
-  W4:new_16MiB                   spec_commit                88.225     94.036     95.843
-  W4:new_16MiB                   spec_rollback              54.045     55.756     74.299
-  W4:new_16MiB                   spec_total_commit         147.498    153.335    155.835
-  W4:new_16MiB                   spec_total_rollback       113.119    116.859    133.115
-  W5:overwrite4K_orig4KiB        raw_tool                    1.028      1.175      1.277
-  W5:overwrite4K_orig4KiB        spec_begin                 43.446     44.415     46.862
-  W5:overwrite4K_orig4KiB        spec_run                    4.435      5.259      6.342
-  W5:overwrite4K_orig4KiB        spec_commit                80.970     84.704     87.278
-  W5:overwrite4K_orig4KiB        spec_rollback              49.922     51.004     52.054
-  W5:overwrite4K_orig4KiB        spec_total_commit         129.109    133.300    135.234
-  W5:overwrite4K_orig4KiB        spec_total_rollback        97.665    100.099    101.856
-  W5:overwrite4K_orig1MiB        raw_tool                    1.214      1.307      1.368
-  W5:overwrite4K_orig1MiB        spec_begin                 43.140     43.840     44.256
-  W5:overwrite4K_orig1MiB        spec_run                    5.788      6.646      9.355
-  W5:overwrite4K_orig1MiB        spec_commit                80.576     82.257     84.236
-  W5:overwrite4K_orig1MiB        spec_rollback              49.885     50.900     51.618
-  W5:overwrite4K_orig1MiB        spec_total_commit         129.666    132.759    134.427
-  W5:overwrite4K_orig1MiB        spec_total_rollback        98.841    100.388    102.122
-  W5:overwrite4K_orig16MiB       raw_tool                    1.565      1.626      1.767
-  W5:overwrite4K_orig16MiB       spec_begin                 43.478     44.309     44.524
-  W5:overwrite4K_orig16MiB       spec_run                   22.871     26.189     26.984
-  W5:overwrite4K_orig16MiB       spec_commit                83.523     86.036     87.853
-  W5:overwrite4K_orig16MiB       spec_rollback              52.836     54.496     56.306
-  W5:overwrite4K_orig16MiB       spec_total_commit         150.098    154.051    155.395
-  W5:overwrite4K_orig16MiB       spec_total_rollback       120.118    124.230    126.546
-  W6:writes_x1                   raw_tool                    1.238      1.375      1.844
-  W6:writes_x1                   spec_begin                 43.487     44.365     44.823
-  W6:writes_x1                   spec_run                    6.052      7.466      9.168
-  W6:writes_x1                   spec_commit                83.488     88.404     91.216
-  W6:writes_x1                   spec_rollback              50.625     52.896     56.270
-  W6:writes_x1                   spec_total_commit         133.295    138.795    142.006
-  W6:writes_x1                   spec_total_rollback       100.388    102.684    107.322
-  W6:writes_x10                  raw_tool                    1.274      1.394      1.449
-  W6:writes_x10                  spec_begin                 43.474     44.453     46.552
-  W6:writes_x10                  spec_run                    6.235      7.275      9.537
-  W6:writes_x10                  spec_commit                81.201     85.097     86.494
-  W6:writes_x10                  spec_rollback              50.304     51.658     53.531
-  W6:writes_x10                  spec_total_commit         131.273    135.520    138.060
-  W6:writes_x10                  spec_total_rollback       100.187    103.319    105.350
-  W6:writes_x100                 raw_tool                    1.542      1.678      1.777
-  W6:writes_x100                 spec_begin                 43.540     44.774     48.001
-  W6:writes_x100                 spec_run                    8.774      9.981     12.562
-  W6:writes_x100                 spec_commit                81.472     85.638     86.608
-  W6:writes_x100                 spec_rollback              50.574     52.447     71.378
-  W6:writes_x100                 spec_total_commit         134.280    138.781    141.450
-  W6:writes_x100                 spec_total_rollback       103.160    106.215    123.627
-  W6:writes_x1000                raw_tool                    3.370      3.548      5.152
-  W6:writes_x1000                spec_begin                 43.397     44.245     46.418
-  W6:writes_x1000                spec_run                   33.077     36.289     38.697
-  W6:writes_x1000                spec_commit                81.615     84.584     85.852
-  W6:writes_x1000                spec_rollback              50.310     51.202     54.815
-  W6:writes_x1000                spec_total_commit         158.073    162.892    165.762
-  W6:writes_x1000                spec_total_rollback       125.897    128.246    131.410
-  W7:files_x1                    raw_tool                    1.028      1.174      1.237
-  W7:files_x1                    spec_begin                 43.104     43.863     44.316
-  W7:files_x1                    spec_run                    3.928      4.201      4.295
-  W7:files_x1                    spec_commit                80.492     81.624     83.227
-  W7:files_x1                    spec_rollback              49.818     50.587     51.604
-  W7:files_x1                    spec_total_commit         127.687    128.807    129.924
-  W7:files_x1                    spec_total_rollback        96.673     98.335    100.471
-  W7:files_x10                   raw_tool                    1.199      1.342      1.509
-  W7:files_x10                   spec_begin                 43.117     44.002     44.279
-  W7:files_x10                   spec_run                    6.767      7.237      7.436
-  W7:files_x10                   spec_commit                91.219     93.010     94.510
-  W7:files_x10                   spec_rollback              51.033     52.623     54.604
-  W7:files_x10                   spec_total_commit         141.216    143.710    145.309
-  W7:files_x10                   spec_total_rollback       100.940    103.664    105.338
-  W7:files_x100                  raw_tool                    3.270      3.412      3.445
-  W7:files_x100                  spec_begin                 43.398     44.108     44.224
-  W7:files_x100                  spec_run                   33.093     39.591     41.012
-  W7:files_x100                  spec_commit               201.730    245.711    302.479
-  W7:files_x100                  spec_rollback              64.291     66.317     67.123
-  W7:files_x100                  spec_total_commit         279.554    325.347    384.800
-  W7:files_x100                  spec_total_rollback       143.906    149.883    154.137
-  W7:files_x500                  raw_tool                   14.805     15.686     17.286
-  W7:files_x500                  spec_begin                 43.765     44.722     45.367
-  W7:files_x500                  spec_run                  171.291    188.197    193.349
-  W7:files_x500                  spec_commit               726.868    800.202    822.776
-  W7:files_x500                  spec_rollback             118.037    121.823    126.337
-  W7:files_x500                  spec_total_commit         939.438   1020.301   1050.440
-  W7:files_x500                  spec_total_rollback       322.842    334.752    343.455
-  W8:rename_x1                   raw_tool                    1.024      1.200      1.377
-  W8:rename_x1                   spec_begin                 43.444     44.546     45.663
-  W8:rename_x1                   spec_run                    3.846      4.210      5.312
-  W8:rename_x1                   spec_commit                80.028     83.125     84.249
-  W8:rename_x1                   spec_rollback              49.625     50.643     51.092
-  W8:rename_x1                   spec_total_commit         127.534    130.856    132.850
-  W8:rename_x1                   spec_total_rollback        96.268     98.263     98.884
-  W8:rename_x10                  raw_tool                    1.153      1.286      1.358
-  W8:rename_x10                  spec_begin                 43.072     44.206     44.480
-  W8:rename_x10                  spec_run                    5.757      6.203      7.156
-  W8:rename_x10                  spec_commit                79.809     80.984     83.374
-  W8:rename_x10                  spec_rollback              49.786     50.934     53.832
-  W8:rename_x10                  spec_total_commit         128.837    131.590    132.105
-  W8:rename_x10                  spec_total_rollback        98.353    100.056    102.449
-  W8:rename_x100                 raw_tool                    3.309      3.484      3.658
-  W8:rename_x100                 spec_begin                 43.239     44.058     44.559
-  W8:rename_x100                 spec_run                   23.268     27.336     28.689
-  W8:rename_x100                 spec_commit                91.606     93.032     95.496
-  W8:rename_x100                 spec_rollback              52.125     52.896     53.511
-  W8:rename_x100                 spec_total_commit         158.455    162.521    163.492
-  W8:rename_x100                 spec_total_rollback       116.486    120.571    123.421
-  W8:rename_x500                 raw_tool                   13.483     13.912     14.279
-  W8:rename_x500                 spec_begin                 43.699     44.601     45.504
-  W8:rename_x500                 spec_run                  105.400    112.729    114.176
-  W8:rename_x500                 spec_commit               271.332    278.043    281.149
-  W8:rename_x500                 spec_rollback              62.075     64.003     66.599
-  W8:rename_x500                 spec_total_commit         420.258    435.349    436.988
-  W8:rename_x500                 spec_total_rollback       202.695    214.116    217.513
-  W10a:single_1KiB               raw_tool                    1.011      1.145      1.253
-  W10a:single_1KiB               spec_begin                 43.770     44.766     46.760
-  W10a:single_1KiB               spec_run                    3.300      3.564      3.770
-  W10a:single_1KiB               spec_commit                78.410     82.115     84.790
-  W10a:single_1KiB               spec_rollback              49.610     51.573     55.093
-  W10a:single_1KiB               spec_total_commit         125.587    129.654    131.003
-  W10a:single_1KiB               spec_total_rollback        96.797    104.423    113.305
-  W10a:single_10KiB              raw_tool                    0.990      1.176      1.296
-  W10a:single_10KiB              spec_begin                 43.909     44.969     46.947
-  W10a:single_10KiB              spec_run                    3.389      3.765      6.708
-  W10a:single_10KiB              spec_commit                78.881     82.788     86.011
-  W10a:single_10KiB              spec_rollback              49.754     50.669     57.629
-  W10a:single_10KiB              spec_total_commit         126.488    130.415    134.287
-  W10a:single_10KiB              spec_total_rollback        96.994    101.748    115.935
-  W10a:single_100KiB             raw_tool                    1.216      1.368      1.394
-  W10a:single_100KiB             spec_begin                 44.683     45.641     46.055
-  W10a:single_100KiB             spec_run                    3.989      4.449      7.727
-  W10a:single_100KiB             spec_commit                80.204     84.793     86.299
-  W10a:single_100KiB             spec_rollback              50.958     52.116     52.705
-  W10a:single_100KiB             spec_total_commit         129.027    133.428    136.785
-  W10a:single_100KiB             spec_total_rollback       100.077    101.723    102.790
-  W10a:single_1MiB               raw_tool                    4.449      4.676      4.884
-  W10a:single_1MiB               spec_begin                 51.422     56.424     58.195
-  W10a:single_1MiB               spec_run                   11.250     12.289     13.377
-  W10a:single_1MiB               spec_commit                92.827     97.460     99.918
-  W10a:single_1MiB               spec_rollback              62.724     64.603     66.445
-  W10a:single_1MiB               spec_total_commit         156.467    162.926    164.980
-  W10a:single_1MiB               spec_total_rollback       131.377    135.307    139.737
-  W10b:entries_x10               raw_tool                    8.417      8.713      8.893
-  W10b:entries_x10               spec_begin                 56.353     58.307     60.530
-  W10b:entries_x10               spec_run                   12.062     22.587     29.975
-  W10b:entries_x10               spec_commit                78.744     83.591     86.518
-  W10b:entries_x10               spec_rollback              62.615     64.818     66.228
-  W10b:entries_x10               spec_total_commit         147.866    159.997    166.516
-  W10b:entries_x10               spec_total_rollback       131.521    136.150    140.583
-  W10b:entries_x100              raw_tool                   61.530     62.855     65.042
-  W10b:entries_x100              spec_begin                 57.177     58.638     60.445
-  W10b:entries_x100              spec_run                  106.726    119.570    123.243
-  W10b:entries_x100              spec_commit                80.541     85.161     88.184
-  W10b:entries_x100              spec_rollback              63.936     65.954     68.525
-  W10b:entries_x100              spec_total_commit         245.225    260.003    264.886
-  W10b:entries_x100              spec_total_rollback       225.392    235.994    243.264
-  W10b:entries_x1000             raw_tool                  611.150    624.641    628.928
-  W10b:entries_x1000             spec_begin                 63.287     68.808     70.082
-  W10b:entries_x1000             spec_run                 1034.933   1137.754   1178.271
-  W10b:entries_x1000             spec_commit                96.636    101.842    103.612
-  W10b:entries_x1000             spec_rollback              75.912     78.131     79.648
-  W10b:entries_x1000             spec_total_commit        1199.429   1301.632   1339.926
-  W10b:entries_x1000             spec_total_rollback      1171.785   1276.349   1313.012
+  W1:noop                        raw_tool                    0.932      1.082      1.173
+  W1:noop                        spec_begin                 42.990     43.937     44.587
+  W1:noop                        spec_run                    3.126      3.365      3.941
+  W1:noop                        spec_commit                79.292     84.871     87.059
+  W1:noop                        spec_rollback              50.000     51.941     53.953
+  W1:noop                        spec_total_commit         125.386    131.353    133.303
+  W1:noop                        spec_total_rollback        96.465     99.188    101.873
+  W2:10ms                        raw_tool                   11.200     11.426     12.003
+  W2:10ms                        spec_begin                 43.000     43.633     44.226
+  W2:10ms                        spec_run                   13.275     13.463     13.563
+  W2:10ms                        spec_commit                79.445     80.802     83.487
+  W2:10ms                        spec_rollback              50.152     52.022     54.054
+  W2:10ms                        spec_total_commit         135.791    137.482    139.834
+  W2:10ms                        spec_total_rollback       106.761    109.345    111.314
+  W2:100ms                       raw_tool                  101.450    101.682    101.978
+  W2:100ms                       spec_begin                 43.240     44.045     44.611
+  W2:100ms                       spec_run                  104.382    121.185    122.634
+  W2:100ms                       spec_commit                81.055     98.720    103.810
+  W2:100ms                       spec_rollback              50.447     68.893     76.526
+  W2:100ms                       spec_total_commit         229.891    256.893    264.623
+  W2:100ms                       spec_total_rollback       205.230    226.283    232.226
+  W2:1000ms                      raw_tool                 1001.555   1001.694   1001.935
+  W2:1000ms                      spec_begin                 43.238     44.201     45.094
+  W2:1000ms                      spec_run                 1011.581   1020.842   1024.636
+  W2:1000ms                      spec_commit                82.462     96.111    103.025
+  W2:1000ms                      spec_rollback              50.998     66.047     71.966
+  W2:1000ms                      spec_total_commit        1135.871   1154.061   1163.271
+  W2:1000ms                      spec_total_rollback      1105.682   1122.741   1127.529
+  W3a:read_4KiB                  raw_tool                    0.998      1.155      1.241
+  W3a:read_4KiB                  spec_begin                 43.380     44.185     44.555
+  W3a:read_4KiB                  spec_run                    2.834      3.637      4.611
+  W3a:read_4KiB                  spec_commit                82.450     86.395     87.428
+  W3a:read_4KiB                  spec_rollback              50.148     51.973     54.170
+  W3a:read_4KiB                  spec_total_commit         128.954    133.151    134.594
+  W3a:read_4KiB                  spec_total_rollback        96.831     99.039    101.486
+  W3a:read_1MiB                  raw_tool                    1.834      1.977      2.015
+  W3a:read_1MiB                  spec_begin                 43.465     44.541     45.715
+  W3a:read_1MiB                  spec_run                    4.414      4.737      5.935
+  W3a:read_1MiB                  spec_commit                79.989     83.587     85.616
+  W3a:read_1MiB                  spec_rollback              50.011     52.376     69.757
+  W3a:read_1MiB                  spec_total_commit         127.903    131.634    137.163
+  W3a:read_1MiB                  spec_total_rollback        97.859    100.818    117.261
+  W3a:read_64MiB                 raw_tool                   23.696     26.006     37.815
+  W3a:read_64MiB                 spec_begin                 43.417     44.484     46.435
+  W3a:read_64MiB                 spec_run                   26.335     28.677     31.022
+  W3a:read_64MiB                 spec_commit                80.115     84.236     85.470
+  W3a:read_64MiB                 spec_rollback              49.987     51.204     53.206
+  W3a:read_64MiB                 spec_total_commit         150.031    155.077    157.938
+  W3a:read_64MiB                 spec_total_rollback       119.317    121.634    125.294
+  W3b:repeat_read_1MiB_x100      raw_tool                   34.607     35.388     36.364
+  W3b:repeat_read_1MiB_x100      spec_begin                 43.084     43.770     44.087
+  W3b:repeat_read_1MiB_x100      spec_run                   43.467     44.542     45.649
+  W3b:repeat_read_1MiB_x100      spec_commit                79.196     80.767     82.911
+  W3b:repeat_read_1MiB_x100      spec_rollback              49.809     50.575     53.199
+  W3b:repeat_read_1MiB_x100      spec_total_commit         165.729    168.271    169.687
+  W3b:repeat_read_1MiB_x100      spec_total_rollback       136.262    138.091    140.510
+  W4:new_4KiB                    raw_tool                    1.573      1.758      1.787
+  W4:new_4KiB                    spec_begin                 43.098     43.775     44.328
+  W4:new_4KiB                    spec_run                    4.520      4.773      4.908
+  W4:new_4KiB                    spec_commit                81.598     83.071     85.104
+  W4:new_4KiB                    spec_rollback              49.747     50.530     53.293
+  W4:new_4KiB                    spec_total_commit         129.229    130.843    132.706
+  W4:new_4KiB                    spec_total_rollback        97.164     98.463    100.635
+  W4:new_1MiB                    raw_tool                    2.241      2.514      2.565
+  W4:new_1MiB                    spec_begin                 43.171     44.041     44.391
+  W4:new_1MiB                    spec_run                    5.124      5.493      6.333
+  W4:new_1MiB                    spec_commit                82.351     90.189     92.461
+  W4:new_1MiB                    spec_rollback              50.989     52.712     54.039
+  W4:new_1MiB                    spec_total_commit         130.679    138.968    141.564
+  W4:new_1MiB                    spec_total_rollback        99.485    101.320    103.177
+  W4:new_16MiB                   raw_tool                   11.675     12.041     12.408
+  W4:new_16MiB                   spec_begin                 43.484     44.487     44.895
+  W4:new_16MiB                   spec_run                   15.177     15.924     20.004
+  W4:new_16MiB                   spec_commit                90.090     96.801     98.513
+  W4:new_16MiB                   spec_rollback              53.984     55.623     56.812
+  W4:new_16MiB                   spec_total_commit         148.880    155.638    159.520
+  W4:new_16MiB                   spec_total_rollback       112.570    115.197    118.591
+  W5:overwrite4K_orig4KiB        raw_tool                    1.047      1.196      1.451
+  W5:overwrite4K_orig4KiB        spec_begin                 43.471     44.414     46.634
+  W5:overwrite4K_orig4KiB        spec_run                    4.456      5.231      7.779
+  W5:overwrite4K_orig4KiB        spec_commit                82.067     86.285     88.816
+  W5:overwrite4K_orig4KiB        spec_rollback              50.319     52.371     53.866
+  W5:overwrite4K_orig4KiB        spec_total_commit         130.286    134.802    136.673
+  W5:overwrite4K_orig4KiB        spec_total_rollback        98.471    101.940    105.868
+  W5:overwrite4K_orig1MiB        raw_tool                    1.250      1.372      1.879
+  W5:overwrite4K_orig1MiB        spec_begin                 43.479     44.660     47.172
+  W5:overwrite4K_orig1MiB        spec_run                    5.768      6.677      9.127
+  W5:overwrite4K_orig1MiB        spec_commit                82.402     86.419     87.978
+  W5:overwrite4K_orig1MiB        spec_rollback              49.929     50.684     51.050
+  W5:overwrite4K_orig1MiB        spec_total_commit         131.960    136.474    137.718
+  W5:overwrite4K_orig1MiB        spec_total_rollback        98.837    100.088    102.012
+  W5:overwrite4K_orig16MiB       raw_tool                    1.492      1.626      1.708
+  W5:overwrite4K_orig16MiB       spec_begin                 43.426     44.088     44.488
+  W5:overwrite4K_orig16MiB       spec_run                   22.690     26.249     26.809
+  W5:overwrite4K_orig16MiB       spec_commit                84.453     87.587     88.569
+  W5:overwrite4K_orig16MiB       spec_rollback              52.532     53.269     54.018
+  W5:overwrite4K_orig16MiB       spec_total_commit         150.984    154.680    156.131
+  W5:overwrite4K_orig16MiB       spec_total_rollback       118.831    122.542    124.076
+  W6:writes_x1                   raw_tool                    1.204      1.300      1.345
+  W6:writes_x1                   spec_begin                 43.163     43.900     44.318
+  W6:writes_x1                   spec_run                    5.787      6.559      7.070
+  W6:writes_x1                   spec_commit                81.791     83.478     85.800
+  W6:writes_x1                   spec_rollback              49.972     52.145     55.437
+  W6:writes_x1                   spec_total_commit         130.954    133.482    135.289
+  W6:writes_x1                   spec_total_rollback        99.015    102.094    104.600
+  W6:writes_x10                  raw_tool                    1.264      1.367      1.408
+  W6:writes_x10                  spec_begin                 43.471     44.355     44.906
+  W6:writes_x10                  spec_run                    6.353      7.965      9.746
+  W6:writes_x10                  spec_commit                85.061     89.516     91.507
+  W6:writes_x10                  spec_rollback              50.614     52.531     70.218
+  W6:writes_x10                  spec_total_commit         135.082    139.962    143.436
+  W6:writes_x10                  spec_total_rollback       100.598    103.806    119.538
+  W6:writes_x100                 raw_tool                    1.568      1.712      1.792
+  W6:writes_x100                 spec_begin                 43.520     44.446     45.509
+  W6:writes_x100                 spec_run                    8.783      9.755     11.100
+  W6:writes_x100                 spec_commit                82.846     87.491     88.871
+  W6:writes_x100                 spec_rollback              50.573     52.361     55.062
+  W6:writes_x100                 spec_total_commit         135.514    140.653    142.651
+  W6:writes_x100                 spec_total_rollback       103.200    106.063    108.542
+  W6:writes_x1000                raw_tool                    3.367      3.674      5.340
+  W6:writes_x1000                spec_begin                 43.451     44.565     47.235
+  W6:writes_x1000                spec_run                   34.238     36.731     42.946
+  W6:writes_x1000                spec_commit                83.219     86.702     89.870
+  W6:writes_x1000                spec_rollback              50.199     51.395     52.842
+  W6:writes_x1000                spec_total_commit         161.515    166.705    170.581
+  W6:writes_x1000                spec_total_rollback       126.809    129.762    131.810
+  W7:files_x1                    raw_tool                    1.002      1.153      1.231
+  W7:files_x1                    spec_begin                 43.012     43.556     44.006
+  W7:files_x1                    spec_run                    3.827      4.157      4.489
+  W7:files_x1                    spec_commit                81.275     83.075     85.535
+  W7:files_x1                    spec_rollback              49.604     50.146     50.490
+  W7:files_x1                    spec_total_commit         128.173    130.461    132.797
+  W7:files_x1                    spec_total_rollback        96.236     97.512     99.639
+  W7:files_x10                   raw_tool                    1.179      1.326      1.390
+  W7:files_x10                   spec_begin                 43.063     43.512     44.181
+  W7:files_x10                   spec_run                    6.914      7.256      7.413
+  W7:files_x10                   spec_commit                92.678     96.024     96.878
+  W7:files_x10                   spec_rollback              50.915     51.635     52.249
+  W7:files_x10                   spec_total_commit         142.735    145.813    146.761
+  W7:files_x10                   spec_total_rollback       100.866    102.585    103.431
+  W7:files_x100                  raw_tool                    3.248      3.440      3.514
+  W7:files_x100                  spec_begin                 43.253     44.141     44.534
+  W7:files_x100                  spec_run                   35.245     39.314     40.825
+  W7:files_x100                  spec_commit               202.730    207.692    210.339
+  W7:files_x100                  spec_rollback              62.357     63.725     64.898
+  W7:files_x100                  spec_total_commit         282.184    288.596    291.050
+  W7:files_x100                  spec_total_rollback       141.289    145.293    147.599
+  W7:files_x500                  raw_tool                   13.642     13.992     14.040
+  W7:files_x500                  spec_begin                 43.743     44.588     44.964
+  W7:files_x500                  spec_run                  182.775    195.073    198.670
+  W7:files_x500                  spec_commit               755.807    895.618    934.603
+  W7:files_x500                  spec_rollback             119.118    122.852    123.849
+  W7:files_x500                  spec_total_commit         986.117   1123.258   1166.837
+  W7:files_x500                  spec_total_rollback       337.517    351.187    367.298
+  W8:rename_x1                   raw_tool                    1.026      1.201      1.262
+  W8:rename_x1                   spec_begin                 43.423     44.311     47.376
+  W8:rename_x1                   spec_run                    3.863      4.161      5.813
+  W8:rename_x1                   spec_commit                81.059     84.458     85.665
+  W8:rename_x1                   spec_rollback              50.042     51.552     54.747
+  W8:rename_x1                   spec_total_commit         128.753    132.625    134.293
+  W8:rename_x1                   spec_total_rollback        97.353     99.602    101.543
+  W8:rename_x10                  raw_tool                    1.220      1.480      1.592
+  W8:rename_x10                  spec_begin                 43.063     43.725     45.755
+  W8:rename_x10                  spec_run                    5.910      6.273      6.596
+  W8:rename_x10                  spec_commit                81.309     84.737     85.372
+  W8:rename_x10                  spec_rollback              49.770     50.624     50.845
+  W8:rename_x10                  spec_total_commit         130.256    133.822    135.419
+  W8:rename_x10                  spec_total_rollback        98.359     99.824    102.207
+  W8:rename_x100                 raw_tool                    3.214      3.452      3.490
+  W8:rename_x100                 spec_begin                 43.171     43.889     44.702
+  W8:rename_x100                 spec_run                   24.270     27.481     28.450
+  W8:rename_x100                 spec_commit                92.680     96.075     97.599
+  W8:rename_x100                 spec_rollback              51.942     52.541     53.198
+  W8:rename_x100                 spec_total_commit         160.336    164.464    165.859
+  W8:rename_x100                 spec_total_rollback       116.649    120.817    122.236
+  W8:rename_x500                 raw_tool                   13.301     13.678     13.780
+  W8:rename_x500                 spec_begin                 43.477     44.120     44.911
+  W8:rename_x500                 spec_run                  107.758    112.375    113.702
+  W8:rename_x500                 spec_commit               270.288    273.625    278.246
+  W8:rename_x500                 spec_rollback              60.060     61.442     62.897
+  W8:rename_x500                 spec_total_commit         421.318    429.108    436.899
+  W8:rename_x500                 spec_total_rollback       200.179    204.244    209.847
+  W10a:single_1KiB               raw_tool                    1.017      1.150      1.210
+  W10a:single_1KiB               spec_begin                 43.726     44.795     46.131
+  W10a:single_1KiB               spec_run                    3.246      3.542      3.682
+  W10a:single_1KiB               spec_commit                79.997     84.693     87.818
+  W10a:single_1KiB               spec_rollback              49.416     50.114     52.896
+  W10a:single_1KiB               spec_total_commit         127.184    131.375    135.154
+  W10a:single_1KiB               spec_total_rollback        96.481    101.166    102.563
+  W10a:single_10KiB              raw_tool                    0.991      1.190      1.307
+  W10a:single_10KiB              spec_begin                 43.741     44.862     45.339
+  W10a:single_10KiB              spec_run                    3.306      4.207      6.968
+  W10a:single_10KiB              spec_commit                80.168     86.334     87.249
+  W10a:single_10KiB              spec_rollback              49.638     51.694     59.120
+  W10a:single_10KiB              spec_total_commit         127.467    133.111    134.078
+  W10a:single_10KiB              spec_total_rollback        97.020    104.495    113.829
+  W10a:single_100KiB             raw_tool                    1.187      1.447      1.637
+  W10a:single_100KiB             spec_begin                 44.435     45.302     46.094
+  W10a:single_100KiB             spec_run                    4.043      9.060     21.483
+  W10a:single_100KiB             spec_commit                81.447     88.966     98.290
+  W10a:single_100KiB             spec_rollback              50.888     52.330     54.612
+  W10a:single_100KiB             spec_total_commit         129.929    142.597    157.705
+  W10a:single_100KiB             spec_total_rollback       100.099    106.843    108.766
+  W10a:single_1MiB               raw_tool                    4.375      4.862      5.089
+  W10a:single_1MiB               spec_begin                 50.669     55.491     57.192
+  W10a:single_1MiB               spec_run                   11.214     16.454     16.953
+  W10a:single_1MiB               spec_commit                93.569     98.698    100.972
+  W10a:single_1MiB               spec_rollback              61.944     64.475     67.486
+  W10a:single_1MiB               spec_total_commit         157.016    164.005    166.474
+  W10a:single_1MiB               spec_total_rollback       130.293    140.226    146.494
+  W10b:entries_x10               raw_tool                    8.357      8.732      9.009
+  W10b:entries_x10               spec_begin                 55.423     56.917     58.019
+  W10b:entries_x10               spec_run                   12.345     24.907     29.000
+  W10b:entries_x10               spec_commit                80.076     85.835     88.609
+  W10b:entries_x10               spec_rollback              61.845     64.635     66.194
+  W10b:entries_x10               spec_total_commit         150.222    161.319    165.755
+  W10b:entries_x10               spec_total_rollback       129.890    145.791    149.267
+  W10b:entries_x100              raw_tool                   61.601     62.739     63.029
+  W10b:entries_x100              spec_begin                 55.941     57.577     58.577
+  W10b:entries_x100              spec_run                  107.485    122.446    130.153
+  W10b:entries_x100              spec_commit                81.454     86.804     89.285
+  W10b:entries_x100              spec_rollback              63.016     64.624     66.714
+  W10b:entries_x100              spec_total_commit         246.075    264.051    270.865
+  W10b:entries_x100              spec_total_rollback       223.214    233.290    235.392
+  W10b:entries_x1000             raw_tool                  608.478    621.925    640.585
+  W10b:entries_x1000             spec_begin                 61.448     67.516     69.926
+  W10b:entries_x1000             spec_run                 1038.507   1142.220   1162.737
+  W10b:entries_x1000             spec_commit                97.474    103.410    107.411
+  W10b:entries_x1000             spec_rollback              74.563     76.576     78.157
+  W10b:entries_x1000             spec_total_commit        1199.652   1311.564   1375.732
+  W10b:entries_x1000             spec_total_rollback      1164.220   1289.139   1325.836
 
 ==============================================================================
 

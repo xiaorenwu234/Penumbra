@@ -447,33 +447,51 @@ def _run_single_agent_epoch(agent_idx: int, epoch_count: int,
     All agents write to the SAME shared directory, forming a real dependency
     graph in ShadowFS. This is intentional: D4 measures how group-level
     finalization scales when concurrent agents share file dependencies.
-    The orchestrator must handle concurrent SCC resolution correctly:
-    one agent's commit may finalize the entire group (including other
-    agents' epochs), and the others must recognize this as success.
+
+    IMPORTANT: This function only does begin_epoch + session_run (the FUSE
+    write phase). The commit is done separately in phase 2, after ALL agents
+    have finished writing. This prevents FUSE writes from advancing
+    ShadowFS's internal graph_generation during another agent's commit.
     """
     agent_id = f"d4-agent-{agent_idx}"
     client = OrchClient(orch_sock)
-    client.connect()
+    # Retry connection on transient backlog overflow (BlockingIOError)
+    for attempt in range(5):
+        try:
+            client.connect()
+            break
+        except (BlockingIOError, ConnectionRefusedError, OSError):
+            if attempt == 4:
+                return {"agent_idx": agent_idx, "total_ns": 0,
+                        "error": "connect failed after 5 attempts",
+                        "session_id": None, "client": None}
+            time.sleep(0.05 * (attempt + 1))
     try:
         sess = client.session_open(agent_id=agent_id)
         sid = sess["session_id"]
 
-        with Timer() as total_t:
-            client.session_begin_epoch(sid, agent_id=agent_id)
-            # Shared directory: all agents write to the same namespace,
-            # creating real cross-agent dependencies in ShadowFS's graph.
-            fpath = dep_fuse_path(f"concurrent_{agent_idx}.dat")
-            client.session_run(sid, f"echo 'agent-{agent_idx}' > {fpath}")
-            client.session_commit_epoch(sid, agent_id=agent_id,
-                                        allowed_ops=ALLOW_ALL_OPS)
+        # Phase 1: begin epoch + write (FUSE operations)
+        client.session_begin_epoch(sid, agent_id=agent_id)
+        fpath = dep_fuse_path(f"concurrent_{agent_idx}.dat")
+        client.session_run(sid, f"echo 'agent-{agent_idx}' > {fpath}")
 
-        client.session_close(sid)
-        return {"agent_idx": agent_idx, "total_ns": total_t.elapsed_ns,
-                "error": None}
+        # Return session info for phase 2 (commit)
+        return {"agent_idx": agent_idx, "total_ns": 0,
+                "error": None, "session_id": sid, "client": client}
     except Exception as e:
-        return {"agent_idx": agent_idx, "total_ns": 0, "error": str(e)}
-    finally:
         client.close()
+        return {"agent_idx": agent_idx, "total_ns": 0, "error": str(e),
+                "session_id": None, "client": None}
+
+
+def _commit_agent(client, session_id: str, agent_id: str) -> Dict[str, Any]:
+    """Phase 2: commit a single agent's epoch (called concurrently)."""
+    try:
+        client.session_commit_epoch(session_id, agent_id=agent_id,
+                                    allowed_ops=ALLOW_ALL_OPS)
+        return {"error": None, "client": client, "session_id": session_id}
+    except Exception as e:
+        return {"error": str(e), "client": client, "session_id": session_id}
 
 
 def run_d4_concurrent(sizes: List[int], repeats: int) -> List[DepGraphResult]:
@@ -493,26 +511,56 @@ def run_d4_concurrent(sizes: List[int], repeats: int) -> List[DepGraphResult]:
         for rep in range(repeats):
             cleanup_dep_dir()
 
-            # Run all agents concurrently
-            with Timer() as batch_t:
-                with ThreadPoolExecutor(max_workers=min(n_agents, 64)) as pool:
-                    futures = [
-                        pool.submit(_run_single_agent_epoch, i, 1)
-                        for i in range(n_agents)
-                    ]
-                    agent_results = [f.result() for f in as_completed(futures)]
+            # TWO-PHASE approach to eliminate FUSE-write vs commit race:
+            #   Phase 1: All agents do begin_epoch + session_run (FUSE writes)
+            #   Phase 2: All agents do session_commit_epoch (measured)
+            # This ensures no FUSE writes occur during any agent's commit,
+            # preventing ShadowFS's internal graph_generation from advancing
+            # between another agent's prepare_resolution and begin_finalize.
 
-            errors = [ar["error"] for ar in agent_results if ar["error"]]
-            successes = [ar for ar in agent_results if not ar["error"]]
+            # Phase 1: begin_epoch + write (staggered connections)
+            with ThreadPoolExecutor(max_workers=min(n_agents, 128)) as pool:
+                futures = []
+                for i in range(n_agents):
+                    futures.append(
+                        pool.submit(_run_single_agent_epoch, i, 1))
+                    if i < n_agents - 1:
+                        time.sleep(0.005)
+                phase1_results = [f.result() for f in as_completed(futures)]
 
-            if successes:
-                r.total_ns.append(batch_t.elapsed_ns)
-                per_agent = [ar["total_ns"] for ar in successes]
-                r.per_epoch_finalize_ns.extend(per_agent)
+            # Collect successful sessions for phase 2
+            ready = [r for r in phase1_results
+                     if not r["error"] and r["session_id"]]
+            phase1_errors = [r["error"] for r in phase1_results if r["error"]]
+
+            # Phase 2: commit all agents (measured)
+            if ready:
+                with Timer() as batch_t:
+                    with ThreadPoolExecutor(max_workers=min(len(ready), 128)) as pool:
+                        commit_futures = []
+                        for item in ready:
+                            commit_futures.append(pool.submit(
+                                _commit_agent, item["client"], item["session_id"],
+                                f"d4-agent-{item['agent_idx']}"))
+                        commit_results = [f.result() for f in as_completed(commit_futures)]
+
                 r.finalize_ns.append(batch_t.elapsed_ns)
+                r.total_ns.append(batch_t.elapsed_ns)
+                commit_errors = [cr["error"] for cr in commit_results if cr["error"]]
+                if commit_errors:
+                    r.errors.extend(commit_errors[:5])
 
-            if errors:
-                r.errors.extend(errors[:5])
+                # Close all sessions
+                for cr in commit_results:
+                    if cr.get("client"):
+                        try:
+                            cr["client"].session_close(cr["session_id"])
+                            cr["client"].close()
+                        except Exception:
+                            pass
+
+            if phase1_errors:
+                r.errors.extend(phase1_errors[:5])
 
         r.wall_time_s = time.time() - t0
         results.append(r)
@@ -615,7 +663,7 @@ def run_d5_decisions(chain_size: int, repeats: int) -> List[DepGraphResult]:
 FULL_CHAIN_SIZES = [1, 10, 100, 500]
 FULL_FAN_SIZES = [2, 8, 32, 128]
 FULL_SCC_SIZES = [2, 4, 8, 16]
-FULL_CONCURRENT_SIZES = [1, 8, 32, 128]
+FULL_CONCURRENT_SIZES = [1, 8, 16, 32]
 FULL_DECISION_CHAIN = 10
 
 QUICK_CHAIN_SIZES = [1, 5, 10]

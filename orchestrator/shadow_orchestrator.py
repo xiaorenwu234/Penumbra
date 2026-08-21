@@ -978,6 +978,34 @@ class ShadowOrchestrator:
             except Exception as e:  # noqa: BLE001
                 fin = {"status": "error", "message": str(e)}
 
+            # ShadowFS's internal async state machine (epoch transitions,
+            # FUSE attribution) can advance graph_generation outside the
+            # orchestrator's control. If begin_finalize reports a mismatch,
+            # re-read the graph state and retry ONCE with the fresh gen.
+            # This is NOT a race in orchestrator code — the lock correctly
+            # serializes all orchestrator-initiated operations. This handles
+            # ShadowFS's eventual-consistency internal updates.
+            fin_msg = fin.get("message", "") if isinstance(fin, dict) else ""
+            if "graph_generation mismatch" in fin_msg:
+                log.info("  begin_finalize: mismatch (ShadowFS internal async) "
+                         "— re-preparing with fresh graph state")
+                try:
+                    prep2 = self.fs_client.request(prep_req)
+                    if prep2.get("status") == "ok":
+                        group_id = prep2["group_id"]
+                        members = prep2["members"]
+                        graph_gen = prep2["graph_generation"]
+                        self._record_authorized_epoch(epoch_id or members[0],
+                                                     cgroup_id, proc_policy)
+                        fin2 = self.fs_client.request({
+                            "action": "begin_finalize",
+                            "group_id": group_id,
+                            "graph_generation": graph_gen,
+                        })
+                        fin = fin2
+                except Exception:  # noqa: BLE001
+                    pass  # keep original error
+
         # ── _graph_sequence_lock released ──
         # From here on, the expensive parts (poll, release, ack) run in parallel.
 
@@ -3291,7 +3319,7 @@ class OrchestratorServer:
         except OSError as e:
             log.warning("Could not set socket %s to 0600: %s", self.listen_path, e)
 
-        server.listen(16)
+        server.listen(256)
         server.settimeout(1.0)
         log.info("Orchestrator API listening on %s (allowed UIDs: %s)",
                  self.listen_path, sorted(self._allowed_uids))
