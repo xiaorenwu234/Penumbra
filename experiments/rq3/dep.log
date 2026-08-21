@@ -10,12 +10,12 @@ make: 对“all”无需做任何事。
 make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/benchmarks”
   Done
 [4/7] 启动 ShadowFS...
-  ShadowFS PID=65708 OK
+  ShadowFS PID=67229 OK
   FUSE 挂载: /tmp/shadow-rq2-test/mnt OK
 [5/7] 启动 ShadowProc...
-  ShadowProc PID=65747 OK
+  ShadowProc PID=67269 OK
 [6/7] 启动 Orchestrator...
-  Orchestrator PID=65786 OK
+  Orchestrator PID=67308 OK
   Socket: /tmp/shadow-orch.sock OK
   Orchestrator 连接测试: OK
 [7/7] 运行 RQ3 实验...
@@ -28,55 +28,277 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
 
 [D1] Chain topology (linear dependency, cross-epoch)
   [D1] chain length=2
-    rep 1/1 done (1.4s)
-    finalize: mean=162.90ms p95=162.90ms (n=1)
+    rep 1/10 done (1.4s)
+    rep 2/10 done (1.4s)
+    rep 3/10 done (1.4s)
+    rep 4/10 done (1.4s)
+    rep 5/10 done (1.4s)
+    rep 6/10 done (1.4s)
+    rep 7/10 done (1.4s)
+    rep 8/10 done (1.4s)
+    rep 9/10 done (1.4s)
+    rep 10/10 done (1.4s)
+    finalize: mean=162.91ms p95=163.93ms (n=10)
   [D1] chain length=4
-    rep 1/1 done (2.7s)
-    finalize: mean=324.07ms p95=324.07ms (n=1)
+    rep 1/10 done (2.7s)
+    rep 2/10 done (2.7s)
+    rep 3/10 done (2.7s)
+    rep 4/10 done (2.7s)
+    rep 5/10 done (2.7s)
+    rep 6/10 done (2.7s)
+    rep 7/10 done (2.8s)
+    rep 8/10 done (2.7s)
+    rep 9/10 done (2.7s)
+    rep 10/10 done (2.7s)
+    finalize: mean=326.62ms p95=331.75ms (n=10)
   [D1] chain length=8
-    rep 1/1 done (5.4s)
-    finalize: mean=649.82ms p95=649.82ms (n=1)
+    rep 1/10 done (5.5s)
+    rep 2/10 done (5.4s)
+    rep 3/10 done (5.5s)
+    rep 4/10 done (5.5s)
+    rep 5/10 done (5.5s)
+    rep 6/10 done (5.4s)
+    rep 7/10 done (5.5s)
+    rep 8/10 done (5.4s)
+    rep 9/10 done (5.5s)
+    rep 10/10 done (5.5s)
+    finalize: mean=650.35ms p95=654.82ms (n=10)
+  [D1] chain length=16
+    rep 1/10 done (11.0s)
+    rep 2/10 done (11.0s)
+    rep 3/10 done (11.0s)
+    rep 4/10 done (10.9s)
+    rep 5/10 done (10.9s)
+    rep 6/10 done (10.9s)
+    rep 7/10 done (11.0s)
+    rep 8/10 done (11.0s)
+    rep 9/10 done (10.9s)
+    rep 10/10 done (10.9s)
+    finalize: mean=1307.99ms p95=1323.02ms (n=10)
 
 [D2] Fan-out / Fan-in topology (cross-epoch)
   [D2] fan-out width=2
-    rep 1/1 done (2.1s)
-    fan-out finalize: mean=239.04ms p95=239.04ms
+    rep 1/10 done (2.0s)
+    rep 2/10 done (2.0s)
+    rep 3/10 done (2.1s)
+    rep 4/10 done (2.0s)
+    rep 5/10 done (2.0s)
+    rep 6/10 done (2.1s)
+    rep 7/10 done (2.0s)
+    rep 8/10 done (2.0s)
+    rep 9/10 done (2.1s)
+    rep 10/10 done (2.0s)
+    fan-out finalize: mean=238.66ms p95=239.96ms
   [D2] fan-in width=2
-    rep 1/1 done (2.0s)
-    fan-in finalize: mean=241.23ms p95=241.23ms
+    rep 1/10 done (2.1s)
+    rep 2/10 done (2.0s)
+    rep 3/10 done (2.1s)
+    rep 4/10 done (2.1s)
+    rep 5/10 done (2.0s)
+    rep 6/10 done (2.1s)
+    rep 7/10 done (2.1s)
+    rep 8/10 done (2.1s)
+    rep 9/10 done (2.0s)
+    rep 10/10 done (2.0s)
+    fan-in finalize: mean=243.12ms p95=243.84ms
   [D2] fan-out width=4
-    rep 1/1 done (3.4s)
-    fan-out finalize: mean=398.24ms p95=398.24ms
+    rep 1/10 done (3.4s)
+    rep 2/10 done (3.4s)
+    rep 3/10 done (3.4s)
+    rep 4/10 done (3.4s)
+    rep 5/10 done (3.4s)
+    rep 6/10 done (3.4s)
+    rep 7/10 done (3.4s)
+    rep 8/10 done (3.4s)
+    rep 9/10 done (3.4s)
+    rep 10/10 done (3.4s)
+    fan-out finalize: mean=401.04ms p95=412.44ms
   [D2] fan-in width=4
-    rep 1/1 done (3.4s)
-    fan-in finalize: mean=404.51ms p95=404.51ms
+    rep 1/10 done (3.4s)
+    rep 2/10 done (3.4s)
+    rep 3/10 done (3.4s)
+    rep 4/10 done (3.4s)
+    rep 5/10 done (3.4s)
+    rep 6/10 done (3.4s)
+    rep 7/10 done (3.4s)
+    rep 8/10 done (3.4s)
+    rep 9/10 done (3.4s)
+    rep 10/10 done (3.4s)
+    fan-in finalize: mean=403.99ms p95=409.15ms
+  [D2] fan-out width=8
+    rep 1/10 done (6.1s)
+    rep 2/10 done (6.1s)
+    rep 3/10 done (6.1s)
+    rep 4/10 done (6.1s)
+    rep 5/10 done (6.1s)
+    rep 6/10 done (6.1s)
+    rep 7/10 done (6.1s)
+    rep 8/10 done (6.1s)
+    rep 9/10 done (6.1s)
+    rep 10/10 done (6.1s)
+    fan-out finalize: mean=714.27ms p95=716.45ms
+  [D2] fan-in width=8
+    rep 1/10 done (6.1s)
+    rep 2/10 done (6.1s)
+    rep 3/10 done (6.1s)
+    rep 4/10 done (6.1s)
+    rep 5/10 done (6.1s)
+    rep 6/10 done (6.2s)
+    rep 7/10 done (6.1s)
+    rep 8/10 done (6.1s)
+    rep 9/10 done (6.1s)
+    rep 10/10 done (6.2s)
+    fan-in finalize: mean=733.49ms p95=741.54ms
+  [D2] fan-out width=16
+    rep 1/10 done (11.5s)
+    rep 2/10 done (11.5s)
+    rep 3/10 done (11.5s)
+    rep 4/10 done (11.6s)
+    rep 5/10 done (11.6s)
+    rep 6/10 done (11.6s)
+    rep 7/10 done (11.5s)
+    rep 8/10 done (11.6s)
+    rep 9/10 done (11.5s)
+    rep 10/10 done (11.6s)
+    fan-out finalize: mean=1351.13ms p95=1359.52ms
+  [D2] fan-in width=16
+    rep 1/10 done (11.6s)
+    rep 2/10 done (11.6s)
+    rep 3/10 done (11.6s)
+    rep 4/10 done (11.6s)
+    rep 5/10 done (11.6s)
+    rep 6/10 done (11.6s)
+    rep 7/10 done (11.6s)
+    rep 8/10 done (11.6s)
+    rep 9/10 done (11.6s)
+    rep 10/10 done (11.6s)
+    fan-in finalize: mean=1385.93ms p95=1403.97ms
 
 [D3] SCC (mutual dependencies, cascade rollback)
   [D3] SCC size=2 (cycle of 2 epochs)
-    rep 1/1 done (1.3s)
-    SCC cascade rollback: mean=51.94ms p95=51.94ms
+    rep 1/10 done (1.3s)
+    rep 2/10 done (1.3s)
+    rep 3/10 done (1.3s)
+    rep 4/10 done (1.3s)
+    rep 5/10 done (1.3s)
+    rep 6/10 done (1.3s)
+    rep 7/10 done (1.3s)
+    rep 8/10 done (1.3s)
+    rep 9/10 done (1.3s)
+    rep 10/10 done (1.3s)
+    SCC cascade rollback: mean=52.59ms p95=54.94ms
   [D3] SCC size=4 (cycle of 4 epochs)
-    rep 1/1 done (2.6s)
-    SCC cascade rollback: mean=54.50ms p95=54.50ms
+    rep 1/10 done (2.6s)
+    rep 2/10 done (2.6s)
+    rep 3/10 done (2.6s)
+    rep 4/10 done (2.6s)
+    rep 5/10 done (2.6s)
+    rep 6/10 done (2.6s)
+    rep 7/10 done (2.6s)
+    rep 8/10 done (2.6s)
+    rep 9/10 done (2.6s)
+    rep 10/10 done (2.6s)
+    SCC cascade rollback: mean=54.74ms p95=56.36ms
+  [D3] SCC size=8 (cycle of 8 epochs)
+    rep 1/10 done (5.2s)
+    rep 2/10 done (5.2s)
+    rep 3/10 done (5.2s)
+    rep 4/10 done (5.2s)
+    rep 5/10 done (5.2s)
+    rep 6/10 done (5.3s)
+    rep 7/10 done (5.2s)
+    rep 8/10 done (5.2s)
+    rep 9/10 done (5.2s)
+    rep 10/10 done (5.2s)
+    SCC cascade rollback: mean=59.49ms p95=61.33ms
 
 [D4] Concurrent agents (shared dependency)
   [D4] agents=1
-    rep 1/1 done (1.4s)
-    batch total: mean=163.56ms p95=163.56ms
+    rep 1/10 done (1.4s)
+    rep 2/10 done (1.4s)
+    rep 3/10 done (1.4s)
+    rep 4/10 done (1.4s)
+    rep 5/10 done (1.4s)
+    rep 6/10 done (1.4s)
+    rep 7/10 done (1.4s)
+    rep 8/10 done (1.4s)
+    rep 9/10 done (1.4s)
+    rep 10/10 done (1.4s)
+    batch total: mean=163.40ms p95=164.44ms
   [D4] agents=4
-    rep 1/1 done (1.6s)
-    batch total: mean=277.93ms p95=277.93ms
+    rep 1/10 done (1.6s)
+    rep 2/10 done (1.6s)
+    rep 3/10 done (1.6s)
+    rep 4/10 done (1.6s)
+    rep 5/10 done (1.6s)
+    rep 6/10 done (1.6s)
+    rep 7/10 done (1.6s)
+    rep 8/10 done (1.6s)
+    rep 9/10 done (1.6s)
+    rep 10/10 done (1.6s)
+    batch total: mean=280.17ms p95=286.39ms
+  [D4] agents=8
+    rep 1/10 done (2.0s)
+    rep 2/10 done (2.0s)
+    rep 3/10 done (2.0s)
+    rep 4/10 done (2.0s)
+    rep 5/10 done (1.9s)
+    rep 6/10 done (2.0s)
+    rep 7/10 done (2.0s)
+    rep 8/10 done (2.0s)
+    rep 9/10 done (1.9s)
+    rep 10/10 done (1.9s)
+    batch total: mean=476.47ms p95=494.83ms
+  [D4] agents=16
+    rep 1/10 done (2.6s)
+    rep 2/10 done (2.6s)
+    rep 3/10 done (2.6s)
+    rep 4/10 done (2.6s)
+    rep 5/10 done (2.6s)
+    rep 6/10 done (2.6s)
+    rep 7/10 done (2.6s)
+    rep 8/10 done (2.6s)
+    rep 9/10 done (2.6s)
+    rep 10/10 done (2.6s)
+    batch total: mean=831.26ms p95=841.87ms
 
-[D5] Authorization decisions (chain_size=4)
+[D5] Authorization decisions (chain_size=8)
   [D5] decision=allow
-    rep 1/1 done (2.7s)
-    allow finalize: mean=330.00ms p95=330.00ms
+    rep 1/10 done (5.5s)
+    rep 2/10 done (5.5s)
+    rep 3/10 done (5.4s)
+    rep 4/10 done (5.5s)
+    rep 5/10 done (5.5s)
+    rep 6/10 done (5.5s)
+    rep 7/10 done (5.5s)
+    rep 8/10 done (5.5s)
+    rep 9/10 done (5.5s)
+    rep 10/10 done (5.5s)
+    allow finalize: mean=651.98ms p95=660.85ms
   [D5] decision=root-deny
-    rep 1/1 done (2.6s)
-    root-deny finalize: mean=54.65ms p95=54.65ms
+    rep 1/10 done (5.2s)
+    rep 2/10 done (5.2s)
+    rep 3/10 done (5.3s)
+    rep 4/10 done (5.2s)
+    rep 5/10 done (5.2s)
+    rep 6/10 done (5.2s)
+    rep 7/10 done (5.2s)
+    rep 8/10 done (5.3s)
+    rep 9/10 done (5.2s)
+    rep 10/10 done (5.2s)
+    root-deny finalize: mean=60.11ms p95=61.81ms
   [D5] decision=middle-deny
-    rep 1/1 done (2.7s)
-    middle-deny finalize: mean=52.30ms p95=52.30ms
+    rep 1/10 done (5.3s)
+    rep 2/10 done (5.4s)
+    rep 3/10 done (5.4s)
+    rep 4/10 done (5.3s)
+    rep 5/10 done (5.4s)
+    rep 6/10 done (5.4s)
+    rep 7/10 done (5.4s)
+    rep 8/10 done (5.3s)
+    rep 9/10 done (5.3s)
+    rep 10/10 done (5.4s)
+    middle-deny finalize: mean=55.24ms p95=55.55ms
 
 [save] Results written to ./results/dep_graph_scalability.json
 
@@ -85,20 +307,28 @@ make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/exper
 ══════════════════════════════════════════════════════════════════════
 Dim  Topology     Size   Decision     Finalize mean(ms)  P95(ms)    Aff   Topo  Errors
 ────────────────────────────────────────────────────────────────────────────────────
-D1   chain        2      allow        162.896            162.896    2     OK    0
-D1   chain        4      allow        324.068            324.068    4     OK    0
-D1   chain        8      allow        649.819            649.819    8     OK    0
-D2   fan-out      2      allow        239.036            239.036    3     OK    0
-D2   fan-in       2      allow        241.234            241.234    2     OK    0
-D2   fan-out      4      allow        398.237            398.237    5     OK    0
-D2   fan-in       4      allow        404.507            404.507    2     OK    0
-D3   scc          2      rollback-cascade 51.937             51.937     2     OK    0
-D3   scc          4      rollback-cascade 54.498             54.498     4     OK    0
-D4   concurrent   1      allow        163.565            163.565    2     OK    0
-D4   concurrent   4      allow        277.931            277.931    5     OK    0
-D5   chain        4      allow        329.998            329.998    4     OK    0
-D5   chain        4      root-deny    54.651             54.651     4     OK    0
-D5   chain        4      middle-deny  52.302             52.302     2     OK    0
+D1   chain        2      allow        162.914            163.932    2     OK    0
+D1   chain        4      allow        326.619            331.750    4     OK    0
+D1   chain        8      allow        650.353            654.824    8     OK    0
+D1   chain        16     allow        1307.987           1323.020   16    OK    0
+D2   fan-out      2      allow        238.655            239.957    3     OK    0
+D2   fan-in       2      allow        243.120            243.843    2     OK    0
+D2   fan-out      4      allow        401.035            412.444    5     OK    0
+D2   fan-in       4      allow        403.995            409.151    2     OK    0
+D2   fan-out      8      allow        714.270            716.445    9     OK    0
+D2   fan-in       8      allow        733.493            741.540    2     OK    0
+D2   fan-out      16     allow        1351.132           1359.522   17    OK    0
+D2   fan-in       16     allow        1385.928           1403.971   2     OK    0
+D3   scc          2      rollback-cascade 52.594             54.939     2     OK    0
+D3   scc          4      rollback-cascade 54.736             56.365     4     OK    0
+D3   scc          8      rollback-cascade 59.487             61.333     8     OK    0
+D4   concurrent   1      allow        163.403            164.438    2     OK    0
+D4   concurrent   4      allow        280.166            286.386    5     OK    0
+D4   concurrent   8      allow        476.466            494.832    9     OK    0
+D4   concurrent   16     allow        831.261            841.867    17    OK    0
+D5   chain        8      allow        651.982            660.849    8     OK    0
+D5   chain        8      root-deny    60.113             61.812     8     OK    0
+D5   chain        8      middle-deny  55.240             55.546     4     OK    0
 
 [done] Dependency graph scalability experiment complete.
 
