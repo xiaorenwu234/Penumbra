@@ -156,6 +156,9 @@ class _NullJournal:
     def append(self, *args, **kwargs):
         pass
 
+    def flush(self):
+        pass
+
 
 def _session_orch(proxy, fs_handler):
     orch = ShadowOrchestrator.__new__(ShadowOrchestrator)
@@ -287,7 +290,8 @@ class RunProxy:
         self._value = value
         self._rc = rc
 
-    def run(self, sid, command):
+    def run(self, sid, command, timeout=10.0):
+        # session_run passes a timeout kwarg; the fake ignores it.
         return self._value, self._rc
 
 
@@ -304,6 +308,10 @@ class TestSessionRunOptimisticRelease(unittest.TestCase):
     def _orch(self, proxy):
         orch = ShadowOrchestrator.__new__(ShadowOrchestrator)
         orch._proxy = proxy
+        # session_run consults the session registry (WAL barrier epoch lookup).
+        orch._sessions = {"sid1": "/cg-sess"}
+        orch._sessions_lock = threading.Lock()
+        orch._session_epochs = {}
         return orch
 
     def test_in_epoch_output_is_released_immediately(self):
@@ -467,6 +475,61 @@ class TestPolicyFailClosed(unittest.TestCase):
             [{"event_type": "ANY", "action": "allow", "path_pattern": "/tmp/"}],
             1).to_bpf_whitelist()
         self.assertEqual(wl[0]["event_type"], 0xFFFF)
+
+
+class PreFrozenSkipTestCase(unittest.TestCase):
+    """_fs_group_finalize must skip re-freezing the cgroup that the caller's
+    quiesce_for_commit already froze (when that RPC succeeded), and must NOT
+    skip it when pre_frozen_cgroup is None (e.g. quiesce fell back to a bare
+    SIGSTOP, so the Rust-side whole-cgroup frozen set was never established).
+    """
+
+    POLICY = {"allowed_ops": [{"event_type": "ANY", "action": "allow",
+                               "path_pattern": "/"}]}
+
+    def _orch(self, frozen_cgs):
+        def proc(req):
+            if req["action"] == "freeze_by_cgroup":
+                frozen_cgs.append(req["cgroup_id"])
+                return {"status": "ok"}
+            return {"status": "ok"}
+
+        def fs(req):
+            a = req["action"]
+            if a == "authorize":
+                return {"status": "ok", "epoch_id": "e1"}
+            if a == "prepare_resolution":
+                return {"status": "ok", "group_id": 7, "members": ["e1"],
+                        "graph_generation": 3}
+            if a == "begin_finalize":
+                return {"status": "ok", "state": "finalized"}
+            return {"status": "ok"}
+
+        orch = _bare_orch(proc, fs)
+        orch._journal = _NullJournal()
+        orch._graph_sequence_lock = threading.Lock()
+        return orch
+
+    def test_pre_frozen_cgroup_is_skipped(self):
+        frozen = []
+        orch = self._orch(frozen)
+        res = orch._fs_group_finalize("e1", "/cg-sess",
+                                      proc_policy=self.POLICY,
+                                      pre_frozen_cgroup="/cg-sess")
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["state"], "finalized")
+        # /cg-sess is the ONLY member and was pre-frozen by quiesce: the
+        # member freeze loop must not re-freeze it.
+        self.assertEqual(frozen, [])
+
+    def test_no_prefreeze_freezes_all_members(self):
+        frozen = []
+        orch = self._orch(frozen)
+        res = orch._fs_group_finalize("e1", "/cg-sess",
+                                      proc_policy=self.POLICY,
+                                      pre_frozen_cgroup=None)
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(frozen, ["/cg-sess"])
 
 
 if __name__ == "__main__":

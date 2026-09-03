@@ -1,11 +1,16 @@
-/* W10: Tool output generation benchmark.
+/* W9: Tool output generation benchmark.
  * Writes a fixed amount of data to stdout.
  * Usage: w10_output <total_bytes> [chunk_size]
  *   total_bytes: total bytes to write to stdout
  *   chunk_size: size of each write() call (default: total_bytes)
  *
- * W10-a: single large output (chunk_size = total_bytes)
- * W10-b: multiple small outputs (chunk_size < total_bytes)
+ * W9-a: single large output (chunk_size = total_bytes)
+ * W9-b: multiple small outputs (chunk_size < total_bytes)
+ *
+ * (The binary keeps its historical "w10_output" name — the workload was
+ * renumbered W10 → W9 when the session-resident-memory workload took the
+ * W10 slot; renaming the file would break benchmark-path continuity with
+ * previously collected results.)
  *
  * Measures optimistic result transcript tagging, delivery, and
  * canonicalization/removal cost.

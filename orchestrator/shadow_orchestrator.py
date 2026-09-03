@@ -180,21 +180,51 @@ class _OrchestratorJournal:
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.Lock()
+        self._fd = None  # persistent O_APPEND fd (opened lazily, kept open)
 
-    def append(self, op: str, **fields) -> None:
+    def _ensure_fd(self) -> int:
+        if self._fd is None:
+            self._fd = os.open(self.path,
+                               os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        return self._fd
+
+    def append(self, op: str, durable: bool = True, **fields) -> None:
+        """Append one record. With durable=True (default) the record is
+        fdatasync'd before returning -- the strict write-ahead guarantee the
+        session-lifecycle and decision records rely on. With durable=False
+        the record is written (visible to any reader immediately, and ordered
+        against all other records by the append lock) but NOT synced; the
+        caller must call flush() before the next externally-visible step
+        that depends on it.
+
+        Non-durable appends are for records whose loss on a crash is
+        recoverable by idempotent replay on the recovery path (post-action
+        bookkeeping like release_member_done / commit_done / rollback).
+        The commit hot path used to fsync 9 records per epoch (~10ms of
+        pure disk latency); with grouped flushes it is 3 while preserving
+        write-ahead ordering for every externally-visible action.
+
+        fdatasync (not fsync): the journal is append-only and its mtime is
+        never consulted by recovery, so skipping the mtime write saves a
+        journal-level block update per record.
+        """
         rec = {"op": op, "ts": time.time()}
         rec.update(fields)
         line = json.dumps(rec) + "\n"
         with self._lock:
-            # Open/append/fsync per record: the journal is low-frequency
-            # (session lifecycle + commit decisions), so per-record fsync is
-            # affordable and gives strict write-ahead durability.
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            try:
-                os.write(fd, line.encode())
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            fd = self._ensure_fd()
+            os.write(fd, line.encode())
+            if durable:
+                os.fdatasync(fd)
+
+    def flush(self) -> None:
+        """fdatasync the journal so every non-durable record appended so far
+        becomes crash-durable. Records keep their append order, so a flush
+        also makes all EARLIER non-durable records durable -- call it right
+        before the externally-visible step the pending records guard."""
+        with self._lock:
+            if self._fd is not None:
+                os.fdatasync(self._fd)
 
     def load(self) -> list:
         """Parse the journal. FAIL CLOSED on corruption: only the LAST record
@@ -847,10 +877,16 @@ class ShadowOrchestrator:
             log.warning("  cancel_group(%s) failed: %s", group_id, e)
 
     def _fs_group_finalize(self, epoch_id: str, cgroup_id: str,
-                           proc_policy: Optional[Dict] = None) -> dict:
+                           proc_policy: Optional[Dict] = None,
+                           pre_frozen_cgroup: Optional[str] = None) -> dict:
         """Group-level ShadowFS finalization: prepare_resolution → begin_finalize →
         poll get_finalize_status. Replaces the single-epoch "commit" +
         "can_release" pair with the group-aware flow (Phase 3).
+
+        pre_frozen_cgroup: a member cgroup already frozen (Rust-side, whole
+        cgroup) by the caller's quiesce_for_commit — skipped in the member
+        freeze loop below. Only pass this when that freeze RPC succeeded;
+        otherwise None so every member gets frozen here.
 
         Returns dict with:
           - status: "ok" or "error"
@@ -903,7 +939,12 @@ class ShadowOrchestrator:
             if auth.get("policy_hash") and auth.get("policy_hash") != policy_hash:
                 return {"status": "error", "message": "ShadowFS policy_hash mismatch"}
             if hasattr(self, "_journal"):
-                self._journal.append("authorized", epoch=authorized_epoch,
+                # Post-action bookkeeping (the authorize RPC already happened):
+                # written now, made durable by the flush before this function
+                # returns. On crash-before-flush the record is lost and recovery
+                # re-authorizes idempotently (authorized_pending → retry).
+                self._journal.append("authorized", durable=False,
+                                     epoch=authorized_epoch,
                                      cgroup=cgroup_id, policy_hash=policy_hash)
 
             # Step 1b: prepare_resolution — NOW returns the post-authorize
@@ -949,6 +990,13 @@ class ShadowOrchestrator:
             proc_client = getattr(self, "proc_client", None)
             if proc_client is not None:
                 for mcg in member_cgroups:
+                    if mcg == pre_frozen_cgroup:
+                        # Already frozen whole-cgroup by quiesce_for_commit
+                        # (the RPC succeeded — only then is this parameter
+                        # passed). Re-freezing would redo the Rust-side
+                        # double-scan settle confirmation (~2ms) for a
+                        # cgroup whose processes are all already stopped.
+                        continue
                     try:
                         freeze_resp = proc_client.request({
                             "action": "freeze_by_cgroup",
@@ -962,6 +1010,13 @@ class ShadowOrchestrator:
                         return {"status": "error",
                                 "message": f"freeze {mcg}: {freeze_resp}"}
 
+            # The authorized record (durable=False) needs no dedicated flush:
+            # if lost to a crash the epoch replays as UNDECIDED (commit_intent
+            # IS durable) and the retry re-authorizes idempotently — a
+            # re-authorize of an epoch whose group was already finalized makes
+            # begin_finalize return "already finalized", which is treated as
+            # success. The record rides the release_intent fsync down.
+
             # Step 2: begin_finalize — graph_gen is guaranteed fresh because
             # NO ShadowFS call occurred between prepare_resolution and here.
             log.info("  begin_finalize: group_id=%d graph_gen=%d "
@@ -969,6 +1024,7 @@ class ShadowOrchestrator:
                      group_id, graph_gen,
                      self._graph_sequence_lock.locked(),
                      threading.current_thread().name)
+            _t0 = time.perf_counter()
             try:
                 fin = self.fs_client.request({
                     "action": "begin_finalize",
@@ -977,6 +1033,10 @@ class ShadowOrchestrator:
                 })
             except Exception as e:  # noqa: BLE001
                 fin = {"status": "error", "message": str(e)}
+            if os.environ.get("SHADOW_TRACE_TIMING") == "1":
+                print(f"[timing] fs.begin_finalize_rpc "
+                      f"{(time.perf_counter() - _t0) * 1000:.3f}ms",
+                      file=sys.stderr, flush=True)
 
             # ShadowFS's internal async state machine (epoch transitions,
             # FUSE attribution) can advance graph_generation outside the
@@ -1022,18 +1082,21 @@ class ShadowOrchestrator:
                 return fin
 
         # Step 3: poll get_finalize_status until finalized or failed.
+        # NOTE: BeginFinalize does the whole promote chain synchronously, so
+        # this loop normally never runs; 2ms keeps the rare pending case from
+        # paying the old 20ms quantization per poll.
         state = fin.get("state", "pending")
         poll_count = 0
         while state == "pending":
             poll_count += 1
-            if poll_count > 1500:  # 30s timeout (at 20ms interval)
+            if poll_count > 15000:  # 30s timeout (at 2ms interval)
                 log.warning("  finalize poll timeout (30s) for group %d", group_id)
                 return {"status": "ok", "group_id": group_id, "members": members,
                         "graph_generation": graph_gen, "state": "pending",
                         "finalize_err": "poll timeout",
                         "member_cgroups": member_cgroups,
                         "member_policies": policies}
-            time.sleep(0.02)
+            time.sleep(0.002)
             try:
                 status = self.fs_client.request({
                     "action": "get_finalize_status",
@@ -1139,8 +1202,14 @@ class ShadowOrchestrator:
         }
         self._prune_epoch_results()
         if hasattr(self, "_journal"):
-            self._journal.append("epoch_result", epoch=epoch_id, cgroup=cgroup_id,
-                                 stdout=stdout, released=True, group_id=group_id)
+            # Post-action bookkeeping (the release already happened; this only
+            # caches the output for recovery). Non-durable: the commit path
+            # flushes before returning, and the retry loop's group_phase
+            # record (durable) carries it down anyway. On loss, recovery
+            # replays the release idempotently.
+            self._journal.append("epoch_result", durable=False, epoch=epoch_id,
+                                 cgroup=cgroup_id, stdout=stdout, released=True,
+                                 group_id=group_id)
 
     def _persist_group_phase(self, group: Dict[str, Any]) -> None:
         if not hasattr(self, "_journal"):
@@ -2463,8 +2532,9 @@ class ShadowOrchestrator:
         # FS-FIRST finalization. Phase 1 is REVERSIBLE: quiesce the candidate to
         # a stopped boundary WITHOUT discarding the baseline, so if the file
         # layer cannot finalize we can still roll the epoch back losslessly.
+        quiesce_frozen = False
         try:
-            proxy.quiesce_for_commit(session_id)
+            quiesce_frozen = proxy.quiesce_for_commit(session_id)
         except Exception as e:  # noqa: BLE001
             log.error("  quiesce_for_commit (process layer) failed: %s", e)
             return {"status": "error", "message": str(e)}
@@ -2480,7 +2550,8 @@ class ShadowOrchestrator:
             # SECURITY: proc_policy is the typed policy compiled from the
             # caller's allowed_ops. No allow-all fallback.
             fs_result = self._fs_group_finalize(epoch_id, cgroup_id,
-                                                proc_policy=proc_policy)
+                                                proc_policy=proc_policy,
+                                                pre_frozen_cgroup=(cgroup_id if quiesce_frozen else None))
             if fs_result.get("status") != "ok":
                 log.error("  ShadowFS group finalize failed: %s -- baseline "
                           "preserved", fs_result.get("message"))
@@ -2516,7 +2587,11 @@ class ShadowOrchestrator:
             # which the incremental record provides.
             committed_output = proxy.snapshot_epoch_output(session_id)
             member_policies = self._member_policies(fs_result["members"])
-            self._journal.append("fs_committed", sid=session_id, cgroup=cgroup_id,
+            # Non-durable: the release_intent append below is durable and no
+            # externally-visible step runs between the two (only local dict
+            # lookups), so that fsync carries this record down with it.
+            self._journal.append("fs_committed", durable=False,
+                                 sid=session_id, cgroup=cgroup_id,
                                  output=committed_output,
                                  group_id=fs_result["group_id"],
                                  members=fs_result["members"],
@@ -2569,7 +2644,9 @@ class ShadowOrchestrator:
                 if ok:
                     released_cgroups.add(mcg)
                     self._record_epoch_result(member_epoch, mcg, stdout, fs_result["group_id"])
-                    self._journal.append("release_member_done", cgroup=mcg,
+                    # Post-action record: the sibling is already released.
+                    self._journal.append("release_member_done", durable=False,
+                                         cgroup=mcg,
                                          group_id=fs_result["group_id"],
                                          epoch=member_epoch, stdout=stdout)
                 else:
@@ -2656,7 +2733,9 @@ class ShadowOrchestrator:
             self._record_epoch_result(primary_member or (epoch_id or ""),
                                       cgroup_id, committed_output,
                                       fs_result["group_id"])
-            self._journal.append("release_member_done", cgroup=cgroup_id,
+            # Post-action record: the primary is already released.
+            self._journal.append("release_member_done", durable=False,
+                                 cgroup=cgroup_id,
                                  group_id=fs_result["group_id"],
                                  epoch=primary_member or (epoch_id or ""),
                                  stdout=committed_output)
@@ -2681,17 +2760,36 @@ class ShadowOrchestrator:
                             "group ack retry", fs_result["group_id"])
                 return {"status": "ok", "output": committed_output,
                         "released": True, "ack_pending": True}
-        self._journal.append("commit_done", sid=session_id, cgroup=cgroup_id)
-        self._journal.append("group_release_done", group_id=fs_result["group_id"],
+        self._journal.append("commit_done", durable=False, sid=session_id, cgroup=cgroup_id)
+        self._journal.append("group_release_done", durable=False,
+                             group_id=fs_result["group_id"],
                              cgroup=cgroup_id, epoch=epoch_id or "")
-        self._journal.append("group_phase", group_id=fs_result["group_id"],
+        self._journal.append("group_phase", durable=False,
+                             group_id=fs_result["group_id"],
                              phase=GROUP_DONE, cgroup=cgroup_id,
                              epoch=epoch_id or "")
+        # All post-action records (fs_committed, release_member_done,
+        # epoch_result, and the three terminal records above) become
+        # crash-durable here — before the "commit succeeded" response escapes
+        # to the caller, making the response itself the durability boundary.
+        # Losing them on crash is recoverable anyway (idempotent release
+        # replay from release_intent), but this keeps the invariant simple.
+        # Together with commit_intent and release_intent this is 3 fsyncs per
+        # commit (was 9).
+        self._journal.flush()
         self._drop_authorized_members(fs_result["members"])
         with self._sessions_lock:
             self._session_epochs.pop(session_id, None)
         self._recovered_outputs.pop(session_id, None)
-        return {"status": "ok", "output": proxy.get_output(session_id),
+        # Return THIS epoch's incremental output (already snapshotted above),
+        # not the full session transcript: get_output() joins every entry ever
+        # recorded, so the response cost grew linearly with iteration count —
+        # across a 1000-iteration workload that is an O(n²) total tax paid on
+        # every commit (JSON-serializing ~100KB by the tail). Callers that need
+        # the whole transcript use session_get_output; per-command output was
+        # already returned optimistically by session_run. The ack_pending
+        # branch above returns the same incremental output.
+        return {"status": "ok", "output": committed_output,
                 "released": True}
 
     def session_rollback_epoch(self, session_id: str,
@@ -2734,6 +2832,7 @@ class ShadowOrchestrator:
         # Step 1: roll back the file layer FIRST and gate on its success.
         # Hold _graph_sequence_lock: rollback_epoch REMOVES a node from the
         # dependency graph and advances graph_generation.
+        _t0 = time.perf_counter()
         try:
             rb_req = {"action": "rollback_epoch", "cgroup_id": cgroup_id}
             if epoch_id:
@@ -2744,6 +2843,10 @@ class ShadowOrchestrator:
             log.error("  ShadowFS rollback_epoch unreachable: %s -- "
                       "NOT rolling back the process layer", e)
             return {"status": "error", "message": str(e)}
+        if os.environ.get("SHADOW_TRACE_TIMING") == "1":
+            print(f"[timing] rb.rollback_epoch_rpc "
+                  f"{(time.perf_counter() - _t0) * 1000:.3f}ms",
+                  file=sys.stderr, flush=True)
         if fs_resp.get("status") != "ok":
             # Refused/failed: the file state cannot be undone, so leave the
             # process/network layer as-is (still fenced) and surface the error.
@@ -2753,11 +2856,16 @@ class ShadowOrchestrator:
 
         # Step 2: file layer undone -> now roll back the process layer.
         proxy = self._get_proxy()
+        _t1 = time.perf_counter()
         try:
             proxy.reject(session_id)
         except Exception as e:  # noqa: BLE001
             log.error("  rollback_epoch (process layer) failed after FS undo: %s", e)
             return {"status": "error", "message": str(e)}
+        if os.environ.get("SHADOW_TRACE_TIMING") == "1":
+            print(f"[timing] rb.proxy_reject "
+                  f"{(time.perf_counter() - _t1) * 1000:.3f}ms",
+                  file=sys.stderr, flush=True)
         self._journal.append("rollback", sid=session_id, cgroup=cgroup_id,
                              epoch=epoch_id or "")
         affected_epochs = fs_resp.get("affected_epochs", []) or ([epoch_id] if epoch_id else [])

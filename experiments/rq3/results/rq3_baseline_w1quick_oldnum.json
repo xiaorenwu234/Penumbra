@@ -1,0 +1,164 @@
+{
+  "experiment": "rq3_baseline",
+  "engine": "overlayfs+criu",
+  "timestamp": 1788343828.7482204,
+  "workloads": [
+    {
+      "workload_id": "W1",
+      "config": "noop",
+      "params": {
+        "description": "C_fixed = T_begin + T_finalize",
+        "engine": "overlayfs+criu",
+        "engine_root": "/tmp/shadow-rq3-baseline"
+      },
+      "warmup_count": 10,
+      "repeats": 50,
+      "wall_time_s": 6.66,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 50,
+          "excluded": 0,
+          "median_ns": 1110884.0,
+          "p95_ns": 1363982.8,
+          "p99_ns": 1424002.2,
+          "mean_ns": 1149838.3,
+          "min_ns": 1058364.0,
+          "max_ns": 1443954.0,
+          "ci_95_low_ns": 1093614.8,
+          "ci_95_high_ns": 1164102.5,
+          "median_ms": 1.1109,
+          "p95_ms": 1.364,
+          "p99_ms": 1.424,
+          "ci_95_ms": [
+            1.0936,
+            1.1641
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 50,
+          "excluded": 0,
+          "median_ns": 16461806.5,
+          "p95_ns": 19482124.5,
+          "p99_ns": 19875879.2,
+          "mean_ns": 16635073.0,
+          "min_ns": 15003152.0,
+          "max_ns": 19911196.0,
+          "ci_95_low_ns": 16130588.0,
+          "ci_95_high_ns": 16760411.0,
+          "median_ms": 16.4618,
+          "p95_ms": 19.4821,
+          "p99_ms": 19.8759,
+          "ci_95_ms": [
+            16.1306,
+            16.7604
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 50,
+          "excluded": 0,
+          "median_ns": 2667350.5,
+          "p95_ns": 3324153.0,
+          "p99_ns": 3493451.0,
+          "mean_ns": 2709069.5,
+          "min_ns": 1892121.0,
+          "max_ns": 3629894.0,
+          "ci_95_low_ns": 2560914.0,
+          "ci_95_high_ns": 2763102.5,
+          "median_ms": 2.6674,
+          "p95_ms": 3.3242,
+          "p99_ms": 3.4935,
+          "ci_95_ms": [
+            2.5609,
+            2.7631
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 50,
+          "excluded": 0,
+          "median_ns": 5199910.0,
+          "p95_ns": 5946802.6,
+          "p99_ns": 6778455.4,
+          "mean_ns": 5270816.2,
+          "min_ns": 4694963.0,
+          "max_ns": 7045797.0,
+          "ci_95_low_ns": 5059042.0,
+          "ci_95_high_ns": 5302750.0,
+          "median_ms": 5.1999,
+          "p95_ms": 5.9468,
+          "p99_ms": 6.7785,
+          "ci_95_ms": [
+            5.059,
+            5.3027
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 50,
+          "excluded": 0,
+          "median_ns": 63175671.5,
+          "p95_ns": 78455415.0,
+          "p99_ns": 88446160.3,
+          "mean_ns": 64868125.1,
+          "min_ns": 61518730.0,
+          "max_ns": 95266949.0,
+          "ci_95_low_ns": 62813858.0,
+          "ci_95_high_ns": 63608776.5,
+          "median_ms": 63.1757,
+          "p95_ms": 78.4554,
+          "p99_ms": 88.4462,
+          "ci_95_ms": [
+            62.8139,
+            63.6088
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 50,
+          "excluded": 0,
+          "median_ns": 24747692.5,
+          "p95_ns": 27602256.8,
+          "p99_ns": 28307596.1,
+          "mean_ns": 24614958.7,
+          "min_ns": 21982809.0,
+          "max_ns": 28456119.0,
+          "ci_95_low_ns": 24237090.7,
+          "ci_95_high_ns": 25078423.0,
+          "median_ms": 24.7477,
+          "p95_ms": 27.6023,
+          "p99_ms": 28.3076,
+          "ci_95_ms": [
+            24.2371,
+            25.0784
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 50,
+          "excluded": 0,
+          "median_ns": 82210190.0,
+          "p95_ns": 96311485.6,
+          "p99_ns": 107310212.8,
+          "mean_ns": 83629686.4,
+          "min_ns": 80204094.0,
+          "max_ns": 114464936.0,
+          "ci_95_low_ns": 81802222.4,
+          "ci_95_high_ns": 82427425.5,
+          "median_ms": 82.2102,
+          "p95_ms": 96.3115,
+          "p99_ms": 107.3102,
+          "ci_95_ms": [
+            81.8022,
+            82.4274
+          ]
+        }
+      }
+    }
+  ]
+}

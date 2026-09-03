@@ -63,6 +63,9 @@ def _bare_orch(proc_handler, fs_handler):
     orch._pending_ack = set()
     orch._pending_ack_lock = threading.Lock()
     orch._release_lock = threading.RLock()
+    # Production creates this in __init__; _fs_begin_finalize_group acquires
+    # it during pending-group retry, so the bare instance needs it too.
+    orch._graph_sequence_lock = threading.Lock()
     return orch
 
 
@@ -70,6 +73,9 @@ class _NullJournal:
     """No-op durable journal stub."""
 
     def append(self, *args, **kwargs):
+        pass
+
+    def flush(self):
         pass
 
 

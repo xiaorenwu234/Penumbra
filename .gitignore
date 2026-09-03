@@ -33,6 +33,10 @@ ShadowFS/tests/__pycache__/
 ShadowObserve/build/
 ShadowObserve/third_party/
 
+# ===== Experiments (RQ3 baseline) =====
+experiments/rq3/third_party/criu-4.2.1/
+experiments/rq3/third_party/*.tar.gz
+
 # ===== Build cache =====
 tmp/
 .gotmp/

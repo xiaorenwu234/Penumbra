@@ -21,6 +21,42 @@ echo "════════════════════════�
 echo "  RQ3 Performance Experiment Launcher"
 echo "══════════════════════════════════════════════════════════"
 
+# 解析参数
+WORKLOAD="${1:-all}"
+EXTRA_ARGS="${@:2}"
+
+# ─── baseline 分支：overlayfs + CRIU 对照实验 ─────────────────────────────────
+# 不需要 ShadowFS/ShadowProc/Orchestrator，完全独立运行；负载与 Penumbra 实验
+# 完全相同（共享 workloads.py），结果写入 results/rq3_baseline.json。
+if [ "$WORKLOAD" = "baseline" ]; then
+    echo "运行 overlayfs + CRIU 基线实验（无需守护进程）..."
+    echo ""
+
+    # 检查 CRIU：Ubuntu 24.04 (noble) 软件源中没有 criu 包，需要源码构建。
+    # 优先 PATH / third_party 构建产物；都没有则自动触发构建（需 root）。
+    # 注意源码构建布局：二进制在 criu-<ver>/criu/criu（嵌套子目录）。
+    if ! command -v criu >/dev/null 2>&1 \
+            && [ ! -x "$EXP_RQ3/third_party/criu-4.2.1/criu/criu" ]; then
+        echo "[baseline] 未找到 CRIU，从源码构建（一次性，需要几分钟）..."
+        bash "$EXP_RQ3/third_party/build_criu.sh" || {
+            echo "ERROR: CRIU 构建失败，请检查上方日志"
+            exit 1
+        }
+    fi
+
+    cd "$EXP_RQ3"
+    export SHADOW_RUN_RQ3_EXPERIMENTS=1
+    python3 run_baseline.py $EXTRA_ARGS
+    EXIT_CODE=$?
+
+    echo ""
+    echo "══════════════════════════════════════════════════════════"
+    echo "  RQ3 baseline 实验完成 (exit=$EXIT_CODE)"
+    echo "  结果: $EXP_RQ3/results/rq3_baseline.json"
+    echo "══════════════════════════════════════════════════════════"
+    exit $EXIT_CODE
+fi
+
 # ─── [1/7] 清理 ───────────────────────────────────────────────────────────────
 echo "[1/7] 清理旧进程和挂载..."
 pkill -9 -f shadow-proc 2>/dev/null || true
@@ -149,10 +185,6 @@ export SHADOW_ORCH_SOCK="$ORCH_SOCK"
 export SHADOWFS_MNT="$MNT_DIR"
 export SHADOWFS_ORIG="$ORIG_DIR"
 export SHADOWFS_STAGING="$STAGING_DIR"
-
-# 解析参数
-WORKLOAD="${1:-all}"
-EXTRA_ARGS="${@:2}"
 
 # 支持 "dep" 或 "dep-graph" 参数运行依赖图扩展性实验
 if [ "$WORKLOAD" = "dep" ] || [ "$WORKLOAD" = "dep-graph" ]; then

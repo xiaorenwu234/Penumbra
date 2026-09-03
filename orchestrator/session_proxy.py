@@ -56,6 +56,18 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
+# ──── Perf tracing ────
+# Env-gated step timing for the epoch hot path. Set SHADOW_TRACE_TIMING=1
+# on the daemon to print per-step latencies (ms) to stderr. Zero cost when off.
+_TRACE_TIMING = os.environ.get("SHADOW_TRACE_TIMING") == "1"
+
+
+def _tstep(name: str, t0: float) -> None:
+    if _TRACE_TIMING:
+        print(f"[timing] {name} {(time.perf_counter() - t0) * 1000:.3f}ms",
+              file=sys.stderr, flush=True)
+
+
 # ──────────────────────────── Mount namespace helpers ───────────────────────
 
 # mount(2) flag constants (see <sys/mount.h>).
@@ -769,11 +781,15 @@ class SessionProxy:
         return None
 
     def _wait_state_T(self, pid, timeout=3.0):
+        # 2ms poll: /proc reads are cheap and the freeze path (Rust side)
+        # already double-confirms the stop, so this only needs to catch the
+        # SIGCONT→SIGSTOP transition window. Was 50ms — a single missed poll
+        # dominated epoch latency with a fixed 50ms floor.
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self._proc_state(pid) == "T":
                 return True
-            time.sleep(0.05)
+            time.sleep(0.002)
         return False
 
     @staticmethod
@@ -790,7 +806,7 @@ class SessionProxy:
         except OSError:
             return ""
 
-    def _wait_wchan_read(self, pid, timeout=1.0, poll_interval=0.005):
+    def _wait_wchan_read(self, pid, timeout=1.0, poll_interval=0.001):
         """Wait until *pid* is blocked in a pipe/read wait-channel.
 
         Replaces the legacy time.sleep(0.3) that blindly waited for the
@@ -823,8 +839,8 @@ class SessionProxy:
                 if wc2 and wc2 != "0":
                     return True
             time.sleep(poll_interval)
-        # Timeout: fall back to a short conservative sleep (20ms, not 300ms).
-        time.sleep(0.02)
+        # Timeout: fall back to a short conservative sleep (5ms, not 300ms).
+        time.sleep(0.005)
         return False
 
     @staticmethod
@@ -839,6 +855,18 @@ class SessionProxy:
         asynchronous).
         """
         deadline = time.time() + timeout
+        # Busy-spin window first: a SIGKILLed process usually turns zombie
+        # within one scheduler tick, and waitpid(WNOHANG) is a ~3µs syscall,
+        # so ~60 spins (~0.2ms) catch the common case. The old first-poll-
+        # then-sleep(1ms) turned nearly every reap into a full extra
+        # millisecond (commit.reap_baseline measured 1.11ms median).
+        for _ in range(60):
+            try:
+                wpid, _ = os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                return  # already reaped, or not our child
+            if wpid == pid:
+                return  # reaped
         while time.time() < deadline:
             try:
                 wpid, _ = os.waitpid(pid, os.WNOHANG)
@@ -846,7 +874,10 @@ class SessionProxy:
                 return  # already reaped, or not our child
             if wpid == pid:
                 return  # reaped
-            time.sleep(0.02)
+            # 1ms poll: waitpid(WNOHANG) is a cheap syscall; the 20ms
+            # granularity it replaced added a fixed 20ms whenever the killed
+            # process had not become a zombie by the first check.
+            time.sleep(0.001)
 
     def _feed(self, sess, line):
         os.write(sess.fifo_wfd, (line + "\n").encode())
@@ -951,7 +982,7 @@ class SessionProxy:
 
         The candidate is a long-lived shell that stays live for the whole
         epoch; the affinity set here is inherited by every command it
-        spawns.  Multi-run epochs (e.g. W10-b's N tool invocations) thus
+        spawns.  Multi-run epochs (e.g. W9-b's N tool invocations) thus
         get the same pinning as the raw baseline WITHOUT re-invoking
         `taskset` once per run — a per-run wrapper would pay N× the
         ~1.3 ms taskset startup and skew per-entry timing.
@@ -1456,7 +1487,49 @@ class SessionProxy:
             raise RuntimeError("epoch tmp-state restore failed" if restore
                                else "epoch tmp-state snapshot failed")
 
-    def _snapshot_epoch_tmp_state(self, sess) -> str:
+    def _tmp_namespace_empty(self, pid: int) -> bool:
+        """Fast precheck: does the session's mount namespace hold ANY
+        non-mount entry under the tmp-state paths (/tmp, /dev/shm, /var/tmp,
+        /run)?
+
+        Reads through /proc/<pid>/root/<path> from the HOST namespace — legal
+        because the target is frozen (stable view) and we hold ptrace-level
+        access (same uid). Uses the SAME skip semantics as
+        _namespace_copy_worker (_skip_entry: different st_dev or unreadable
+        ⇒ mount/protected ⇒ skipped), so a True here is exactly the state
+        whose full snapshot would have copied nothing — skipping it loses
+        nothing. Any doubt (unreadable dir stat) conservatively returns False
+        so the slow path runs.
+        """
+        for rel in ("/tmp", "/dev/shm", "/var/tmp", "/run"):
+            d = f"/proc/{pid}/root{rel}"
+            try:
+                names = os.listdir(d)
+            except OSError:
+                continue  # absent path: the worker's walk copies nothing too
+            try:
+                ddev = os.lstat(d).st_dev
+            except OSError:
+                return False  # cannot classify: take the slow path
+            for name in names:
+                try:
+                    if os.lstat(os.path.join(d, name)).st_dev != ddev:
+                        continue  # mount point: skipped by the worker too
+                except OSError:
+                    continue  # unreadable: skipped by the worker too
+                return False
+        return True
+
+    def _snapshot_epoch_tmp_state(self, sess):
+        # Fast path: an empty tmp namespace (the common case — workloads that
+        # never touch /tmp//dev/shm) needs no snapshot at all. The full path
+        # costs fork + setns + walk + waitpid (~2ms measured) even when it
+        # ends up copying nothing. Returning None is safe: every consumer
+        # treats a falsy snapshot as "nothing to restore", and reject()
+        # re-checks emptiness at rollback time to preserve the CLEANUP half
+        # of the restore semantics (candidate-written tmp entries).
+        if self._tmp_namespace_empty(sess.live_pid):
+            return None
         snap = tempfile.mkdtemp(prefix=f"shadow-tmp-{sess.id}-")
         try:
             self._run_namespace_copy(sess.live_pid, snap, restore=False)
@@ -1835,17 +1908,24 @@ class SessionProxy:
         try:
             if not self._wait_state_T(sess.live_pid):
                 raise RuntimeError("live shell never reached stopped state")
-            # State T confirmed — a brief settle delay suffices (was 150ms).
-            time.sleep(0.02)
+            # No settle delay: the Rust freeze_by_cgroup RPC already ran the
+            # per-pid wait_thread_group_stopped fixpoint loop before returning
+            # (an RPC failure propagates as an exception here), and
+            # _wait_state_T re-confirmed T. The old 150ms→20ms→2ms settle was
+            # pure double-insurance on top of a double-confirmation.
+            _t1 = time.perf_counter()
             self._reject_tmp_regular_fds(sess.live_pid)
             fd_snapshots = self._snapshot_fds(sess.live_pid)
             tmp_snapshot = self._snapshot_epoch_tmp_state(sess)
+            _tstep("begin.snapshots", _t1)
 
             last_err = None
             for attempt in range(1, retries + 1):
                 try:
                     # Frozen original is the baseline; fork the speculative candidate.
+                    _t2 = time.perf_counter()
                     resp = self.client.call("begin_speculative", pid=sess.live_pid)
+                    _tstep("begin.begin_speculative_rpc", _t2)
                     pids = resp.get("pids") or []
                     if not pids:
                         raise RuntimeError("begin_speculative returned no candidate pid")
@@ -1860,7 +1940,9 @@ class SessionProxy:
                     self.client.call("resume_candidate", pid=candidate)
                     # Wait for the candidate to land back in its read() boundary
                     # (was a blind time.sleep(0.3); now event-driven via wchan).
+                    _t3 = time.perf_counter()
                     self._wait_wchan_read(candidate, timeout=1.0)
+                    _tstep("begin.wait_wchan", _t3)
                     sess.epoch = {"baseline": baseline, "candidate": candidate,
                                   "fd_snapshots": fd_snapshots,
                                   "tmp_snapshot": tmp_snapshot}
@@ -1885,7 +1967,8 @@ class SessionProxy:
                     last_err = e
                     self._log(f"session {sid}: begin_epoch attempt {attempt} failed: {e}")
                     time.sleep(0.1)
-            shutil.rmtree(tmp_snapshot, ignore_errors=True)
+            if tmp_snapshot:
+                shutil.rmtree(tmp_snapshot, ignore_errors=True)
             raise RuntimeError(f"begin_epoch failed after {retries} attempts: {last_err}")
         except BaseException:
             self._thaw_after_failed_begin(sess)
@@ -1924,6 +2007,10 @@ class SessionProxy:
         read()-boundary. Discards nothing — if the caller (orchestrator) then
         finds ShadowFS cannot finalize, the epoch can still be rejected and the
         pristine baseline resumed. No baseline is destroyed here.
+
+        Returns True if the cgroup freeze RPC succeeded (the whole cgroup is
+        Rust-side frozen); the orchestrator may then skip re-freezing this
+        cgroup in _fs_group_finalize's member loop.
         """
         sess = self.sessions[sid]
         if sess.epoch is None:
@@ -1932,7 +2019,7 @@ class SessionProxy:
         # commit flow acts on a frozen candidate, then continues it).
         # release_fence_vfork=True: commit 路径解冻是必然结局，允许为解开
         # vfork-D 死锁提前恢复围栏冻结的子进程（reject 路径则绝不）。
-        self._quiesce_epoch(sess, release_fence_vfork=True)
+        return self._quiesce_epoch(sess, release_fence_vfork=True)
 
     def finalize_commit(self, sid):
         """DESTRUCTIVE commit phase 2: discard the frozen baseline, keep the
@@ -1953,10 +2040,16 @@ class SessionProxy:
             self._reap(candidate)
             raise RuntimeError(
                 f"candidate {candidate} exited before finalize_commit")
+        _tc = time.perf_counter()
         self.client.call("commit_pid", pid=candidate)
+        _tstep("commit.commit_pid_rpc", _tc)
+        _t0 = time.perf_counter()
         self._reap(baseline)
+        _tstep("commit.reap_baseline", _t0)
         # The candidate is still frozen at its boundary — resume it as canonical.
+        _t1 = time.perf_counter()
         self.client.call("continue_pid", pid=candidate)
+        _tstep("commit.continue_rpc", _t1)
         sess.live_pid = candidate            # unchanged: candidate stays live
         sess.epoch = None
         self._discard_epoch_tmp_snapshot(sess)
@@ -1980,7 +2073,10 @@ class SessionProxy:
                       f"{len(released.get('telemetry', []))} telemetry, "
                       f"{len(released.get('tool_calls', []))} tool calls")
         # Wait for the candidate to settle back into read() (was 200ms blind).
+        _t2 = time.perf_counter()
         self._wait_wchan_read(candidate, timeout=1.0)
+        _tstep("commit.wait_wchan", _t2)
+        _tstep("commit.TOTAL", _tc)
         self._log(f"session {sid}: COMMIT — candidate {candidate} is now canonical "
                   f"(baseline {baseline} discarded)")
 
@@ -2005,19 +2101,30 @@ class SessionProxy:
         # the proven rollback flow (the candidate is frozen before it is
         # discarded), and avoids killing it while it is actively blocked in the
         # pipe read() it shares (COW) with the baseline.
+        _tr = time.perf_counter()
         self._quiesce_epoch(sess)
+        _tstep("reject.quiesce", _tr)
         # Kill any descendant processes the candidate started (background jobs,
         # subshells) BEFORE discarding the candidate so they don't outlive the
         # epoch.
+        _t0 = time.perf_counter()
         self._kill_descendants(candidate)
+        _tstep("reject.kill_descendants", _t0)
+        _t1 = time.perf_counter()
         resp = self.client.call("reject_pid", pid=baseline)
+        _tstep("reject.reject_pid_rpc", _t1)
+        _t2 = time.perf_counter()
         self._reap(candidate)
+        _tstep("reject.reap", _t2)
         # pids[0] is the canonical pid from now on (the baseline). reject_pid may
         # resume it, so immediately stop the cgroup again before restoring fd/tmp
         # state; the caller must not observe a half-restored namespace.
         pids = resp.get("pids") or [baseline]
         sess.live_pid = pids[0]
+        _t3 = time.perf_counter()
         self.client.call("freeze_by_cgroup", cgroup_id=sess.cgroup_id)
+        _tstep("reject.refreeze_rpc", _t3)
+        _t4 = time.perf_counter()
         if not self._wait_state_T(sess.live_pid, timeout=3.0):
             try:
                 os.kill(sess.live_pid, signal.SIGSTOP)
@@ -2025,8 +2132,26 @@ class SessionProxy:
                 pass
             self._wait_state_T(sess.live_pid, timeout=1.0)
         # Phase 4: restore fd state and tmp state while the baseline is stopped.
+        _tstep("reject.wait_state_T", _t4)
+        _t5 = time.perf_counter()
         self._restore_fds(sess.live_pid, fd_snapshots)
-        if tmp_snapshot:
+        if tmp_snapshot is None:
+            # begin-time precheck saw an empty tmp namespace. The RESTORE side
+            # is trivially skippable only if the candidate never dirtied it;
+            # if it did, sweep it back to empty (an empty snapshot dir restores
+            # exactly "nothing", i.e. the same state the real snapshot would
+            # have held) — this preserves the cleanup half of the restore
+            # semantics that the full path provides via rmtree-then-copy.
+            if not self._tmp_namespace_empty(sess.live_pid):
+                with tempfile.TemporaryDirectory(prefix="shadow-tmp-sweep-") as empty_snap:
+                    try:
+                        self._run_namespace_copy(sess.live_pid, empty_snap,
+                                                  restore=True)
+                    except Exception as e:  # noqa: BLE001
+                        self._log(f"session {sid}: WARNING — tmp-state sweep "
+                                  f"failed ({e}), stale /tmp may remain "
+                                  f"(session still usable)")
+        elif tmp_snapshot:
             try:
                 self._restore_epoch_tmp_state(sess, tmp_snapshot)
             except Exception as e:  # noqa: BLE001
@@ -2040,8 +2165,11 @@ class SessionProxy:
                           f"({e}), proceeding with stale /tmp (session still "
                           f"usable, next epoch will re-snapshot)")
         sess.epoch = None
+        _tstep("reject.restore_fds_tmp", _t5)
+        _t6 = time.perf_counter()
         self._clear_pending_signals(sess.live_pid)
         self.client.call("continue_pid", pid=sess.live_pid)
+        _tstep("reject.continue_rpc", _t6)
         # Drop this epoch's entries from the transcript: from the baseline's
         # point of view the epoch never happened. The caller already received
         # that output (optimistic release), so the agent's turn that consumed it
@@ -2075,7 +2203,10 @@ class SessionProxy:
                       f"{discarded.get('tool_calls', 0)} tool calls")
         self._discard_epoch_tmp_snapshot(sess)
         # Wait for the baseline to settle back into read() (was 200ms blind).
+        _t7 = time.perf_counter()
         self._wait_wchan_read(sess.live_pid, timeout=1.0)
+        _tstep("reject.wait_wchan", _t7)
+        _tstep("reject.TOTAL", _tr)
         self._log(f"session {sid}: REJECT — discarded candidate {candidate}, "
                   f"resumed pristine baseline {sess.live_pid}")
 
@@ -2090,13 +2221,24 @@ class SessionProxy:
         release_fence_vfork: 仅 commit 路径传 True —— 允许 ShadowProc 为解开
         vfork-D 死锁提前恢复围栏冻结的子进程（commit 后解冻本就是必然结局）；
         reject 路径保持 False，绝不放出被否决 epoch 的未决外部效应。
+
+        Returns True iff the freeze_by_cgroup RPC itself succeeded — meaning
+        the WHOLE cgroup is frozen with full Rust-side bookkeeping. Callers
+        that freeze the same cgroup again afterwards (orchestrator's
+        _fs_group_finalize member loop) may skip it in that case; if False
+        only the fallback SIGSTOP stopped the candidate, so the cgroup-level
+        frozen set is NOT established and a later freeze MUST still run.
         """
         candidate = sess.epoch["candidate"]
+        _t0 = time.perf_counter()
+        freeze_ok = True
         try:
             self.client.call("freeze_by_cgroup", cgroup_id=sess.cgroup_id,
                              release_fence_vfork=release_fence_vfork)
         except RuntimeError:
-            pass
+            freeze_ok = False
+        _tstep("quiesce.freeze_rpc", _t0)
+        _t1 = time.perf_counter()
         if not self._wait_state_T(candidate, timeout=3.0):
             # Fallback: stop the candidate directly.
             try:
@@ -2104,8 +2246,12 @@ class SessionProxy:
             except OSError:
                 pass
             self._wait_state_T(candidate, timeout=1.0)
-        # State T confirmed; minimal settle (was 100ms).
-        time.sleep(0.01)
+        _tstep("quiesce.wait_state_T", _t1)
+        # No settle delay: freeze_ok means the Rust RPC ran its stop-stable
+        # fixpoint before returning; otherwise the fallback SIGSTOP above was
+        # itself confirmed by _wait_state_T. The 2ms settle here was redundant
+        # double-insurance paid on every commit AND every rollback.
+        return freeze_ok
 
 
 # ──────────────────────────── Self-contained demo ──────────────────────────

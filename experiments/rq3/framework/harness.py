@@ -45,6 +45,26 @@ class SpecCommandError(RuntimeError):
     """
 
 
+def session_mem_setup_command(n_bytes: int) -> str:
+    """Bash command that parks `n_bytes` of heap in the SESSION SHELL itself.
+
+    W10 (session-resident memory): the payload must live in the process
+    begin_epoch snapshots — the persistent session bash — NOT in a
+    per-epoch child. (The removed old-W9 allocated its working set inside
+    a child after begin_epoch, so the session was never big and its
+    "COW overhead" numbers measured allocation cost only.)
+
+    `printf -v '%*s'` pads a variable with spaces to width N: a pure shell
+    builtin (no pipe, no subprocess) that fills the shell's heap at memcpy
+    speed — measured ~1.2 s/GiB vs ~7.4 s/GiB for `$(head|tr)` (bash's
+    command-substitution read loop is the bottleneck, not tr). The
+    trailing length assertion makes a truncated allocation fail loudly
+    (rc != 0) instead of silently shrinking every sample's snapshot.
+    """
+    return (f"printf -v __RQ3_SESSION_MEM__ '%*s' {n_bytes} ''; "
+            f"test \"${{#__RQ3_SESSION_MEM__}}\" -eq {n_bytes}")
+
+
 @dataclass
 class EpochMeasurement:
     """One complete epoch measurement (begin + run + finalize)."""
@@ -248,7 +268,7 @@ class WorkloadHarness:
 
         `command` may be a single shell command or a LIST of commands run
         sequentially INSIDE the same epoch (one transcript entry each, e.g.
-        W10-b's N tool invocations); run_ns is the sum of all commands.
+        W9-b's N tool invocations); run_ns is the sum of all commands.
 
         The run phase FAILS the measurement (and rolls back) when a command
         exits non-zero or `verify_fn` rejects its output — a failed run must
@@ -264,7 +284,7 @@ class WorkloadHarness:
             m.begin_ns = begin_ns
 
             # Pin the candidate shell once for the whole epoch (multi-run
-            # workloads, e.g. W10-b): affinity is inherited by every command
+            # workloads, e.g. W9-b): affinity is inherited by every command
             # the shell spawns, so N runs pay one taskset-equivalent instead
             # of N× the ~1.3 ms taskset startup. The raw baseline pins once
             # via its single wrapper — this restores symmetry.
@@ -317,7 +337,8 @@ class WorkloadHarness:
                      new_session_per_run: bool = False,
                      verify_fn: Callable = None,
                      error_sink: List[str] = None,
-                     pin_once: bool = False
+                     pin_once: bool = False,
+                     session_mem_mb: int = None
                      ) -> Tuple[Dict[str, List[float]], int]:
         """Run speculative measurement loop.
 
@@ -328,8 +349,13 @@ class WorkloadHarness:
             setup_fn: Called before each epoch (e.g., create input files).
             teardown_fn: Called after each epoch (e.g., cleanup).
             new_session_per_run: If True, open/close session each iteration.
+            verify_fn: If given, rejects samples whose command output does
+                not match the expected benchmark report.
             error_sink: If given, excluded samples' reasons are appended
                 (diagnostics: exit code, verify mismatch, commit failure).
+            session_mem_mb: W10 — park this many MiB of heap in the session
+                shell (untimed, right after session_open) so begin_epoch
+                snapshots a process of exactly that size.
 
         Returns:
             (dict of sample lists keyed by phase, excluded_count)
@@ -342,17 +368,40 @@ class WorkloadHarness:
         if error_sink is None:
             error_sink = []
 
-        # Open session
-        if not new_session_per_run:
+        def open_session_with_payload():
+            """Open a session and (W10) park the resident-memory payload in
+            the session shell BEFORE any epoch: begin_epoch snapshots
+            exactly this process. Untimed — session setup, not epoch work.
+            """
             resp = client.session_open(agent_id)
-            session_id = resp["session_id"]
+            sid = resp["session_id"]
+            if session_mem_mb:
+                setup_cmd = session_mem_setup_command(
+                    session_mem_mb * 1024 * 1024)
+                resp, _ns = client.timed_run(sid, setup_cmd)
+                if resp.get("exit_code", 0) != 0:
+                    # Allocation is a hard failure, not an excluded sample:
+                    # every sample would snapshot the wrong size.
+                    try:
+                        client.session_close(sid)
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"session memory payload setup failed "
+                        f"(rc={resp.get('exit_code', 0)}): "
+                        f"{resp.get('output', '')[:200]!r}")
+            return sid
+
+        # Open session
+        session_id = None
+        if not new_session_per_run:
+            session_id = open_session_with_payload()
 
         try:
             # Warm-up
             for i in range(self.warmup):
                 if new_session_per_run:
-                    resp = client.session_open(agent_id)
-                    sid = resp["session_id"]
+                    sid = open_session_with_payload()
                 else:
                     sid = session_id
                 if setup_fn:
@@ -375,8 +424,7 @@ class WorkloadHarness:
             # Measurement
             for i in range(repeats):
                 if new_session_per_run:
-                    resp = client.session_open(agent_id)
-                    sid = resp["session_id"]
+                    sid = open_session_with_payload()
                 else:
                     sid = session_id
                 if setup_fn:
@@ -405,7 +453,7 @@ class WorkloadHarness:
                 if self.verbose and (i + 1) % max(1, repeats // 5) == 0:
                     self.log(f"  spec({finalize}) progress: {i+1}/{repeats}")
         finally:
-            if not new_session_per_run:
+            if not new_session_per_run and session_id is not None:
                 try:
                     client.session_close(session_id)
                 except Exception:
@@ -424,7 +472,8 @@ class WorkloadHarness:
                      raw_timeout: float = 60.0,
                      new_session_per_run: bool = False,
                      verify_fn: Callable = None,
-                     pin_once: bool = False
+                     pin_once: bool = False,
+                     session_mem_mb: int = None
                      ) -> WorkloadResult:
         """Run a complete workload measurement (raw + spec commit + rollback).
 
@@ -466,7 +515,8 @@ class WorkloadHarness:
                 new_session_per_run=new_session_per_run,
                 verify_fn=verify_fn,
                 error_sink=result.spec_errors,
-                pin_once=pin_once)
+                pin_once=pin_once,
+                session_mem_mb=session_mem_mb)
             result.spec_excluded = max(result.spec_excluded, spec_excl)
 
             if mode == "commit":

@@ -1,0 +1,4 @@
+RQ3 back-to-back run — finished 2026-09-03 14:26:41
+  Penumbra (all):  exit=0  log=/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/logs/rq3_penumbra_20260903_105020.log
+  Baseline (all):  exit=0  log=/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/logs/rq3_baseline_20260903_105020.log
+  Results: experiments/rq3/results/rq3.json + rq3_baseline.json

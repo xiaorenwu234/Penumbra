@@ -20,7 +20,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from framework.harness import WorkloadHarness
+from framework.harness import WorkloadHarness, session_mem_setup_command
 
 
 class FakeClient:
@@ -278,6 +278,52 @@ class TestRunWorkloadPlumbing(unittest.TestCase):
         kwargs = mr.call_args
         self.assertEqual(kwargs.kwargs["setup_fn"] is not None, True)
         self.assertEqual(kwargs.kwargs["teardown_fn"] is not None, True)
+
+
+class TestSessionMemPayload(unittest.TestCase):
+    """W10: session_mem_mb parks the payload in the session shell before
+    any epoch (what begin_epoch COW-forks); a failed allocation fails the
+    workload loudly instead of silently shrinking every snapshot.
+    """
+
+    def setUp(self):
+        self.client = FakeClient()
+        self.h = WorkloadHarness(warmup=0, verbose=False)
+        self.h._client = self.client
+
+    def test_setup_command_runs_after_session_open(self):
+        self.h.measure_spec("true", 1, finalize="commit", session_mem_mb=64)
+        self.assertGreaterEqual(len(self.client.runs), 2)
+        first = self.client.runs[0]
+        self.assertIn("printf -v __RQ3_SESSION_MEM__", first)
+        self.assertIn("67108864", first)   # 64 MiB in bytes
+
+    def test_per_run_sessions_reallocate_every_iteration(self):
+        self.h.measure_spec("true", 2, finalize="commit",
+                            new_session_per_run=True, session_mem_mb=16)
+        setups = [c for c in self.client.runs
+                  if "printf -v __RQ3_SESSION_MEM__" in c]
+        self.assertEqual(len(setups), 2)
+
+    def test_failed_allocation_raises(self):
+        self.client.rc = 1
+        with self.assertRaises(RuntimeError):
+            self.h.measure_spec("true", 1, finalize="commit",
+                                session_mem_mb=64)
+
+    def test_setup_command_has_exact_length_assertion(self):
+        cmd = session_mem_setup_command(1024)
+        self.assertIn("printf -v __RQ3_SESSION_MEM__ '%*s' 1024 ''", cmd)
+        self.assertIn('test "${#__RQ3_SESSION_MEM__}" -eq 1024', cmd)
+
+    def test_run_workload_passes_session_mem_mb_through(self):
+        with mock.patch.object(self.h, "measure_spec") as ms:
+            ms.return_value = ({"begin": [1.0], "run": [1.0],
+                                "finalize": [1.0], "total": [1.0]}, 0)
+            self.h.run_workload("W10", "mem_16MiB", raw_cmd=None,
+                                spec_command="noop", repeats=1,
+                                session_mem_mb=16)
+        self.assertEqual(ms.call_args.kwargs.get("session_mem_mb"), 16)
 
 
 if __name__ == "__main__":

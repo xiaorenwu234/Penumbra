@@ -213,5 +213,74 @@ class TestRecovery(unittest.TestCase):
             self.assertEqual(orch._sessions, {"s1": "/cg1"})
 
 
+class GroupCommitJournalTestCase(unittest.TestCase):
+    """Journal group-commit semantics (durable=False + flush).
+
+    Regression guard for the commit-hot-path optimization: non-durable
+    appends must (a) be immediately visible to a fresh reader (the write
+    already happened — only the fsync is deferred), (b) keep exact append
+    order when interleaved with durable appends, and (c) all be present
+    after flush().
+    """
+
+    def test_nondurable_visible_without_flush(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "j.jsonl")
+            j = _OrchestratorJournal(p)
+            j.append("open", sid="s1", cgroup="/cg1")           # durable
+            j.append("epoch_result", durable=False, epoch="e1")  # written, not synced
+            # A fresh reader (new fd, like load()) sees the record already:
+            # visibility is governed by write(), durability by fsync().
+            recs = _OrchestratorJournal(p).load()
+            self.assertEqual([r["op"] for r in recs], ["open", "epoch_result"])
+
+    def test_flush_persists_interleaved_order(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "j.jsonl")
+            j = _OrchestratorJournal(p)
+            j.append("commit_intent", sid="s1")                  # durable
+            j.append("fs_committed", durable=False, sid="s1")
+            j.append("release_intent", sid="s1")                  # durable (carries fs_committed down)
+            j.append("release_member_done", durable=False, sid="s1")
+            j.append("commit_done", durable=False, sid="s1")
+            j.flush()
+            recs = _OrchestratorJournal(p).load()
+            self.assertEqual([r["op"] for r in recs],
+                             ["commit_intent", "fs_committed", "release_intent",
+                              "release_member_done", "commit_done"])
+
+    def test_flush_without_appends_is_safe(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "j.jsonl")
+            j = _OrchestratorJournal(p)
+            j.flush()  # no fd opened yet — must be a no-op, not an error
+            self.assertEqual(_OrchestratorJournal(p).load(), [])
+
+    def test_concurrent_appends_serialize(self):
+        """Concurrent durable/non-durable appends must never interleave bytes
+        (the append lock protects the write+sync pair)."""
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "j.jsonl")
+            j = _OrchestratorJournal(p)
+            n_threads, n_each = 8, 50
+
+            def worker(tid):
+                for i in range(n_each):
+                    j.append(f"op{tid}_{i}", durable=(i % 2 == 0))
+
+            threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            j.flush()
+            recs = _OrchestratorJournal(p).load()
+            self.assertEqual(len(recs), n_threads * n_each)
+            # Every record must be fully-formed JSON (no interleaved bytes).
+            for r in recs:
+                self.assertIn("op", r)
+                self.assertIn("ts", r)
+
+
 if __name__ == "__main__":
     unittest.main()

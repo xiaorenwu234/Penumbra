@@ -1572,7 +1572,17 @@ fn wait_thread_group_stopped(pid: u32, timeout_ms: u64) -> bool {
         if std::time::Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Sleep ONLY while some member has not reached T/t yet — that wait
+        // is for SIGSTOP delivery (a scheduler wakeup, typically <100µs;
+        // 0.2ms covers it, and a straggler just costs one extra poll loop,
+        // never a failure — was a fixed 1ms, 3 waits per freeze added ~3ms
+        // of pure sleep to every epoch boundary).
+        // Once every member scans stopped, the re-scan only re-confirms the
+        // TID-set fixpoint: a stopped thread group cannot create threads,
+        // so the confirmation needs no delay at all.
+        if !all_stopped {
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
     }
 }
 
@@ -1608,6 +1618,8 @@ fn wait_task_stopped(pid: u32, timeout_ms: u64) -> bool {
         if std::time::Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // 1ms poll (was 5ms): gives SIGSTOP time to land before the ptrace
+        // injection runs; /proc reads are cheap so fast polling is free.
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }

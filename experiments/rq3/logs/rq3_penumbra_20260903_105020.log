@@ -1,0 +1,1211 @@
+=== [1/2] Penumbra full suite (W1-W10) — 2026-09-03 10:50:20 ===
+══════════════════════════════════════════════════════════
+  RQ3 Performance Experiment Launcher
+══════════════════════════════════════════════════════════
+[1/7] 清理旧进程和挂载...
+[2/7] 准备目录...
+[3/7] 构建 benchmark 程序...
+make: 进入目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/benchmarks”
+make: 对“all”无需做任何事。
+make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/benchmarks”
+  Done
+[4/7] 启动 ShadowFS...
+  ShadowFS PID=3517 OK
+  FUSE 挂载: /tmp/shadow-rq2-test/mnt OK
+[5/7] 启动 ShadowProc...
+  ShadowProc PID=3550 OK
+[6/7] 启动 Orchestrator...
+  Orchestrator PID=3582 OK
+  Socket: /tmp/shadow-orch.sock OK
+  Orchestrator 连接测试: OK
+[7/7] 运行 RQ3 实验...
+
+
+######################################################################
+  WORKLOAD W1 [noop] (repeats=1000)
+######################################################################
+  [harness] Starting W1 [noop] repeats=1000
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 200/1000
+  [harness]   raw progress: 400/1000
+  [harness]   raw progress: 600/1000
+  [harness]   raw progress: 800/1000
+  [harness]   raw progress: 1000/1000
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 200/1000
+  [harness]   spec(commit) progress: 400/1000
+  [harness]   spec(commit) progress: 600/1000
+  [harness]   spec(commit) progress: 800/1000
+  [harness]   spec(commit) progress: 1000/1000
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 200/1000
+  [harness]   spec(rollback) progress: 400/1000
+  [harness]   spec(rollback) progress: 600/1000
+  [harness]   spec(rollback) progress: 800/1000
+  [harness]   spec(rollback) progress: 1000/1000
+  [harness]   Done in 42.6s
+
+######################################################################
+  WORKLOAD W2 [10ms] (repeats=1000)
+######################################################################
+  [harness] Starting W2 [10ms] repeats=1000
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 200/1000
+  [harness]   raw progress: 400/1000
+  [harness]   raw progress: 600/1000
+  [harness]   raw progress: 800/1000
+  [harness]   raw progress: 1000/1000
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 200/1000
+  [harness]   spec(commit) progress: 400/1000
+  [harness]   spec(commit) progress: 600/1000
+  [harness]   spec(commit) progress: 800/1000
+  [harness]   spec(commit) progress: 1000/1000
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 200/1000
+  [harness]   spec(rollback) progress: 400/1000
+  [harness]   spec(rollback) progress: 600/1000
+  [harness]   spec(rollback) progress: 800/1000
+  [harness]   spec(rollback) progress: 1000/1000
+  [harness]   Done in 73.5s
+
+######################################################################
+  WORKLOAD W2 [100ms] (repeats=1000)
+######################################################################
+  [harness] Starting W2 [100ms] repeats=1000
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 200/1000
+  [harness]   raw progress: 400/1000
+  [harness]   raw progress: 600/1000
+  [harness]   raw progress: 800/1000
+  [harness]   raw progress: 1000/1000
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 200/1000
+  [harness]   spec(commit) progress: 400/1000
+  [harness]   spec(commit) progress: 600/1000
+  [harness]   spec(commit) progress: 800/1000
+  [harness]   spec(commit) progress: 1000/1000
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 200/1000
+  [harness]   spec(rollback) progress: 400/1000
+  [harness]   spec(rollback) progress: 600/1000
+  [harness]   spec(rollback) progress: 800/1000
+  [harness]   spec(rollback) progress: 1000/1000
+  [harness]   Done in 372.7s
+
+######################################################################
+  WORKLOAD W2 [1000ms] (repeats=1000)
+######################################################################
+  [harness] Starting W2 [1000ms] repeats=1000
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 200/1000
+  [harness]   raw progress: 400/1000
+  [harness]   raw progress: 600/1000
+  [harness]   raw progress: 800/1000
+  [harness]   raw progress: 1000/1000
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 200/1000
+  [harness]   spec(commit) progress: 400/1000
+  [harness]   spec(commit) progress: 600/1000
+  [harness]   spec(commit) progress: 800/1000
+  [harness]   spec(commit) progress: 1000/1000
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 200/1000
+  [harness]   spec(rollback) progress: 400/1000
+  [harness]   spec(rollback) progress: 600/1000
+  [harness]   spec(rollback) progress: 800/1000
+  [harness]   spec(rollback) progress: 1000/1000
+  [harness]   Done in 3111.2s
+
+######################################################################
+  WORKLOAD W3a [read_4KiB] (repeats=200)
+######################################################################
+  [harness] Starting W3a [read_4KiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 9.9s
+
+######################################################################
+  WORKLOAD W3a [read_1MiB] (repeats=200)
+######################################################################
+  [harness] Starting W3a [read_1MiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 10.4s
+
+######################################################################
+  WORKLOAD W3a [read_64MiB] (repeats=200)
+######################################################################
+  [harness] Starting W3a [read_64MiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 23.8s
+
+######################################################################
+  WORKLOAD W3b [repeat_read_1MiB_x100] (repeats=200)
+######################################################################
+  [harness] Starting W3b [repeat_read_1MiB_x100] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]   spec(commit) progress: 120/200
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=102760448 checksum=12978110694102663168 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]   spec(commit) progress: 160/200
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]   spec(rollback) progress: 40/200
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]   spec(rollback) progress: 80/200
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=102760448 checksum=12978110694102663168 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]   spec(rollback) progress: 120/200
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]   spec(rollback) progress: 160/200
+  [harness]     [EXCLUDED] output 'bytes=103809024 checksum=5581257099671240704 repeats=100' does not match 'bytes=104857600 checksum=\\d+ repeats=100'
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 45.7s
+
+######################################################################
+  WORKLOAD W4 [new_4KiB] (repeats=200)
+######################################################################
+  [harness] Starting W4 [new_4KiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 11.0s
+
+######################################################################
+  WORKLOAD W4 [new_1MiB] (repeats=200)
+######################################################################
+  [harness] Starting W4 [new_1MiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 12.2s
+
+######################################################################
+  WORKLOAD W4 [new_16MiB] (repeats=200)
+######################################################################
+  [harness] Starting W4 [new_16MiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 26.0s
+
+######################################################################
+  WORKLOAD W5 [overwrite4K_orig4KiB] (repeats=200)
+######################################################################
+  [harness] Starting W5 [overwrite4K_orig4KiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 10.9s
+
+######################################################################
+  WORKLOAD W5 [overwrite4K_orig1MiB] (repeats=200)
+######################################################################
+  [harness] Starting W5 [overwrite4K_orig1MiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 12.8s
+
+######################################################################
+  WORKLOAD W5 [overwrite4K_orig16MiB] (repeats=200)
+######################################################################
+  [harness] Starting W5 [overwrite4K_orig16MiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 30.4s
+
+######################################################################
+  WORKLOAD W6 [writes_x1] (repeats=200)
+######################################################################
+  [harness] Starting W6 [writes_x1] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 12.9s
+
+######################################################################
+  WORKLOAD W6 [writes_x10] (repeats=200)
+######################################################################
+  [harness] Starting W6 [writes_x10] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 13.2s
+
+######################################################################
+  WORKLOAD W6 [writes_x100] (repeats=200)
+######################################################################
+  [harness] Starting W6 [writes_x100] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 15.2s
+
+######################################################################
+  WORKLOAD W6 [writes_x1000] (repeats=200)
+######################################################################
+  [harness] Starting W6 [writes_x1000] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 33.6s
+
+######################################################################
+  WORKLOAD W7 [files_x1] (repeats=100)
+######################################################################
+  [harness] Starting W7 [files_x1] repeats=100
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 20/100
+  [harness]   raw progress: 40/100
+  [harness]   raw progress: 60/100
+  [harness]   raw progress: 80/100
+  [harness]   raw progress: 100/100
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 20/100
+  [harness]   spec(commit) progress: 40/100
+  [harness]   spec(commit) progress: 60/100
+  [harness]   spec(commit) progress: 80/100
+  [harness]   spec(commit) progress: 100/100
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 20/100
+  [harness]   spec(rollback) progress: 40/100
+  [harness]   spec(rollback) progress: 60/100
+  [harness]   spec(rollback) progress: 80/100
+  [harness]   spec(rollback) progress: 100/100
+  [harness]   Done in 6.1s
+
+######################################################################
+  WORKLOAD W7 [files_x10] (repeats=100)
+######################################################################
+  [harness] Starting W7 [files_x10] repeats=100
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 20/100
+  [harness]   raw progress: 40/100
+  [harness]   raw progress: 60/100
+  [harness]   raw progress: 80/100
+  [harness]   raw progress: 100/100
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 20/100
+  [harness]   spec(commit) progress: 40/100
+  [harness]   spec(commit) progress: 60/100
+  [harness]   spec(commit) progress: 80/100
+  [harness]   spec(commit) progress: 100/100
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 20/100
+  [harness]   spec(rollback) progress: 40/100
+  [harness]   spec(rollback) progress: 60/100
+  [harness]   spec(rollback) progress: 80/100
+  [harness]   spec(rollback) progress: 100/100
+  [harness]   Done in 8.2s
+
+######################################################################
+  WORKLOAD W7 [files_x100] (repeats=100)
+######################################################################
+  [harness] Starting W7 [files_x100] repeats=100
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 20/100
+  [harness]   raw progress: 40/100
+  [harness]   raw progress: 60/100
+  [harness]   raw progress: 80/100
+  [harness]   raw progress: 100/100
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 20/100
+  [harness]   spec(commit) progress: 40/100
+  [harness]   spec(commit) progress: 60/100
+  [harness]   spec(commit) progress: 80/100
+  [harness]   spec(commit) progress: 100/100
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 20/100
+  [harness]   spec(rollback) progress: 40/100
+  [harness]   spec(rollback) progress: 60/100
+  [harness]   spec(rollback) progress: 80/100
+  [harness]   spec(rollback) progress: 100/100
+  [harness]   Done in 28.6s
+
+######################################################################
+  WORKLOAD W7 [files_x500] (repeats=100)
+######################################################################
+  [harness] Starting W7 [files_x500] repeats=100
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 20/100
+  [harness]   raw progress: 40/100
+  [harness]   raw progress: 60/100
+  [harness]   raw progress: 80/100
+  [harness]   raw progress: 100/100
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 20/100
+  [harness]   spec(commit) progress: 40/100
+  [harness]   spec(commit) progress: 60/100
+  [harness]   spec(commit) progress: 80/100
+  [harness]   spec(commit) progress: 100/100
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 20/100
+  [harness]   spec(rollback) progress: 40/100
+  [harness]   spec(rollback) progress: 60/100
+  [harness]   spec(rollback) progress: 80/100
+  [harness]   spec(rollback) progress: 100/100
+  [harness]   Done in 120.5s
+
+######################################################################
+  WORKLOAD W8 [rename_x1] (repeats=100)
+######################################################################
+  [harness] Starting W8 [rename_x1] repeats=100
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 20/100
+  [harness]   raw progress: 40/100
+  [harness]   raw progress: 60/100
+  [harness]   raw progress: 80/100
+  [harness]   raw progress: 100/100
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 20/100
+  [harness]   spec(commit) progress: 40/100
+  [harness]   spec(commit) progress: 60/100
+  [harness]   spec(commit) progress: 80/100
+  [harness]   spec(commit) progress: 100/100
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 20/100
+  [harness]   spec(rollback) progress: 40/100
+  [harness]   spec(rollback) progress: 60/100
+  [harness]   spec(rollback) progress: 80/100
+  [harness]   spec(rollback) progress: 100/100
+  [harness]   Done in 6.0s
+
+######################################################################
+  WORKLOAD W8 [rename_x10] (repeats=100)
+######################################################################
+  [harness] Starting W8 [rename_x10] repeats=100
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 20/100
+  [harness]   raw progress: 40/100
+  [harness]   raw progress: 60/100
+  [harness]   raw progress: 80/100
+  [harness]   raw progress: 100/100
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 20/100
+  [harness]   spec(commit) progress: 40/100
+  [harness]   spec(commit) progress: 60/100
+  [harness]   spec(commit) progress: 80/100
+  [harness]   spec(commit) progress: 100/100
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 20/100
+  [harness]   spec(rollback) progress: 40/100
+  [harness]   spec(rollback) progress: 60/100
+  [harness]   spec(rollback) progress: 80/100
+  [harness]   spec(rollback) progress: 100/100
+  [harness]   Done in 6.6s
+
+######################################################################
+  WORKLOAD W8 [rename_x100] (repeats=100)
+######################################################################
+  [harness] Starting W8 [rename_x100] repeats=100
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 20/100
+  [harness]   raw progress: 40/100
+  [harness]   raw progress: 60/100
+  [harness]   raw progress: 80/100
+  [harness]   raw progress: 100/100
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 20/100
+  [harness]   spec(commit) progress: 40/100
+  [harness]   spec(commit) progress: 60/100
+  [harness]   spec(commit) progress: 80/100
+  [harness]   spec(commit) progress: 100/100
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 20/100
+  [harness]   spec(rollback) progress: 40/100
+  [harness]   spec(rollback) progress: 60/100
+  [harness]   spec(rollback) progress: 80/100
+  [harness]   spec(rollback) progress: 100/100
+  [harness]   Done in 13.9s
+
+######################################################################
+  WORKLOAD W8 [rename_x500] (repeats=100)
+######################################################################
+  [harness] Starting W8 [rename_x500] repeats=100
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 20/100
+  [harness]   raw progress: 40/100
+  [harness]   raw progress: 60/100
+  [harness]   raw progress: 80/100
+  [harness]   raw progress: 100/100
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 20/100
+  [harness]   spec(commit) progress: 40/100
+  [harness]   spec(commit) progress: 60/100
+  [harness]   spec(commit) progress: 80/100
+  [harness]   spec(commit) progress: 100/100
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 20/100
+  [harness]   spec(rollback) progress: 40/100
+  [harness]   spec(rollback) progress: 60/100
+  [harness]   spec(rollback) progress: 80/100
+  [harness]   spec(rollback) progress: 100/100
+  [harness]   Done in 60.4s
+
+######################################################################
+  WORKLOAD W9a [single_1KiB] (repeats=200)
+######################################################################
+  [harness] Starting W9a [single_1KiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 233.5s
+
+######################################################################
+  WORKLOAD W9a [single_10KiB] (repeats=200)
+######################################################################
+  [harness] Starting W9a [single_10KiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 234.7s
+
+######################################################################
+  WORKLOAD W9a [single_100KiB] (repeats=200)
+######################################################################
+  [harness] Starting W9a [single_100KiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 235.5s
+
+######################################################################
+  WORKLOAD W9a [single_1MiB] (repeats=200)
+######################################################################
+  [harness] Starting W9a [single_1MiB] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 248.3s
+
+######################################################################
+  WORKLOAD W9b [entries_x10] (repeats=200)
+######################################################################
+  [harness] Starting W9b [entries_x10] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 250.3s
+
+######################################################################
+  WORKLOAD W9b [entries_x100] (repeats=200)
+######################################################################
+  [harness] Starting W9b [entries_x100] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 300.1s
+
+######################################################################
+  WORKLOAD W9b [entries_x1000] (repeats=200)
+######################################################################
+  [harness] Starting W9b [entries_x1000] repeats=200
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 40/200
+  [harness]   raw progress: 80/200
+  [harness]   raw progress: 120/200
+  [harness]   raw progress: 160/200
+  [harness]   raw progress: 200/200
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 40/200
+  [harness]   spec(commit) progress: 80/200
+  [harness]   spec(commit) progress: 120/200
+  [harness]   spec(commit) progress: 160/200
+  [harness]   spec(commit) progress: 200/200
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 40/200
+  [harness]   spec(rollback) progress: 80/200
+  [harness]   spec(rollback) progress: 120/200
+  [harness]   spec(rollback) progress: 160/200
+  [harness]   spec(rollback) progress: 200/200
+  [harness]   Done in 806.9s
+
+######################################################################
+  WORKLOAD W10 [mem_16MiB] (repeats=50)
+######################################################################
+  [harness] Starting W10 [mem_16MiB] repeats=50
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 10/50
+  [harness]   raw progress: 20/50
+  [harness]   raw progress: 30/50
+  [harness]   raw progress: 40/50
+  [harness]   raw progress: 50/50
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 10/50
+  [harness]   spec(commit) progress: 20/50
+  [harness]   spec(commit) progress: 30/50
+  [harness]   spec(commit) progress: 40/50
+  [harness]   spec(commit) progress: 50/50
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 10/50
+  [harness]   spec(rollback) progress: 20/50
+  [harness]   spec(rollback) progress: 30/50
+  [harness]   spec(rollback) progress: 40/50
+  [harness]   spec(rollback) progress: 50/50
+  [harness]   Done in 77.3s
+
+######################################################################
+  WORKLOAD W10 [mem_64MiB] (repeats=50)
+######################################################################
+  [harness] Starting W10 [mem_64MiB] repeats=50
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 10/50
+  [harness]   raw progress: 20/50
+  [harness]   raw progress: 30/50
+  [harness]   raw progress: 40/50
+  [harness]   raw progress: 50/50
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 10/50
+  [harness]   spec(commit) progress: 20/50
+  [harness]   spec(commit) progress: 30/50
+  [harness]   spec(commit) progress: 40/50
+  [harness]   spec(commit) progress: 50/50
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 10/50
+  [harness]   spec(rollback) progress: 20/50
+  [harness]   spec(rollback) progress: 30/50
+  [harness]   spec(rollback) progress: 40/50
+  [harness]   spec(rollback) progress: 50/50
+  [harness]   Done in 89.3s
+
+######################################################################
+  WORKLOAD W10 [mem_256MiB] (repeats=50)
+######################################################################
+  [harness] Starting W10 [mem_256MiB] repeats=50
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 10/50
+  [harness]   raw progress: 20/50
+  [harness]   raw progress: 30/50
+  [harness]   raw progress: 40/50
+  [harness]   raw progress: 50/50
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 10/50
+  [harness]   spec(commit) progress: 20/50
+  [harness]   spec(commit) progress: 30/50
+  [harness]   spec(commit) progress: 40/50
+  [harness]   spec(commit) progress: 50/50
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 10/50
+  [harness]   spec(rollback) progress: 20/50
+  [harness]   spec(rollback) progress: 30/50
+  [harness]   spec(rollback) progress: 40/50
+  [harness]   spec(rollback) progress: 50/50
+  [harness]   Done in 129.6s
+
+######################################################################
+  WORKLOAD W10 [mem_1GiB] (repeats=50)
+######################################################################
+  [harness] Starting W10 [mem_1GiB] repeats=50
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 10/50
+  [harness]   raw progress: 20/50
+  [harness]   raw progress: 30/50
+  [harness]   raw progress: 40/50
+  [harness]   raw progress: 50/50
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 10/50
+  [harness]   spec(commit) progress: 20/50
+  [harness]   spec(commit) progress: 30/50
+  [harness]   spec(commit) progress: 40/50
+  [harness]   spec(commit) progress: 50/50
+  [harness]   Measuring spec (rollback) ...
+  [harness]   spec(rollback) progress: 10/50
+  [harness]   spec(rollback) progress: 20/50
+  [harness]   spec(rollback) progress: 30/50
+  [harness]   spec(rollback) progress: 40/50
+  [harness]   spec(rollback) progress: 50/50
+  [harness]   Done in 293.7s
+
+==============================================================================
+  RQ3 PERFORMANCE SUMMARY
+==============================================================================
+
+  Workload                       Metric                 Median(ms)    P95(ms)    P99(ms)
+  ------------------------------ -------------------- ------------ ---------- ----------
+  W1:noop                        raw_tool                    0.940      1.107      1.236
+  W1:noop                        spec_begin                  6.825      7.559      8.172
+  W1:noop                        spec_run                    2.955      3.151      3.413
+  W1:noop                        spec_commit                11.977     13.183     15.512
+  W1:noop                        spec_rollback               8.051      8.916      9.731
+  W1:noop                        spec_total_commit          21.788     23.722     25.871
+  W1:noop                        spec_total_rollback        17.896     19.205     21.278
+  W2:10ms                        raw_tool                   11.106     11.222     11.454
+  W2:10ms                        spec_begin                  6.917      7.607      7.921
+  W2:10ms                        spec_run                   13.055     13.241     13.366
+  W2:10ms                        spec_commit                12.040     13.052     15.569
+  W2:10ms                        spec_rollback               8.182      8.929     10.355
+  W2:10ms                        spec_total_commit          32.101     33.481     35.784
+  W2:10ms                        spec_total_rollback        28.157     29.237     31.570
+  W2:100ms                       raw_tool                  101.305    101.428    101.533
+  W2:100ms                       spec_begin                  7.225      7.846      8.171
+  W2:100ms                       spec_run                  104.577    117.536    122.064
+  W2:100ms                       spec_commit                13.005     32.029     39.410
+  W2:100ms                       spec_rollback              18.099     31.913     32.629
+  W2:100ms                       spec_total_commit         126.379    147.047    153.339
+  W2:100ms                       spec_total_rollback       137.739    151.247    153.334
+  W2:1000ms                      raw_tool                 1001.511   1001.666   1002.038
+  W2:1000ms                      spec_begin                  7.256      7.903      8.284
+  W2:1000ms                      spec_run                 1012.163   1023.757   1026.870
+  W2:1000ms                      spec_commit                15.283     36.921     41.483
+  W2:1000ms                      spec_rollback              14.397     32.062     37.643
+  W2:1000ms                      spec_total_commit        1036.730   1058.552   1061.851
+  W2:1000ms                      spec_total_rollback      1038.112   1053.095   1057.471
+  W3a:read_4KiB                  raw_tool                    1.001      1.205      1.942
+  W3a:read_4KiB                  spec_begin                  6.895      7.499      7.806
+  W3a:read_4KiB                  spec_run                    3.233      3.400      3.587
+  W3a:read_4KiB                  spec_commit                11.969     12.887     15.576
+  W3a:read_4KiB                  spec_rollback               8.106      8.915     11.729
+  W3a:read_4KiB                  spec_total_commit          22.161     23.258     25.616
+  W3a:read_4KiB                  spec_total_rollback        18.361     19.635     22.089
+  W3a:read_1MiB                  raw_tool                    1.769      1.912      2.008
+  W3a:read_1MiB                  spec_begin                  6.926      7.438      7.977
+  W3a:read_1MiB                  spec_run                    4.129      4.351      4.460
+  W3a:read_1MiB                  spec_commit                11.872     12.875     13.726
+  W3a:read_1MiB                  spec_rollback               8.214      9.107     12.000
+  W3a:read_1MiB                  spec_total_commit          23.051     24.175     26.652
+  W3a:read_1MiB                  spec_total_rollback        19.445     20.551     23.474
+  W3a:read_64MiB                 raw_tool                   22.279     22.687     23.824
+  W3a:read_64MiB                 spec_begin                  7.138      7.730      8.143
+  W3a:read_64MiB                 spec_run                   25.305     25.507     25.744
+  W3a:read_64MiB                 spec_commit                12.144     13.233     16.363
+  W3a:read_64MiB                 spec_rollback               8.545      9.278      9.473
+  W3a:read_64MiB                 spec_total_commit          44.660     46.365     49.091
+  W3a:read_64MiB                 spec_total_rollback        40.774     41.840     45.405
+  W3b:repeat_read_1MiB_x100      raw_tool                   34.580     35.218     35.519
+  W3b:repeat_read_1MiB_x100      spec_begin                  7.332      7.781      8.043
+  W3b:repeat_read_1MiB_x100      spec_run                   44.676     80.838     82.463
+  W3b:repeat_read_1MiB_x100      spec_commit                12.336     13.618     17.241
+  W3b:repeat_read_1MiB_x100      spec_rollback               8.966      9.678     12.371
+  W3b:repeat_read_1MiB_x100      spec_total_commit          66.959    100.851    106.788
+  W3b:repeat_read_1MiB_x100      spec_total_rollback        96.337    100.337    103.013
+  W4:new_4KiB                    raw_tool                    1.574      1.717      1.757
+  W4:new_4KiB                    spec_begin                  6.991      7.718      8.550
+  W4:new_4KiB                    spec_run                    4.227      4.443      4.537
+  W4:new_4KiB                    spec_commit                14.381     15.878     18.058
+  W4:new_4KiB                    spec_rollback               8.397      9.130     10.408
+  W4:new_4KiB                    spec_total_commit          25.806     27.267     29.527
+  W4:new_4KiB                    spec_total_rollback        19.658     20.652     22.866
+  W4:new_1MiB                    raw_tool                    2.238      2.560      3.017
+  W4:new_1MiB                    spec_begin                  7.113      7.795      8.155
+  W4:new_1MiB                    spec_run                    5.695      5.924      6.055
+  W4:new_1MiB                    spec_commit                15.072     16.561     19.263
+  W4:new_1MiB                    spec_rollback               8.989      9.707     10.844
+  W4:new_1MiB                    spec_total_commit          27.929     29.873     32.356
+  W4:new_1MiB                    spec_total_rollback        21.687     22.872     24.986
+  W4:new_16MiB                   raw_tool                   10.675     10.943     11.230
+  W4:new_16MiB                   spec_begin                  7.245      7.898      8.115
+  W4:new_16MiB                   spec_run                   26.210     27.340     28.712
+  W4:new_16MiB                   spec_commit                21.912     25.526     26.747
+  W4:new_16MiB                   spec_rollback              13.865     14.883     16.257
+  W4:new_16MiB                   spec_total_commit          55.429     59.163     61.754
+  W4:new_16MiB                   spec_total_rollback        46.023     48.128     50.460
+  W5:overwrite4K_orig4KiB        raw_tool                    1.007      1.158      1.225
+  W5:overwrite4K_orig4KiB        spec_begin                  6.971      7.612      8.318
+  W5:overwrite4K_orig4KiB        spec_run                    4.093      4.792      4.897
+  W5:overwrite4K_orig4KiB        spec_commit                14.240     15.370     16.051
+  W5:overwrite4K_orig4KiB        spec_rollback               8.401      9.086      9.274
+  W5:overwrite4K_orig4KiB        spec_total_commit          25.534     27.032     28.685
+  W5:overwrite4K_orig4KiB        spec_total_rollback        19.576     20.944     23.387
+  W5:overwrite4K_orig1MiB        raw_tool                    1.177      1.253      1.281
+  W5:overwrite4K_orig1MiB        spec_begin                  7.070      7.767      8.311
+  W5:overwrite4K_orig1MiB        spec_run                    5.373      6.077      6.194
+  W5:overwrite4K_orig1MiB        spec_commit                14.545     15.671     17.925
+  W5:overwrite4K_orig1MiB        spec_rollback               8.612      9.396      9.614
+  W5:overwrite4K_orig1MiB        spec_total_commit          27.190     28.700     30.528
+  W5:overwrite4K_orig1MiB        spec_total_rollback        21.256     22.479     24.031
+  W5:overwrite4K_orig16MiB       raw_tool                    1.343      1.513      1.587
+  W5:overwrite4K_orig16MiB       spec_begin                  7.558      8.344      8.560
+  W5:overwrite4K_orig16MiB       spec_run                   22.303     25.683     26.602
+  W5:overwrite4K_orig16MiB       spec_commit                17.347     18.352     20.676
+  W5:overwrite4K_orig16MiB       spec_rollback              11.488     12.386     13.531
+  W5:overwrite4K_orig16MiB       spec_total_commit          47.314     51.290     52.041
+  W5:overwrite4K_orig16MiB       spec_total_rollback        41.534     45.125     46.747
+  W6:writes_x1                   raw_tool                    1.197      1.336      1.401
+  W6:writes_x1                   spec_begin                  7.109      7.735      8.006
+  W6:writes_x1                   spec_run                    5.490      6.313      8.942
+  W6:writes_x1                   spec_commit                14.489     15.442     17.916
+  W6:writes_x1                   spec_rollback               8.681      9.582     11.994
+  W6:writes_x1                   spec_total_commit          27.280     29.330     31.689
+  W6:writes_x1                   spec_total_rollback        21.484     22.879     24.995
+  W6:writes_x10                  raw_tool                    1.225      1.329      1.390
+  W6:writes_x10                  spec_begin                  7.091      7.834      8.083
+  W6:writes_x10                  spec_run                    6.035      6.795      6.967
+  W6:writes_x10                  spec_commit                14.591     15.931     18.549
+  W6:writes_x10                  spec_rollback               8.618      9.444      9.944
+  W6:writes_x10                  spec_total_commit          27.927     30.599     31.961
+  W6:writes_x10                  spec_total_rollback        21.921     23.492     25.259
+  W6:writes_x100                 raw_tool                    1.460      1.544      1.585
+  W6:writes_x100                 spec_begin                  7.249      7.970      8.161
+  W6:writes_x100                 spec_run                   10.446     11.416     13.495
+  W6:writes_x100                 spec_commit                14.885     16.165     18.617
+  W6:writes_x100                 spec_rollback               8.793      9.570      9.983
+  W6:writes_x100                 spec_total_commit          32.721     34.935     36.753
+  W6:writes_x100                 spec_total_rollback        26.377     27.868     30.230
+  W6:writes_x1000                raw_tool                    3.213      3.319      3.385
+  W6:writes_x1000                spec_begin                  7.391      8.064      8.283
+  W6:writes_x1000                spec_run                   52.347     55.510     57.110
+  W6:writes_x1000                spec_commit                15.556     17.623     19.784
+  W6:writes_x1000                spec_rollback               9.347      9.909     10.336
+  W6:writes_x1000                spec_total_commit          75.512     79.386     82.722
+  W6:writes_x1000                spec_total_rollback        68.911     71.868     73.614
+  W7:files_x1                    raw_tool                    1.012      1.145      1.236
+  W7:files_x1                    spec_begin                  6.993      7.584      7.872
+  W7:files_x1                    spec_run                    3.612      3.827      4.010
+  W7:files_x1                    spec_commit                14.370     15.804     18.302
+  W7:files_x1                    spec_rollback               8.487      9.095      9.195
+  W7:files_x1                    spec_total_commit          25.111     26.969     28.940
+  W7:files_x1                    spec_total_rollback        19.031     19.868     20.444
+  W7:files_x10                   raw_tool                    1.169      1.314      1.400
+  W7:files_x10                   spec_begin                  7.182      7.883      8.348
+  W7:files_x10                   spec_run                    6.599      7.133      8.090
+  W7:files_x10                   spec_commit                25.474     27.933     29.793
+  W7:files_x10                   spec_rollback               9.793     10.610     11.131
+  W7:files_x10                   spec_total_commit          39.414     42.544     44.792
+  W7:files_x10                   spec_total_rollback        23.460     24.598     27.239
+  W7:files_x100                  raw_tool                    3.212      3.345      3.395
+  W7:files_x100                  spec_begin                  7.442      8.256      8.748
+  W7:files_x100                  spec_run                   34.049     38.370     40.481
+  W7:files_x100                  spec_commit               135.450    140.503    143.120
+  W7:files_x100                  spec_rollback              21.477     22.794     24.435
+  W7:files_x100                  spec_total_commit         178.548    184.871    186.348
+  W7:files_x100                  spec_total_rollback        63.652     68.172     69.321
+  W7:files_x500                  raw_tool                   13.570     14.009     14.152
+  W7:files_x500                  spec_begin                  7.802      8.392      9.127
+  W7:files_x500                  spec_run                  170.646    186.364    189.417
+  W7:files_x500                  spec_commit               628.281    637.471    639.717
+  W7:files_x500                  spec_rollback              74.328     76.845     78.281
+  W7:files_x500                  spec_total_commit         808.702    828.177    830.623
+  W7:files_x500                  spec_total_rollback       245.996    251.570    254.877
+  W8:rename_x1                   raw_tool                    1.002      1.137      1.187
+  W8:rename_x1                   spec_begin                  7.014      7.581      7.726
+  W8:rename_x1                   spec_run                    3.513      3.746      7.057
+  W8:rename_x1                   spec_commit                13.243     14.390     16.862
+  W8:rename_x1                   spec_rollback               8.316      9.002      9.439
+  W8:rename_x1                   spec_total_commit          23.858     26.386     27.898
+  W8:rename_x1                   spec_total_rollback        18.782     20.076     21.766
+  W8:rename_x10                  raw_tool                    1.161      1.333      1.400
+  W8:rename_x10                  spec_begin                  6.975      7.829      8.434
+  W8:rename_x10                  spec_run                    5.408      5.652      6.372
+  W8:rename_x10                  spec_commit                13.667     14.667     17.274
+  W8:rename_x10                  spec_rollback               8.603      9.500      9.902
+  W8:rename_x10                  spec_total_commit          26.128     28.367     30.129
+  W8:rename_x10                  spec_total_rollback        20.790     22.513     24.126
+  W8:rename_x100                 raw_tool                    3.232      3.354      3.420
+  W8:rename_x100                 spec_begin                  7.421      7.996      8.421
+  W8:rename_x100                 spec_run                   23.245     27.138     28.396
+  W8:rename_x100                 spec_commit                25.880     28.893     30.246
+  W8:rename_x100                 spec_rollback              10.779     11.779     12.654
+  W8:rename_x100                 spec_total_commit          56.661     60.950     63.748
+  W8:rename_x100                 spec_total_rollback        38.363     43.031     44.228
+  W8:rename_x500                 raw_tool                   13.094     13.619     13.714
+  W8:rename_x500                 spec_begin                  7.824      8.553      8.775
+  W8:rename_x500                 spec_run                  104.906    109.309    112.006
+  W8:rename_x500                 spec_commit               202.151    207.085    209.155
+  W8:rename_x500                 spec_rollback              19.121     20.604     21.376
+  W8:rename_x500                 spec_total_commit         315.567    322.084    323.502
+  W8:rename_x500                 spec_total_rollback       118.281    122.638    123.786
+  W9a:single_1KiB                raw_tool                    0.964      1.157      1.234
+  W9a:single_1KiB                spec_begin                  7.823      8.403      8.760
+  W9a:single_1KiB                spec_run                    3.265     14.314     21.236
+  W9a:single_1KiB                spec_commit                12.180     15.683     20.960
+  W9a:single_1KiB                spec_rollback               8.392     14.928     15.184
+  W9a:single_1KiB                spec_total_commit          23.372     38.196     43.555
+  W9a:single_1KiB                spec_total_rollback        26.261     36.208     37.084
+  W9a:single_10KiB               raw_tool                    0.979      1.143      1.219
+  W9a:single_10KiB               spec_begin                  7.875      8.607      9.031
+  W9a:single_10KiB               spec_run                    3.484     14.900     16.249
+  W9a:single_10KiB               spec_commit                12.332     13.958     16.897
+  W9a:single_10KiB               spec_rollback               8.345      9.908     12.015
+  W9a:single_10KiB               spec_total_commit          24.304     35.924     37.620
+  W9a:single_10KiB               spec_total_rollback        20.254     29.730     30.906
+  W9a:single_100KiB              raw_tool                    1.165      1.316      1.370
+  W9a:single_100KiB              spec_begin                  8.555      9.404      9.948
+  W9a:single_100KiB              spec_run                    4.080     14.399     14.722
+  W9a:single_100KiB              spec_commit                13.339     14.534     17.749
+  W9a:single_100KiB              spec_rollback               9.098      9.999     11.699
+  W9a:single_100KiB              spec_total_commit          26.365     36.458     37.694
+  W9a:single_100KiB              spec_total_rollback        22.285     26.138     29.475
+  W9a:single_1MiB                raw_tool                    4.301      4.443      4.615
+  W9a:single_1MiB                spec_begin                 13.951     17.945     18.389
+  W9a:single_1MiB                spec_run                   11.102     11.588     15.819
+  W9a:single_1MiB                spec_commit                25.205     27.749     28.757
+  W9a:single_1MiB                spec_rollback              19.635     20.570     21.569
+  W9a:single_1MiB                spec_total_commit          50.791     55.825     57.731
+  W9a:single_1MiB                spec_total_rollback        50.129     59.590     60.516
+  W9b:entries_x10                raw_tool                    8.230      8.531      8.702
+  W9b:entries_x10                spec_begin                 18.748     19.472     19.900
+  W9b:entries_x10                spec_run                   17.405     31.926     37.945
+  W9b:entries_x10                spec_commit                12.376     13.238     14.293
+  W9b:entries_x10                spec_rollback              19.179     20.158     22.576
+  W9b:entries_x10                spec_total_commit          48.489     63.753     69.114
+  W9b:entries_x10                spec_total_rollback        50.320     66.078     68.411
+  W9b:entries_x100               raw_tool                   61.248     62.840     63.610
+  W9b:entries_x100               spec_begin                 19.001     20.099     20.524
+  W9b:entries_x100               spec_run                  102.994    112.301    116.832
+  W9b:entries_x100               spec_commit                13.952     14.801     17.489
+  W9b:entries_x100               spec_rollback              21.211     22.005     24.615
+  W9b:entries_x100               spec_total_commit         136.290    145.563    150.100
+  W9b:entries_x100               spec_total_rollback       144.640    161.272    165.406
+  W9b:entries_x1000              raw_tool                  596.934    611.263    616.208
+  W9b:entries_x1000              spec_begin                 25.530     30.215     30.586
+  W9b:entries_x1000              spec_run                 1011.370   1024.746   1030.868
+  W9b:entries_x1000              spec_commit                28.665     32.192     33.571
+  W9b:entries_x1000              spec_rollback              32.843     33.824     34.704
+  W9b:entries_x1000              spec_total_commit        1066.758   1081.143   1084.906
+  W9b:entries_x1000              spec_total_rollback      1077.102   1093.576   1099.413
+  W10:mem_16MiB                  raw_tool                    0.980      1.059      1.124
+  W10:mem_16MiB                  spec_begin                 30.629     31.938     32.016
+  W10:mem_16MiB                  spec_run                   11.125     20.754     22.012
+  W10:mem_16MiB                  spec_commit                13.144     31.540     32.181
+  W10:mem_16MiB                  spec_rollback              32.986     43.890     44.219
+  W10:mem_16MiB                  spec_total_commit          54.096     75.228     75.893
+  W10:mem_16MiB                  spec_total_rollback        72.813     96.716     97.159
+  W10:mem_64MiB                  raw_tool                    0.924      1.072      1.173
+  W10:mem_64MiB                  spec_begin                 32.004     32.990     45.149
+  W10:mem_64MiB                  spec_run                   13.917     25.076     26.216
+  W10:mem_64MiB                  spec_commit                35.330     51.334     51.787
+  W10:mem_64MiB                  spec_rollback              42.085     55.477     56.442
+  W10:mem_64MiB                  spec_total_commit          83.385     97.805     98.327
+  W10:mem_64MiB                  spec_total_rollback        89.564    102.254    103.121
+  W10:mem_256MiB                 raw_tool                    0.929      1.043      1.096
+  W10:mem_256MiB                 spec_begin                 34.907     35.997     37.743
+  W10:mem_256MiB                 spec_run                   19.906     29.838     31.981
+  W10:mem_256MiB                 spec_commit                27.795     36.286     39.028
+  W10:mem_256MiB                 spec_rollback              42.621     53.691     54.327
+  W10:mem_256MiB                 spec_total_commit          85.461     93.564     95.233
+  W10:mem_256MiB                 spec_total_rollback        98.479    109.137    111.876
+  W10:mem_1GiB                   raw_tool                    0.918      1.019      1.049
+  W10:mem_1GiB                   spec_begin                 47.021     48.552     55.716
+  W10:mem_1GiB                   spec_run                   43.613     57.132     63.037
+  W10:mem_1GiB                   spec_commit                33.196     44.119     47.145
+  W10:mem_1GiB                   spec_rollback              51.618     65.468     67.173
+  W10:mem_1GiB                   spec_total_commit         132.067    138.286    141.152
+  W10:mem_1GiB                   spec_total_rollback       152.945    161.120    165.091
+
+==============================================================================
+
+
+[done] RQ3 experiments complete.
+
+清理守护进程...
+
+══════════════════════════════════════════════════════════
+  RQ3 实验完成 (exit=0)
+  结果: /home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/results/
+══════════════════════════════════════════════════════════
+
+=== Penumbra exit=0 — 2026-09-03 12:55:16 ===

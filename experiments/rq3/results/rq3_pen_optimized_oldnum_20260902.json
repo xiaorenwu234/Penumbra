@@ -1,0 +1,5154 @@
+{
+  "experiment": "rq3",
+  "timestamp": 1788355756.562822,
+  "workloads": [
+    {
+      "workload_id": "W1",
+      "config": "noop",
+      "params": {
+        "description": "C_fixed = T_begin + T_finalize"
+      },
+      "warmup_count": 10,
+      "repeats": 1000,
+      "wall_time_s": 78.18,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 944711.0,
+          "p95_ns": 1115949.1,
+          "p99_ns": 1216203.2,
+          "mean_ns": 973036.7,
+          "min_ns": 895930.0,
+          "max_ns": 1322700.0,
+          "ci_95_low_ns": 941464.0,
+          "ci_95_high_ns": 948237.0,
+          "median_ms": 0.9447,
+          "p95_ms": 1.1159,
+          "p99_ms": 1.2162,
+          "ci_95_ms": [
+            0.9415,
+            0.9482
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 12408553.5,
+          "p95_ns": 13083162.2,
+          "p99_ns": 13436742.3,
+          "mean_ns": 12487636.3,
+          "min_ns": 11479255.0,
+          "max_ns": 16413749.0,
+          "ci_95_low_ns": 12395561.0,
+          "ci_95_high_ns": 12424065.1,
+          "median_ms": 12.4086,
+          "p95_ms": 13.0832,
+          "p99_ms": 13.4367,
+          "ci_95_ms": [
+            12.3956,
+            12.4241
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 3016031.5,
+          "p95_ns": 3207687.5,
+          "p99_ns": 3366910.1,
+          "mean_ns": 3060010.7,
+          "min_ns": 1867498.0,
+          "max_ns": 20793730.0,
+          "ci_95_low_ns": 3007233.0,
+          "ci_95_high_ns": 3022316.0,
+          "median_ms": 3.016,
+          "p95_ms": 3.2077,
+          "p99_ms": 3.3669,
+          "ci_95_ms": [
+            3.0072,
+            3.0223
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 27301450.0,
+          "p95_ns": 28544996.4,
+          "p99_ns": 31166840.3,
+          "mean_ns": 27460685.8,
+          "min_ns": 26386559.0,
+          "max_ns": 48582212.0,
+          "ci_95_low_ns": 27260355.0,
+          "ci_95_high_ns": 27336303.0,
+          "median_ms": 27.3014,
+          "p95_ms": 28.545,
+          "p99_ms": 31.1668,
+          "ci_95_ms": [
+            27.2604,
+            27.3363
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 16823412.5,
+          "p95_ns": 17633163.8,
+          "p99_ns": 19002013.2,
+          "mean_ns": 16962905.1,
+          "min_ns": 16310913.0,
+          "max_ns": 21560391.0,
+          "ci_95_low_ns": 16814228.0,
+          "ci_95_high_ns": 16830808.4,
+          "median_ms": 16.8234,
+          "p95_ms": 17.6332,
+          "p99_ms": 19.002,
+          "ci_95_ms": [
+            16.8142,
+            16.8308
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 42784582.5,
+          "p95_ns": 44449780.7,
+          "p99_ns": 47078921.0,
+          "mean_ns": 43008332.8,
+          "min_ns": 40974986.0,
+          "max_ns": 63765052.0,
+          "ci_95_low_ns": 42762221.0,
+          "ci_95_high_ns": 42856649.2,
+          "median_ms": 42.7846,
+          "p95_ms": 44.4498,
+          "p99_ms": 47.0789,
+          "ci_95_ms": [
+            42.7622,
+            42.8566
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 32085722.5,
+          "p95_ns": 33363988.3,
+          "p99_ns": 35568657.6,
+          "mean_ns": 32282941.9,
+          "min_ns": 30888139.0,
+          "max_ns": 40141212.0,
+          "ci_95_low_ns": 32074708.4,
+          "ci_95_high_ns": 32156228.0,
+          "median_ms": 32.0857,
+          "p95_ms": 33.364,
+          "p99_ms": 35.5687,
+          "ci_95_ms": [
+            32.0747,
+            32.1562
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W2",
+      "config": "10ms",
+      "params": {
+        "target_ms": 10
+      },
+      "warmup_count": 10,
+      "repeats": 1000,
+      "wall_time_s": 109.56,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 11108085.0,
+          "p95_ns": 11224064.9,
+          "p99_ns": 11423957.0,
+          "mean_ns": 11128655.5,
+          "min_ns": 10985522.0,
+          "max_ns": 13594690.0,
+          "ci_95_low_ns": 11103895.0,
+          "ci_95_high_ns": 11112483.5,
+          "median_ms": 11.1081,
+          "p95_ms": 11.2241,
+          "p99_ms": 11.424,
+          "ci_95_ms": [
+            11.1039,
+            11.1125
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 12556920.5,
+          "p95_ns": 13206836.8,
+          "p99_ns": 13588249.5,
+          "mean_ns": 12630800.9,
+          "min_ns": 11432759.0,
+          "max_ns": 15475114.0,
+          "ci_95_low_ns": 12539112.0,
+          "ci_95_high_ns": 12574798.0,
+          "median_ms": 12.5569,
+          "p95_ms": 13.2068,
+          "p99_ms": 13.5882,
+          "ci_95_ms": [
+            12.5391,
+            12.5748
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 13155316.0,
+          "p95_ns": 13344360.1,
+          "p99_ns": 13518051.6,
+          "mean_ns": 13164502.0,
+          "min_ns": 11981606.0,
+          "max_ns": 16810815.0,
+          "ci_95_low_ns": 13145326.9,
+          "ci_95_high_ns": 13164289.0,
+          "median_ms": 13.1553,
+          "p95_ms": 13.3444,
+          "p99_ms": 13.5181,
+          "ci_95_ms": [
+            13.1453,
+            13.1643
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 27626564.0,
+          "p95_ns": 28894931.5,
+          "p99_ns": 31345362.0,
+          "mean_ns": 27754486.9,
+          "min_ns": 26596120.0,
+          "max_ns": 32337893.0,
+          "ci_95_low_ns": 27566366.0,
+          "ci_95_high_ns": 27676010.0,
+          "median_ms": 27.6266,
+          "p95_ms": 28.8949,
+          "p99_ms": 31.3454,
+          "ci_95_ms": [
+            27.5664,
+            27.676
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 17008803.0,
+          "p95_ns": 17775059.3,
+          "p99_ns": 18407064.4,
+          "mean_ns": 17115328.7,
+          "min_ns": 16451227.0,
+          "max_ns": 20918473.0,
+          "ci_95_low_ns": 16998677.0,
+          "ci_95_high_ns": 17019418.0,
+          "median_ms": 17.0088,
+          "p95_ms": 17.7751,
+          "p99_ms": 18.4071,
+          "ci_95_ms": [
+            16.9987,
+            17.0194
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 53409723.0,
+          "p95_ns": 55142146.7,
+          "p99_ns": 57274995.3,
+          "mean_ns": 53549789.8,
+          "min_ns": 51873584.0,
+          "max_ns": 60555200.0,
+          "ci_95_low_ns": 53355527.0,
+          "ci_95_high_ns": 53462583.5,
+          "median_ms": 53.4097,
+          "p95_ms": 55.1421,
+          "p99_ms": 57.275,
+          "ci_95_ms": [
+            53.3555,
+            53.4626
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 42489707.5,
+          "p95_ns": 43728250.2,
+          "p99_ns": 45474881.3,
+          "mean_ns": 42667166.7,
+          "min_ns": 40989547.0,
+          "max_ns": 49608793.0,
+          "ci_95_low_ns": 42473156.5,
+          "ci_95_high_ns": 42553888.0,
+          "median_ms": 42.4897,
+          "p95_ms": 43.7283,
+          "p99_ms": 45.4749,
+          "ci_95_ms": [
+            42.4732,
+            42.5539
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W2",
+      "config": "100ms",
+      "params": {
+        "target_ms": 100
+      },
+      "warmup_count": 10,
+      "repeats": 1000,
+      "wall_time_s": 398.16,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 101311546.5,
+          "p95_ns": 101444866.2,
+          "p99_ns": 101556256.4,
+          "mean_ns": 101314929.5,
+          "min_ns": 101107022.0,
+          "max_ns": 102051146.0,
+          "ci_95_low_ns": 101307802.0,
+          "ci_95_high_ns": 101314996.0,
+          "median_ms": 101.3115,
+          "p95_ms": 101.4449,
+          "p99_ms": 101.5563,
+          "ci_95_ms": [
+            101.3078,
+            101.315
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 12733530.0,
+          "p95_ns": 13409409.1,
+          "p99_ns": 13881884.9,
+          "mean_ns": 12812973.2,
+          "min_ns": 12097779.0,
+          "max_ns": 16183909.0,
+          "ci_95_low_ns": 12722000.0,
+          "ci_95_high_ns": 12753051.0,
+          "median_ms": 12.7335,
+          "p95_ms": 13.4094,
+          "p99_ms": 13.8819,
+          "ci_95_ms": [
+            12.722,
+            12.7531
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 104676462.5,
+          "p95_ns": 112676158.2,
+          "p99_ns": 120216899.5,
+          "mean_ns": 106331035.1,
+          "min_ns": 102147259.0,
+          "max_ns": 127381363.0,
+          "ci_95_low_ns": 104626242.0,
+          "ci_95_high_ns": 104733979.0,
+          "median_ms": 104.6765,
+          "p95_ms": 112.6762,
+          "p99_ms": 120.2169,
+          "ci_95_ms": [
+            104.6262,
+            104.734
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 28167015.5,
+          "p95_ns": 37030066.0,
+          "p99_ns": 41994859.0,
+          "mean_ns": 29305266.9,
+          "min_ns": 26802829.0,
+          "max_ns": 48869905.0,
+          "ci_95_low_ns": 28120707.0,
+          "ci_95_high_ns": 28210349.0,
+          "median_ms": 28.167,
+          "p95_ms": 37.0301,
+          "p99_ms": 41.9949,
+          "ci_95_ms": [
+            28.1207,
+            28.2103
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 18005122.0,
+          "p95_ns": 28673924.7,
+          "p99_ns": 35959112.9,
+          "mean_ns": 20415653.4,
+          "min_ns": 17065529.0,
+          "max_ns": 37951047.0,
+          "ci_95_low_ns": 17936540.0,
+          "ci_95_high_ns": 18070724.3,
+          "median_ms": 18.0051,
+          "p95_ms": 28.6739,
+          "p99_ms": 35.9591,
+          "ci_95_ms": [
+            17.9365,
+            18.0707
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 145790698.5,
+          "p95_ns": 160672890.9,
+          "p99_ns": 168023928.4,
+          "mean_ns": 148449275.2,
+          "min_ns": 142698823.0,
+          "max_ns": 182050172.0,
+          "ci_95_low_ns": 145649722.0,
+          "ci_95_high_ns": 145967561.0,
+          "median_ms": 145.7907,
+          "p95_ms": 160.6729,
+          "p99_ms": 168.0239,
+          "ci_95_ms": [
+            145.6497,
+            145.9676
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 142621461.0,
+          "p95_ns": 156604661.1,
+          "p99_ns": 161830769.2,
+          "mean_ns": 143289792.0,
+          "min_ns": 131862360.0,
+          "max_ns": 164454374.0,
+          "ci_95_low_ns": 142469017.5,
+          "ci_95_high_ns": 142715489.0,
+          "median_ms": 142.6215,
+          "p95_ms": 156.6047,
+          "p99_ms": 161.8308,
+          "ci_95_ms": [
+            142.469,
+            142.7155
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W2",
+      "config": "1000ms",
+      "params": {
+        "target_ms": 1000
+      },
+      "warmup_count": 10,
+      "repeats": 1000,
+      "wall_time_s": 3145.15,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 1001553575.0,
+          "p95_ns": 1001641570.2,
+          "p99_ns": 1001984317.8,
+          "mean_ns": 1001550538.8,
+          "min_ns": 1001160541.0,
+          "max_ns": 1003904670.0,
+          "ci_95_low_ns": 1001549274.3,
+          "ci_95_high_ns": 1001557004.0,
+          "median_ms": 1001.5536,
+          "p95_ms": 1001.6416,
+          "p99_ms": 1001.9843,
+          "ci_95_ms": [
+            1001.5493,
+            1001.557
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 12760938.0,
+          "p95_ns": 13405822.3,
+          "p99_ns": 13691486.3,
+          "mean_ns": 12830480.8,
+          "min_ns": 12085990.0,
+          "max_ns": 16549080.0,
+          "ci_95_low_ns": 12747996.4,
+          "ci_95_high_ns": 12776474.0,
+          "median_ms": 12.7609,
+          "p95_ms": 13.4058,
+          "p99_ms": 13.6915,
+          "ci_95_ms": [
+            12.748,
+            12.7765
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 1012108179.5,
+          "p95_ns": 1022984501.4,
+          "p99_ns": 1026678636.8,
+          "mean_ns": 1012867602.6,
+          "min_ns": 1002279798.0,
+          "max_ns": 1031346730.0,
+          "ci_95_low_ns": 1012055452.3,
+          "ci_95_high_ns": 1012166028.0,
+          "median_ms": 1012.1082,
+          "p95_ms": 1022.9845,
+          "p99_ms": 1026.6786,
+          "ci_95_ms": [
+            1012.0555,
+            1012.166
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 29397939.0,
+          "p95_ns": 57518595.0,
+          "p99_ns": 61762491.1,
+          "mean_ns": 36598767.7,
+          "min_ns": 27107572.0,
+          "max_ns": 74493614.0,
+          "ci_95_low_ns": 29051333.0,
+          "ci_95_high_ns": 31529986.5,
+          "median_ms": 29.3979,
+          "p95_ms": 57.5186,
+          "p99_ms": 61.7625,
+          "ci_95_ms": [
+            29.0513,
+            31.53
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 19091552.0,
+          "p95_ns": 38859852.9,
+          "p99_ns": 43652158.5,
+          "mean_ns": 23445273.8,
+          "min_ns": 17223305.0,
+          "max_ns": 46866970.0,
+          "ci_95_low_ns": 18630854.0,
+          "ci_95_high_ns": 19923954.2,
+          "median_ms": 19.0916,
+          "p95_ms": 38.8599,
+          "p99_ms": 43.6522,
+          "ci_95_ms": [
+            18.6309,
+            19.924
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 1055792406.5,
+          "p95_ns": 1083318664.4,
+          "p99_ns": 1087509059.3,
+          "mean_ns": 1062296851.1,
+          "min_ns": 1043430952.0,
+          "max_ns": 1098855641.0,
+          "ci_95_low_ns": 1054056888.0,
+          "ci_95_high_ns": 1058323769.9,
+          "median_ms": 1055.7924,
+          "p95_ms": 1083.3187,
+          "p99_ms": 1087.5091,
+          "ci_95_ms": [
+            1054.0569,
+            1058.3238
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 1000,
+          "excluded": 0,
+          "median_ns": 1046708826.5,
+          "p95_ns": 1064011033.0,
+          "p99_ns": 1069590112.0,
+          "mean_ns": 1049013789.2,
+          "min_ns": 1032518936.0,
+          "max_ns": 1076906947.0,
+          "ci_95_low_ns": 1045086666.7,
+          "ci_95_high_ns": 1048478640.5,
+          "median_ms": 1046.7088,
+          "p95_ms": 1064.011,
+          "p99_ms": 1069.5901,
+          "ci_95_ms": [
+            1045.0867,
+            1048.4786
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W3a",
+      "config": "read_4KiB",
+      "params": {
+        "file_size": 4096,
+        "variant": "single_read"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 17.35,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 994203.0,
+          "p95_ns": 1149868.7,
+          "p99_ns": 1227330.7,
+          "mean_ns": 1022293.1,
+          "min_ns": 950518.0,
+          "max_ns": 1311450.0,
+          "ci_95_low_ns": 989000.0,
+          "ci_95_high_ns": 1004435.0,
+          "median_ms": 0.9942,
+          "p95_ms": 1.1499,
+          "p99_ms": 1.2273,
+          "ci_95_ms": [
+            0.989,
+            1.0044
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12579105.0,
+          "p95_ns": 13259228.8,
+          "p99_ns": 13466715.8,
+          "mean_ns": 12649088.6,
+          "min_ns": 12160067.0,
+          "max_ns": 13744869.0,
+          "ci_95_low_ns": 12529065.5,
+          "ci_95_high_ns": 12615492.0,
+          "median_ms": 12.5791,
+          "p95_ms": 13.2592,
+          "p99_ms": 13.4667,
+          "ci_95_ms": [
+            12.5291,
+            12.6155
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 3339244.5,
+          "p95_ns": 3575257.2,
+          "p99_ns": 6011171.1,
+          "mean_ns": 3477505.6,
+          "min_ns": 2230191.0,
+          "max_ns": 25455309.0,
+          "ci_95_low_ns": 3316966.0,
+          "ci_95_high_ns": 3365435.0,
+          "median_ms": 3.3392,
+          "p95_ms": 3.5753,
+          "p99_ms": 6.0112,
+          "ci_95_ms": [
+            3.317,
+            3.3654
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 27322333.5,
+          "p95_ns": 28445903.0,
+          "p99_ns": 31654770.0,
+          "mean_ns": 27536549.1,
+          "min_ns": 26548440.0,
+          "max_ns": 39211632.0,
+          "ci_95_low_ns": 27239957.0,
+          "ci_95_high_ns": 27394268.0,
+          "median_ms": 27.3223,
+          "p95_ms": 28.4459,
+          "p99_ms": 31.6548,
+          "ci_95_ms": [
+            27.24,
+            27.3943
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 16932038.0,
+          "p95_ns": 17697593.2,
+          "p99_ns": 18384011.6,
+          "mean_ns": 17022539.1,
+          "min_ns": 16511568.0,
+          "max_ns": 19146410.0,
+          "ci_95_low_ns": 16907978.0,
+          "ci_95_high_ns": 16999189.0,
+          "median_ms": 16.932,
+          "p95_ms": 17.6976,
+          "p99_ms": 18.384,
+          "ci_95_ms": [
+            16.908,
+            16.9992
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 43264499.0,
+          "p95_ns": 44965205.7,
+          "p99_ns": 51084528.4,
+          "mean_ns": 43663143.3,
+          "min_ns": 42272287.0,
+          "max_ns": 65346342.0,
+          "ci_95_low_ns": 43168330.0,
+          "ci_95_high_ns": 43456871.5,
+          "median_ms": 43.2645,
+          "p95_ms": 44.9652,
+          "p99_ms": 51.0845,
+          "ci_95_ms": [
+            43.1683,
+            43.4569
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 32647714.0,
+          "p95_ns": 33521339.7,
+          "p99_ns": 35132594.4,
+          "mean_ns": 32736378.5,
+          "min_ns": 31847666.0,
+          "max_ns": 36837711.0,
+          "ci_95_low_ns": 32572601.0,
+          "ci_95_high_ns": 32726598.0,
+          "median_ms": 32.6477,
+          "p95_ms": 33.5213,
+          "p99_ms": 35.1326,
+          "ci_95_ms": [
+            32.5726,
+            32.7266
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W3a",
+      "config": "read_1MiB",
+      "params": {
+        "file_size": 1048576,
+        "variant": "single_read"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 17.97,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1792994.0,
+          "p95_ns": 1931458.4,
+          "p99_ns": 2044714.9,
+          "mean_ns": 1803972.4,
+          "min_ns": 1696685.0,
+          "max_ns": 2527219.0,
+          "ci_95_low_ns": 1780318.0,
+          "ci_95_high_ns": 1809337.0,
+          "median_ms": 1.793,
+          "p95_ms": 1.9315,
+          "p99_ms": 2.0447,
+          "ci_95_ms": [
+            1.7803,
+            1.8093
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12697379.0,
+          "p95_ns": 13335521.2,
+          "p99_ns": 13781350.8,
+          "mean_ns": 12766334.0,
+          "min_ns": 12235284.0,
+          "max_ns": 15381353.0,
+          "ci_95_low_ns": 12666021.0,
+          "ci_95_high_ns": 12733241.0,
+          "median_ms": 12.6974,
+          "p95_ms": 13.3355,
+          "p99_ms": 13.7814,
+          "ci_95_ms": [
+            12.666,
+            12.7332
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 4341758.5,
+          "p95_ns": 4524267.0,
+          "p99_ns": 4718086.3,
+          "mean_ns": 4363098.9,
+          "min_ns": 3769667.0,
+          "max_ns": 8245134.0,
+          "ci_95_low_ns": 4309003.5,
+          "ci_95_high_ns": 4370148.5,
+          "median_ms": 4.3418,
+          "p95_ms": 4.5243,
+          "p99_ms": 4.7181,
+          "ci_95_ms": [
+            4.309,
+            4.3701
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 27385503.0,
+          "p95_ns": 28596481.6,
+          "p99_ns": 31190991.7,
+          "mean_ns": 27596694.7,
+          "min_ns": 26574978.0,
+          "max_ns": 35139629.0,
+          "ci_95_low_ns": 27299705.0,
+          "ci_95_high_ns": 27466971.0,
+          "median_ms": 27.3855,
+          "p95_ms": 28.5965,
+          "p99_ms": 31.191,
+          "ci_95_ms": [
+            27.2997,
+            27.467
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17032013.5,
+          "p95_ns": 17925553.0,
+          "p99_ns": 19477153.6,
+          "mean_ns": 17198084.6,
+          "min_ns": 16607249.0,
+          "max_ns": 19993426.0,
+          "ci_95_low_ns": 17008268.0,
+          "ci_95_high_ns": 17105380.5,
+          "median_ms": 17.032,
+          "p95_ms": 17.9256,
+          "p99_ms": 19.4772,
+          "ci_95_ms": [
+            17.0083,
+            17.1054
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 44463995.0,
+          "p95_ns": 46654405.7,
+          "p99_ns": 49086819.2,
+          "mean_ns": 44726127.6,
+          "min_ns": 43356617.0,
+          "max_ns": 52353156.0,
+          "ci_95_low_ns": 44375020.5,
+          "ci_95_high_ns": 44558872.5,
+          "median_ms": 44.464,
+          "p95_ms": 46.6544,
+          "p99_ms": 49.0868,
+          "ci_95_ms": [
+            44.375,
+            44.5589
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 33757537.0,
+          "p95_ns": 34854115.9,
+          "p99_ns": 35742004.2,
+          "mean_ns": 33910336.8,
+          "min_ns": 33050654.0,
+          "max_ns": 36853845.0,
+          "ci_95_low_ns": 33706867.0,
+          "ci_95_high_ns": 33842811.0,
+          "median_ms": 33.7575,
+          "p95_ms": 34.8541,
+          "p99_ms": 35.742,
+          "ci_95_ms": [
+            33.7069,
+            33.8428
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W3a",
+      "config": "read_64MiB",
+      "params": {
+        "file_size": 67108864,
+        "variant": "single_read"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 31.39,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 22357499.5,
+          "p95_ns": 22670541.9,
+          "p99_ns": 22930748.0,
+          "mean_ns": 22434359.8,
+          "min_ns": 22012421.0,
+          "max_ns": 31575360.0,
+          "ci_95_low_ns": 22336268.0,
+          "ci_95_high_ns": 22403314.0,
+          "median_ms": 22.3575,
+          "p95_ms": 22.6705,
+          "p99_ms": 22.9307,
+          "ci_95_ms": [
+            22.3363,
+            22.4033
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12779476.0,
+          "p95_ns": 13490904.4,
+          "p99_ns": 13857351.3,
+          "mean_ns": 12820136.1,
+          "min_ns": 12285709.0,
+          "max_ns": 13941607.0,
+          "ci_95_low_ns": 12733800.0,
+          "ci_95_high_ns": 12806887.5,
+          "median_ms": 12.7795,
+          "p95_ms": 13.4909,
+          "p99_ms": 13.8574,
+          "ci_95_ms": [
+            12.7338,
+            12.8069
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 25306131.0,
+          "p95_ns": 25634262.6,
+          "p99_ns": 30527725.8,
+          "mean_ns": 25430727.2,
+          "min_ns": 24102094.0,
+          "max_ns": 33006376.0,
+          "ci_95_low_ns": 25284271.0,
+          "ci_95_high_ns": 25325476.0,
+          "median_ms": 25.3061,
+          "p95_ms": 25.6343,
+          "p99_ms": 30.5277,
+          "ci_95_ms": [
+            25.2843,
+            25.3255
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 27691365.5,
+          "p95_ns": 28907684.0,
+          "p99_ns": 31961604.5,
+          "mean_ns": 27958759.4,
+          "min_ns": 26830033.0,
+          "max_ns": 42823391.0,
+          "ci_95_low_ns": 27588073.0,
+          "ci_95_high_ns": 27773157.6,
+          "median_ms": 27.6914,
+          "p95_ms": 28.9077,
+          "p99_ms": 31.9616,
+          "ci_95_ms": [
+            27.5881,
+            27.7732
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17556091.0,
+          "p95_ns": 18359400.6,
+          "p99_ns": 18766830.2,
+          "mean_ns": 17612921.2,
+          "min_ns": 16962942.0,
+          "max_ns": 18956306.0,
+          "ci_95_low_ns": 17481712.0,
+          "ci_95_high_ns": 17577462.0,
+          "median_ms": 17.5561,
+          "p95_ms": 18.3594,
+          "p99_ms": 18.7668,
+          "ci_95_ms": [
+            17.4817,
+            17.5775
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 65772852.5,
+          "p95_ns": 69223106.1,
+          "p99_ns": 74496292.9,
+          "mean_ns": 66209622.7,
+          "min_ns": 64641378.0,
+          "max_ns": 81161328.0,
+          "ci_95_low_ns": 65658734.0,
+          "ci_95_high_ns": 65942711.1,
+          "median_ms": 65.7729,
+          "p95_ms": 69.2231,
+          "p99_ms": 74.4963,
+          "ci_95_ms": [
+            65.6587,
+            65.9427
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 55348091.0,
+          "p95_ns": 56531214.5,
+          "p99_ns": 57171302.3,
+          "mean_ns": 55485588.6,
+          "min_ns": 53825516.0,
+          "max_ns": 62844335.0,
+          "ci_95_low_ns": 55252690.0,
+          "ci_95_high_ns": 55468006.0,
+          "median_ms": 55.3481,
+          "p95_ms": 56.5312,
+          "p99_ms": 57.1713,
+          "ci_95_ms": [
+            55.2527,
+            55.468
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W3b",
+      "config": "repeat_read_1MiB_x100",
+      "params": {
+        "file_size": 1048576,
+        "repeat_count": 100,
+        "variant": "repeated_read"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 41.49,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 34672681.0,
+          "p95_ns": 35161642.2,
+          "p99_ns": 35596425.6,
+          "mean_ns": 34726223.9,
+          "min_ns": 33859607.0,
+          "max_ns": 45546021.0,
+          "ci_95_low_ns": 34621558.5,
+          "ci_95_high_ns": 34716575.5,
+          "median_ms": 34.6727,
+          "p95_ms": 35.1616,
+          "p99_ms": 35.5964,
+          "ci_95_ms": [
+            34.6216,
+            34.7166
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12724895.5,
+          "p95_ns": 13230468.2,
+          "p99_ns": 13602750.5,
+          "mean_ns": 12765862.9,
+          "min_ns": 12313854.0,
+          "max_ns": 13749339.0,
+          "ci_95_low_ns": 12680233.0,
+          "ci_95_high_ns": 12742740.0,
+          "median_ms": 12.7249,
+          "p95_ms": 13.2305,
+          "p99_ms": 13.6028,
+          "ci_95_ms": [
+            12.6802,
+            12.7427
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 43423523.5,
+          "p95_ns": 44405926.9,
+          "p99_ns": 46150011.4,
+          "mean_ns": 43357958.8,
+          "min_ns": 41450343.0,
+          "max_ns": 52157884.0,
+          "ci_95_low_ns": 43404387.0,
+          "ci_95_high_ns": 43447723.0,
+          "median_ms": 43.4235,
+          "p95_ms": 44.4059,
+          "p99_ms": 46.15,
+          "ci_95_ms": [
+            43.4044,
+            43.4477
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 27432296.0,
+          "p95_ns": 29511098.7,
+          "p99_ns": 37199254.7,
+          "mean_ns": 27835402.9,
+          "min_ns": 26847493.0,
+          "max_ns": 39423176.0,
+          "ci_95_low_ns": 27353761.0,
+          "ci_95_high_ns": 27533563.5,
+          "median_ms": 27.4323,
+          "p95_ms": 29.5111,
+          "p99_ms": 37.1993,
+          "ci_95_ms": [
+            27.3538,
+            27.5336
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17541494.5,
+          "p95_ns": 18191952.9,
+          "p99_ns": 18490847.9,
+          "mean_ns": 17602060.1,
+          "min_ns": 17111421.0,
+          "max_ns": 19580953.0,
+          "ci_95_low_ns": 17481921.0,
+          "ci_95_high_ns": 17569395.5,
+          "median_ms": 17.5415,
+          "p95_ms": 18.192,
+          "p99_ms": 18.4908,
+          "ci_95_ms": [
+            17.4819,
+            17.5694
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 83637739.0,
+          "p95_ns": 86819432.5,
+          "p99_ns": 93195049.9,
+          "mean_ns": 83959224.7,
+          "min_ns": 81927959.0,
+          "max_ns": 95439982.0,
+          "ci_95_low_ns": 83468831.5,
+          "ci_95_high_ns": 83735968.0,
+          "median_ms": 83.6377,
+          "p95_ms": 86.8194,
+          "p99_ms": 93.195,
+          "ci_95_ms": [
+            83.4688,
+            83.736
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 73452738.5,
+          "p95_ns": 74692340.9,
+          "p99_ns": 79345942.2,
+          "mean_ns": 73685011.2,
+          "min_ns": 71824880.0,
+          "max_ns": 87060616.0,
+          "ci_95_low_ns": 73347001.0,
+          "ci_95_high_ns": 73575830.0,
+          "median_ms": 73.4527,
+          "p95_ms": 74.6923,
+          "p99_ms": 79.3459,
+          "ci_95_ms": [
+            73.347,
+            73.5758
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W4",
+      "config": "new_4KiB",
+      "params": {
+        "file_size": 4096
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 18.42,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1596081.0,
+          "p95_ns": 1739409.8,
+          "p99_ns": 1787499.6,
+          "mean_ns": 1610437.1,
+          "min_ns": 1508817.0,
+          "max_ns": 2244577.0,
+          "ci_95_low_ns": 1581345.0,
+          "ci_95_high_ns": 1606592.0,
+          "median_ms": 1.5961,
+          "p95_ms": 1.7394,
+          "p99_ms": 1.7875,
+          "ci_95_ms": [
+            1.5813,
+            1.6066
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12618983.0,
+          "p95_ns": 13334275.4,
+          "p99_ns": 13521341.3,
+          "mean_ns": 12685578.3,
+          "min_ns": 12178016.0,
+          "max_ns": 14040640.0,
+          "ci_95_low_ns": 12593003.5,
+          "ci_95_high_ns": 12643532.5,
+          "median_ms": 12.619,
+          "p95_ms": 13.3343,
+          "p99_ms": 13.5213,
+          "ci_95_ms": [
+            12.593,
+            12.6435
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 4289763.0,
+          "p95_ns": 4548420.9,
+          "p99_ns": 7063508.3,
+          "mean_ns": 4344915.1,
+          "min_ns": 3926876.0,
+          "max_ns": 8135904.0,
+          "ci_95_low_ns": 4268427.5,
+          "ci_95_high_ns": 4312531.9,
+          "median_ms": 4.2898,
+          "p95_ms": 4.5484,
+          "p99_ms": 7.0635,
+          "ci_95_ms": [
+            4.2684,
+            4.3125
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 29539498.5,
+          "p95_ns": 30719193.0,
+          "p99_ns": 33441042.3,
+          "mean_ns": 29682997.9,
+          "min_ns": 28497595.0,
+          "max_ns": 33778104.0,
+          "ci_95_low_ns": 29453980.0,
+          "ci_95_high_ns": 29628614.0,
+          "median_ms": 29.5395,
+          "p95_ms": 30.7192,
+          "p99_ms": 33.441,
+          "ci_95_ms": [
+            29.454,
+            29.6286
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17319474.0,
+          "p95_ns": 18003082.2,
+          "p99_ns": 19855093.0,
+          "mean_ns": 17435387.0,
+          "min_ns": 16875433.0,
+          "max_ns": 22582104.0,
+          "ci_95_low_ns": 17251310.5,
+          "ci_95_high_ns": 17365935.8,
+          "median_ms": 17.3195,
+          "p95_ms": 18.0031,
+          "p99_ms": 19.8551,
+          "ci_95_ms": [
+            17.2513,
+            17.3659
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 46529679.5,
+          "p95_ns": 48184479.3,
+          "p99_ns": 50637557.9,
+          "mean_ns": 46713491.3,
+          "min_ns": 45319740.0,
+          "max_ns": 53436787.0,
+          "ci_95_low_ns": 46412417.5,
+          "ci_95_high_ns": 46708659.0,
+          "median_ms": 46.5297,
+          "p95_ms": 48.1845,
+          "p99_ms": 50.6376,
+          "ci_95_ms": [
+            46.4124,
+            46.7087
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 34024673.0,
+          "p95_ns": 35366081.6,
+          "p99_ns": 37380813.9,
+          "mean_ns": 34169843.7,
+          "min_ns": 33240687.0,
+          "max_ns": 39545326.0,
+          "ci_95_low_ns": 33914082.0,
+          "ci_95_high_ns": 34101077.5,
+          "median_ms": 34.0247,
+          "p95_ms": 35.3661,
+          "p99_ms": 37.3808,
+          "ci_95_ms": [
+            33.9141,
+            34.1011
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W4",
+      "config": "new_1MiB",
+      "params": {
+        "file_size": 1048576
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 19.02,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 2229597.5,
+          "p95_ns": 2448174.8,
+          "p99_ns": 2525465.9,
+          "mean_ns": 2257006.7,
+          "min_ns": 2104828.0,
+          "max_ns": 2577154.0,
+          "ci_95_low_ns": 2221844.5,
+          "ci_95_high_ns": 2243425.0,
+          "median_ms": 2.2296,
+          "p95_ms": 2.4482,
+          "p99_ms": 2.5255,
+          "ci_95_ms": [
+            2.2218,
+            2.2434
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12645733.0,
+          "p95_ns": 13233601.3,
+          "p99_ns": 13469482.2,
+          "mean_ns": 12707591.5,
+          "min_ns": 12194707.0,
+          "max_ns": 13685296.0,
+          "ci_95_low_ns": 12601768.5,
+          "ci_95_high_ns": 12694190.5,
+          "median_ms": 12.6457,
+          "p95_ms": 13.2336,
+          "p99_ms": 13.4695,
+          "ci_95_ms": [
+            12.6018,
+            12.6942
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 4826272.0,
+          "p95_ns": 5079038.8,
+          "p99_ns": 5879315.3,
+          "mean_ns": 4872514.2,
+          "min_ns": 4508292.0,
+          "max_ns": 8476722.0,
+          "ci_95_low_ns": 4786952.0,
+          "ci_95_high_ns": 4852671.0,
+          "median_ms": 4.8263,
+          "p95_ms": 5.079,
+          "p99_ms": 5.8793,
+          "ci_95_ms": [
+            4.787,
+            4.8527
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 30148430.5,
+          "p95_ns": 31530191.6,
+          "p99_ns": 33846829.2,
+          "mean_ns": 30346381.6,
+          "min_ns": 29512017.0,
+          "max_ns": 38919982.0,
+          "ci_95_low_ns": 30047058.0,
+          "ci_95_high_ns": 30228293.0,
+          "median_ms": 30.1484,
+          "p95_ms": 31.5302,
+          "p99_ms": 33.8468,
+          "ci_95_ms": [
+            30.0471,
+            30.2283
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17405446.5,
+          "p95_ns": 18153911.8,
+          "p99_ns": 18379447.7,
+          "mean_ns": 17487232.1,
+          "min_ns": 16986827.0,
+          "max_ns": 18732401.0,
+          "ci_95_low_ns": 17394795.5,
+          "ci_95_high_ns": 17474798.0,
+          "median_ms": 17.4054,
+          "p95_ms": 18.1539,
+          "p99_ms": 18.3794,
+          "ci_95_ms": [
+            17.3948,
+            17.4748
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 47717930.0,
+          "p95_ns": 50086246.7,
+          "p99_ns": 51452712.1,
+          "mean_ns": 47926487.3,
+          "min_ns": 46553601.0,
+          "max_ns": 55931603.0,
+          "ci_95_low_ns": 47613066.0,
+          "ci_95_high_ns": 47836344.0,
+          "median_ms": 47.7179,
+          "p95_ms": 50.0862,
+          "p99_ms": 51.4527,
+          "ci_95_ms": [
+            47.6131,
+            47.8363
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 34594425.0,
+          "p95_ns": 35474505.9,
+          "p99_ns": 35959319.3,
+          "mean_ns": 34678964.9,
+          "min_ns": 33955427.0,
+          "max_ns": 37440497.0,
+          "ci_95_low_ns": 34536843.0,
+          "ci_95_high_ns": 34665103.5,
+          "median_ms": 34.5944,
+          "p95_ms": 35.4745,
+          "p99_ms": 35.9593,
+          "ci_95_ms": [
+            34.5368,
+            34.6651
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W4",
+      "config": "new_16MiB",
+      "params": {
+        "file_size": 16777216
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 28.3,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 10935638.0,
+          "p95_ns": 11147315.0,
+          "p99_ns": 11631279.9,
+          "mean_ns": 10974704.7,
+          "min_ns": 10742950.0,
+          "max_ns": 14209932.0,
+          "ci_95_low_ns": 10918318.0,
+          "ci_95_high_ns": 10949257.0,
+          "median_ms": 10.9356,
+          "p95_ms": 11.1473,
+          "p99_ms": 11.6313,
+          "ci_95_ms": [
+            10.9183,
+            10.9493
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12826652.0,
+          "p95_ns": 13452576.9,
+          "p99_ns": 13720817.8,
+          "mean_ns": 12893136.7,
+          "min_ns": 12403179.0,
+          "max_ns": 13808074.0,
+          "ci_95_low_ns": 12806712.5,
+          "ci_95_high_ns": 12850572.0,
+          "median_ms": 12.8267,
+          "p95_ms": 13.4526,
+          "p99_ms": 13.7208,
+          "ci_95_ms": [
+            12.8067,
+            12.8506
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 14553508.0,
+          "p95_ns": 15290030.2,
+          "p99_ns": 15629063.8,
+          "mean_ns": 14641164.7,
+          "min_ns": 13820227.0,
+          "max_ns": 19976106.0,
+          "ci_95_low_ns": 14478955.0,
+          "ci_95_high_ns": 14615176.5,
+          "median_ms": 14.5535,
+          "p95_ms": 15.29,
+          "p99_ms": 15.6291,
+          "ci_95_ms": [
+            14.479,
+            14.6152
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 36786553.5,
+          "p95_ns": 40022557.9,
+          "p99_ns": 42877023.7,
+          "mean_ns": 37235883.8,
+          "min_ns": 35594634.0,
+          "max_ns": 50249655.0,
+          "ci_95_low_ns": 36693981.0,
+          "ci_95_high_ns": 36973953.1,
+          "median_ms": 36.7866,
+          "p95_ms": 40.0226,
+          "p99_ms": 42.877,
+          "ci_95_ms": [
+            36.694,
+            36.974
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 20973416.0,
+          "p95_ns": 21630792.6,
+          "p99_ns": 22057284.8,
+          "mean_ns": 21049794.0,
+          "min_ns": 20266080.0,
+          "max_ns": 25022722.0,
+          "ci_95_low_ns": 20916148.5,
+          "ci_95_high_ns": 21044723.0,
+          "median_ms": 20.9734,
+          "p95_ms": 21.6308,
+          "p99_ms": 22.0573,
+          "ci_95_ms": [
+            20.9161,
+            21.0447
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 64369318.5,
+          "p95_ns": 67620691.1,
+          "p99_ns": 70403739.0,
+          "mean_ns": 64770185.1,
+          "min_ns": 62480470.0,
+          "max_ns": 77669624.0,
+          "ci_95_low_ns": 64163676.0,
+          "ci_95_high_ns": 64579641.0,
+          "median_ms": 64.3693,
+          "p95_ms": 67.6207,
+          "p99_ms": 70.4037,
+          "ci_95_ms": [
+            64.1637,
+            64.5796
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 47853279.5,
+          "p95_ns": 48874091.7,
+          "p99_ns": 51943999.1,
+          "mean_ns": 47959498.4,
+          "min_ns": 46444438.0,
+          "max_ns": 52392895.0,
+          "ci_95_low_ns": 47747473.0,
+          "ci_95_high_ns": 47951763.2,
+          "median_ms": 47.8533,
+          "p95_ms": 48.8741,
+          "p99_ms": 51.944,
+          "ci_95_ms": [
+            47.7475,
+            47.9518
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W5",
+      "config": "overwrite4K_orig4KiB",
+      "params": {
+        "orig_size": 4096,
+        "write_size": 4096,
+        "offset": 0
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 18.38,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1003806.0,
+          "p95_ns": 1185570.3,
+          "p99_ns": 1246112.7,
+          "mean_ns": 1043122.1,
+          "min_ns": 953033.0,
+          "max_ns": 1325418.0,
+          "ci_95_low_ns": 997799.0,
+          "ci_95_high_ns": 1031190.0,
+          "median_ms": 1.0038,
+          "p95_ms": 1.1856,
+          "p99_ms": 1.2461,
+          "ci_95_ms": [
+            0.9978,
+            1.0312
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12626177.5,
+          "p95_ns": 13367748.6,
+          "p99_ns": 13617904.8,
+          "mean_ns": 12714346.3,
+          "min_ns": 12187515.0,
+          "max_ns": 14147565.0,
+          "ci_95_low_ns": 12593038.5,
+          "ci_95_high_ns": 12666271.1,
+          "median_ms": 12.6262,
+          "p95_ms": 13.3677,
+          "p99_ms": 13.6179,
+          "ci_95_ms": [
+            12.593,
+            12.6663
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 4158603.5,
+          "p95_ns": 4847370.8,
+          "p99_ns": 5063545.4,
+          "mean_ns": 4248292.3,
+          "min_ns": 3762823.0,
+          "max_ns": 7526343.0,
+          "ci_95_low_ns": 4142331.0,
+          "ci_95_high_ns": 4176623.0,
+          "median_ms": 4.1586,
+          "p95_ms": 4.8474,
+          "p99_ms": 5.0635,
+          "ci_95_ms": [
+            4.1423,
+            4.1766
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 29698628.5,
+          "p95_ns": 31699448.1,
+          "p99_ns": 33399367.9,
+          "mean_ns": 29848657.9,
+          "min_ns": 28767526.0,
+          "max_ns": 34998483.0,
+          "ci_95_low_ns": 29605811.5,
+          "ci_95_high_ns": 29773112.5,
+          "median_ms": 29.6986,
+          "p95_ms": 31.6994,
+          "p99_ms": 33.3994,
+          "ci_95_ms": [
+            29.6058,
+            29.7731
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17252673.0,
+          "p95_ns": 18181041.4,
+          "p99_ns": 18964993.6,
+          "mean_ns": 17385912.8,
+          "min_ns": 16820888.0,
+          "max_ns": 21157025.0,
+          "ci_95_low_ns": 17208149.0,
+          "ci_95_high_ns": 17323525.0,
+          "median_ms": 17.2527,
+          "p95_ms": 18.181,
+          "p99_ms": 18.965,
+          "ci_95_ms": [
+            17.2081,
+            17.3235
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 46718699.5,
+          "p95_ns": 49139975.2,
+          "p99_ns": 50788821.9,
+          "mean_ns": 46811296.6,
+          "min_ns": 45243616.0,
+          "max_ns": 52147478.0,
+          "ci_95_low_ns": 46521646.5,
+          "ci_95_high_ns": 46756029.5,
+          "median_ms": 46.7187,
+          "p95_ms": 49.14,
+          "p99_ms": 50.7888,
+          "ci_95_ms": [
+            46.5216,
+            46.756
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 34036790.0,
+          "p95_ns": 35513591.8,
+          "p99_ns": 37322759.4,
+          "mean_ns": 34229921.0,
+          "min_ns": 33137815.0,
+          "max_ns": 38257062.0,
+          "ci_95_low_ns": 33928470.0,
+          "ci_95_high_ns": 34144239.5,
+          "median_ms": 34.0368,
+          "p95_ms": 35.5136,
+          "p99_ms": 37.3228,
+          "ci_95_ms": [
+            33.9285,
+            34.1442
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W5",
+      "config": "overwrite4K_orig1MiB",
+      "params": {
+        "orig_size": 1048576,
+        "write_size": 4096,
+        "offset": 0
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 20.4,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1200579.0,
+          "p95_ns": 1298163.0,
+          "p99_ns": 1347585.4,
+          "mean_ns": 1215957.2,
+          "min_ns": 1154730.0,
+          "max_ns": 2299821.0,
+          "ci_95_low_ns": 1196563.0,
+          "ci_95_high_ns": 1203337.5,
+          "median_ms": 1.2006,
+          "p95_ms": 1.2982,
+          "p99_ms": 1.3476,
+          "ci_95_ms": [
+            1.1966,
+            1.2033
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12811043.5,
+          "p95_ns": 13518179.7,
+          "p99_ns": 13697511.9,
+          "mean_ns": 12883528.1,
+          "min_ns": 12422175.0,
+          "max_ns": 13822391.0,
+          "ci_95_low_ns": 12760829.0,
+          "ci_95_high_ns": 12848791.5,
+          "median_ms": 12.811,
+          "p95_ms": 13.5182,
+          "p99_ms": 13.6975,
+          "ci_95_ms": [
+            12.7608,
+            12.8488
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 5550055.5,
+          "p95_ns": 6359658.0,
+          "p99_ns": 8704242.2,
+          "mean_ns": 5699502.2,
+          "min_ns": 5161641.0,
+          "max_ns": 9374721.0,
+          "ci_95_low_ns": 5518522.0,
+          "ci_95_high_ns": 5582495.0,
+          "median_ms": 5.5501,
+          "p95_ms": 6.3597,
+          "p99_ms": 8.7042,
+          "ci_95_ms": [
+            5.5185,
+            5.5825
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 29812257.5,
+          "p95_ns": 30914722.1,
+          "p99_ns": 33461127.0,
+          "mean_ns": 29936995.0,
+          "min_ns": 28385363.0,
+          "max_ns": 34234716.0,
+          "ci_95_low_ns": 29701422.0,
+          "ci_95_high_ns": 29908032.4,
+          "median_ms": 29.8123,
+          "p95_ms": 30.9147,
+          "p99_ms": 33.4611,
+          "ci_95_ms": [
+            29.7014,
+            29.908
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17487822.5,
+          "p95_ns": 18303805.4,
+          "p99_ns": 18770563.5,
+          "mean_ns": 17574422.0,
+          "min_ns": 17036064.0,
+          "max_ns": 20408414.0,
+          "ci_95_low_ns": 17446303.0,
+          "ci_95_high_ns": 17528015.5,
+          "median_ms": 17.4878,
+          "p95_ms": 18.3038,
+          "p99_ms": 18.7706,
+          "ci_95_ms": [
+            17.4463,
+            17.528
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 48311079.0,
+          "p95_ns": 49858605.1,
+          "p99_ns": 52582692.1,
+          "mean_ns": 48520025.4,
+          "min_ns": 46808305.0,
+          "max_ns": 55120343.0,
+          "ci_95_low_ns": 48252519.0,
+          "ci_95_high_ns": 48468626.4,
+          "median_ms": 48.3111,
+          "p95_ms": 49.8586,
+          "p99_ms": 52.5827,
+          "ci_95_ms": [
+            48.2525,
+            48.4686
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 35771468.0,
+          "p95_ns": 37161963.2,
+          "p99_ns": 39167393.4,
+          "mean_ns": 35939973.1,
+          "min_ns": 34857476.0,
+          "max_ns": 39778520.0,
+          "ci_95_low_ns": 35647154.0,
+          "ci_95_high_ns": 35924697.0,
+          "median_ms": 35.7715,
+          "p95_ms": 37.162,
+          "p99_ms": 39.1674,
+          "ci_95_ms": [
+            35.6472,
+            35.9247
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W5",
+      "config": "overwrite4K_orig16MiB",
+      "params": {
+        "orig_size": 16777216,
+        "write_size": 4096,
+        "offset": 0
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 38.14,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1439779.5,
+          "p95_ns": 1611218.9,
+          "p99_ns": 1708809.4,
+          "mean_ns": 1460000.4,
+          "min_ns": 1238886.0,
+          "max_ns": 2382581.0,
+          "ci_95_low_ns": 1425358.0,
+          "ci_95_high_ns": 1451338.5,
+          "median_ms": 1.4398,
+          "p95_ms": 1.6112,
+          "p99_ms": 1.7088,
+          "ci_95_ms": [
+            1.4254,
+            1.4513
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 13223167.0,
+          "p95_ns": 13920541.2,
+          "p99_ns": 14117735.9,
+          "mean_ns": 13283772.4,
+          "min_ns": 12805176.0,
+          "max_ns": 14212935.0,
+          "ci_95_low_ns": 13168622.0,
+          "ci_95_high_ns": 13255538.0,
+          "median_ms": 13.2232,
+          "p95_ms": 13.9205,
+          "p99_ms": 14.1177,
+          "ci_95_ms": [
+            13.1686,
+            13.2555
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 22474271.5,
+          "p95_ns": 26121464.1,
+          "p99_ns": 29534429.1,
+          "mean_ns": 22958354.1,
+          "min_ns": 21200186.0,
+          "max_ns": 29949912.0,
+          "ci_95_low_ns": 22421473.0,
+          "ci_95_high_ns": 22543867.0,
+          "median_ms": 22.4743,
+          "p95_ms": 26.1215,
+          "p99_ms": 29.5344,
+          "ci_95_ms": [
+            22.4215,
+            22.5439
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 32706868.5,
+          "p95_ns": 33855874.4,
+          "p99_ns": 35881499.5,
+          "mean_ns": 32833114.5,
+          "min_ns": 31687523.0,
+          "max_ns": 36816060.0,
+          "ci_95_low_ns": 32609302.0,
+          "ci_95_high_ns": 32773146.0,
+          "median_ms": 32.7069,
+          "p95_ms": 33.8559,
+          "p99_ms": 35.8815,
+          "ci_95_ms": [
+            32.6093,
+            32.7731
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 20282492.5,
+          "p95_ns": 21240274.8,
+          "p99_ns": 21701255.8,
+          "mean_ns": 20366703.5,
+          "min_ns": 19596946.0,
+          "max_ns": 24009697.0,
+          "ci_95_low_ns": 20213456.0,
+          "ci_95_high_ns": 20334454.8,
+          "median_ms": 20.2825,
+          "p95_ms": 21.2403,
+          "p99_ms": 21.7013,
+          "ci_95_ms": [
+            20.2135,
+            20.3345
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 68538573.0,
+          "p95_ns": 72811098.9,
+          "p99_ns": 75722635.4,
+          "mean_ns": 69075241.0,
+          "min_ns": 66289455.0,
+          "max_ns": 78879107.0,
+          "ci_95_low_ns": 68393411.0,
+          "ci_95_high_ns": 68747708.0,
+          "median_ms": 68.5386,
+          "p95_ms": 72.8111,
+          "p99_ms": 75.7226,
+          "ci_95_ms": [
+            68.3934,
+            68.7477
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 56055393.0,
+          "p95_ns": 59551957.3,
+          "p99_ns": 63123063.1,
+          "mean_ns": 56451895.0,
+          "min_ns": 53674243.0,
+          "max_ns": 64554987.0,
+          "ci_95_low_ns": 55897625.5,
+          "ci_95_high_ns": 56313835.0,
+          "median_ms": 56.0554,
+          "p95_ms": 59.552,
+          "p99_ms": 63.1231,
+          "ci_95_ms": [
+            55.8976,
+            56.3138
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W6",
+      "config": "writes_x1",
+      "params": {
+        "write_count": 1,
+        "write_size": 4096,
+        "file_size": 1048576
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 20.34,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1203337.0,
+          "p95_ns": 1315577.7,
+          "p99_ns": 1434301.4,
+          "mean_ns": 1217238.3,
+          "min_ns": 1116248.0,
+          "max_ns": 1711212.0,
+          "ci_95_low_ns": 1200125.0,
+          "ci_95_high_ns": 1205538.0,
+          "median_ms": 1.2033,
+          "p95_ms": 1.3156,
+          "p99_ms": 1.4343,
+          "ci_95_ms": [
+            1.2001,
+            1.2055
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12675309.5,
+          "p95_ns": 13399704.1,
+          "p99_ns": 13738781.3,
+          "mean_ns": 12750717.5,
+          "min_ns": 12220409.0,
+          "max_ns": 13952643.0,
+          "ci_95_low_ns": 12653833.5,
+          "ci_95_high_ns": 12711940.0,
+          "median_ms": 12.6753,
+          "p95_ms": 13.3997,
+          "p99_ms": 13.7388,
+          "ci_95_ms": [
+            12.6538,
+            12.7119
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 5561090.0,
+          "p95_ns": 6292874.4,
+          "p99_ns": 8930301.3,
+          "mean_ns": 5722225.3,
+          "min_ns": 5150537.0,
+          "max_ns": 9362639.0,
+          "ci_95_low_ns": 5537519.0,
+          "ci_95_high_ns": 5580366.0,
+          "median_ms": 5.5611,
+          "p95_ms": 6.2929,
+          "p99_ms": 8.9303,
+          "ci_95_ms": [
+            5.5375,
+            5.5804
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 29687104.5,
+          "p95_ns": 30750944.7,
+          "p99_ns": 33261312.4,
+          "mean_ns": 29854372.9,
+          "min_ns": 28998276.0,
+          "max_ns": 33937967.0,
+          "ci_95_low_ns": 29578155.0,
+          "ci_95_high_ns": 29751496.5,
+          "median_ms": 29.6871,
+          "p95_ms": 30.7509,
+          "p99_ms": 33.2613,
+          "ci_95_ms": [
+            29.5782,
+            29.7515
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17504689.0,
+          "p95_ns": 18403633.9,
+          "p99_ns": 18958491.7,
+          "mean_ns": 17609368.4,
+          "min_ns": 17009176.0,
+          "max_ns": 21121407.0,
+          "ci_95_low_ns": 17449445.5,
+          "ci_95_high_ns": 17536361.0,
+          "median_ms": 17.5047,
+          "p95_ms": 18.4036,
+          "p99_ms": 18.9585,
+          "ci_95_ms": [
+            17.4494,
+            17.5364
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 48145909.0,
+          "p95_ns": 50675921.4,
+          "p99_ns": 52741721.2,
+          "mean_ns": 48327315.7,
+          "min_ns": 46969216.0,
+          "max_ns": 54934711.0,
+          "ci_95_low_ns": 48014296.0,
+          "ci_95_high_ns": 48249865.5,
+          "median_ms": 48.1459,
+          "p95_ms": 50.6759,
+          "p99_ms": 52.7417,
+          "ci_95_ms": [
+            48.0143,
+            48.2499
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 35775275.0,
+          "p95_ns": 37597956.4,
+          "p99_ns": 38742346.4,
+          "mean_ns": 35922185.9,
+          "min_ns": 34190995.0,
+          "max_ns": 39213936.0,
+          "ci_95_low_ns": 35590654.0,
+          "ci_95_high_ns": 35854613.0,
+          "median_ms": 35.7753,
+          "p95_ms": 37.598,
+          "p99_ms": 38.7423,
+          "ci_95_ms": [
+            35.5907,
+            35.8546
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W6",
+      "config": "writes_x10",
+      "params": {
+        "write_count": 10,
+        "write_size": 4096,
+        "file_size": 1048576
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 20.41,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1229039.0,
+          "p95_ns": 1323448.5,
+          "p99_ns": 1354639.9,
+          "mean_ns": 1240372.4,
+          "min_ns": 1167091.0,
+          "max_ns": 1386946.0,
+          "ci_95_low_ns": 1224220.5,
+          "ci_95_high_ns": 1232147.0,
+          "median_ms": 1.229,
+          "p95_ms": 1.3234,
+          "p99_ms": 1.3546,
+          "ci_95_ms": [
+            1.2242,
+            1.2321
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12710858.0,
+          "p95_ns": 13395272.9,
+          "p99_ns": 13932076.9,
+          "mean_ns": 12806646.5,
+          "min_ns": 12348425.0,
+          "max_ns": 14527492.0,
+          "ci_95_low_ns": 12661307.0,
+          "ci_95_high_ns": 12747045.4,
+          "median_ms": 12.7109,
+          "p95_ms": 13.3953,
+          "p99_ms": 13.9321,
+          "ci_95_ms": [
+            12.6613,
+            12.747
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 5825642.5,
+          "p95_ns": 6543991.8,
+          "p99_ns": 8962836.9,
+          "mean_ns": 5947439.1,
+          "min_ns": 5428359.0,
+          "max_ns": 10310223.0,
+          "ci_95_low_ns": 5798510.0,
+          "ci_95_high_ns": 5858606.5,
+          "median_ms": 5.8256,
+          "p95_ms": 6.544,
+          "p99_ms": 8.9628,
+          "ci_95_ms": [
+            5.7985,
+            5.8586
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 29875916.5,
+          "p95_ns": 30943681.8,
+          "p99_ns": 33368886.8,
+          "mean_ns": 29990843.9,
+          "min_ns": 28992270.0,
+          "max_ns": 33728099.0,
+          "ci_95_low_ns": 29800455.0,
+          "ci_95_high_ns": 29947468.8,
+          "median_ms": 29.8759,
+          "p95_ms": 30.9437,
+          "p99_ms": 33.3689,
+          "ci_95_ms": [
+            29.8005,
+            29.9475
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17414246.5,
+          "p95_ns": 18121313.8,
+          "p99_ns": 20337411.8,
+          "mean_ns": 17548453.6,
+          "min_ns": 17009805.0,
+          "max_ns": 21154371.0,
+          "ci_95_low_ns": 17391339.0,
+          "ci_95_high_ns": 17478790.2,
+          "median_ms": 17.4142,
+          "p95_ms": 18.1213,
+          "p99_ms": 20.3374,
+          "ci_95_ms": [
+            17.3913,
+            17.4788
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 48565576.0,
+          "p95_ns": 50960991.4,
+          "p99_ns": 52190804.8,
+          "mean_ns": 48744929.4,
+          "min_ns": 47234954.0,
+          "max_ns": 52888127.0,
+          "ci_95_low_ns": 48451074.0,
+          "ci_95_high_ns": 48665097.0,
+          "median_ms": 48.5656,
+          "p95_ms": 50.961,
+          "p99_ms": 52.1908,
+          "ci_95_ms": [
+            48.4511,
+            48.6651
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 35773354.0,
+          "p95_ns": 37239923.0,
+          "p99_ns": 39132795.4,
+          "mean_ns": 35934513.7,
+          "min_ns": 34709766.0,
+          "max_ns": 39889425.0,
+          "ci_95_low_ns": 35688254.0,
+          "ci_95_high_ns": 35879929.0,
+          "median_ms": 35.7734,
+          "p95_ms": 37.2399,
+          "p99_ms": 39.1328,
+          "ci_95_ms": [
+            35.6883,
+            35.8799
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W6",
+      "config": "writes_x100",
+      "params": {
+        "write_count": 100,
+        "write_size": 4096,
+        "file_size": 1048576
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 21.7,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1444180.0,
+          "p95_ns": 1547954.0,
+          "p99_ns": 1566159.9,
+          "mean_ns": 1452386.1,
+          "min_ns": 1299996.0,
+          "max_ns": 1941543.0,
+          "ci_95_low_ns": 1438488.0,
+          "ci_95_high_ns": 1449802.0,
+          "median_ms": 1.4442,
+          "p95_ms": 1.548,
+          "p99_ms": 1.5662,
+          "ci_95_ms": [
+            1.4385,
+            1.4498
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12746196.5,
+          "p95_ns": 13464794.6,
+          "p99_ns": 13614661.5,
+          "mean_ns": 12821861.1,
+          "min_ns": 12334876.0,
+          "max_ns": 13807166.0,
+          "ci_95_low_ns": 12711312.0,
+          "ci_95_high_ns": 12766555.5,
+          "median_ms": 12.7462,
+          "p95_ms": 13.4648,
+          "p99_ms": 13.6147,
+          "ci_95_ms": [
+            12.7113,
+            12.7666
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 8334947.5,
+          "p95_ns": 9272221.3,
+          "p99_ns": 12147696.5,
+          "mean_ns": 8506243.4,
+          "min_ns": 7679293.0,
+          "max_ns": 12428740.0,
+          "ci_95_low_ns": 8297793.0,
+          "ci_95_high_ns": 8377654.5,
+          "median_ms": 8.3349,
+          "p95_ms": 9.2722,
+          "p99_ms": 12.1477,
+          "ci_95_ms": [
+            8.2978,
+            8.3777
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 30181534.5,
+          "p95_ns": 31393759.7,
+          "p99_ns": 34901086.1,
+          "mean_ns": 30339063.1,
+          "min_ns": 29169663.0,
+          "max_ns": 35185514.0,
+          "ci_95_low_ns": 30078975.0,
+          "ci_95_high_ns": 30256438.0,
+          "median_ms": 30.1815,
+          "p95_ms": 31.3938,
+          "p99_ms": 34.9011,
+          "ci_95_ms": [
+            30.079,
+            30.2564
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17559233.5,
+          "p95_ns": 18411425.2,
+          "p99_ns": 18698857.4,
+          "mean_ns": 17654346.2,
+          "min_ns": 17117638.0,
+          "max_ns": 18938777.0,
+          "ci_95_low_ns": 17512930.0,
+          "ci_95_high_ns": 17597960.0,
+          "median_ms": 17.5592,
+          "p95_ms": 18.4114,
+          "p99_ms": 18.6989,
+          "ci_95_ms": [
+            17.5129,
+            17.598
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 51427082.5,
+          "p95_ns": 54812763.2,
+          "p99_ns": 56170176.7,
+          "mean_ns": 51667167.6,
+          "min_ns": 49538336.0,
+          "max_ns": 59905480.0,
+          "ci_95_low_ns": 51290685.0,
+          "ci_95_high_ns": 51513473.5,
+          "median_ms": 51.4271,
+          "p95_ms": 54.8128,
+          "p99_ms": 56.1702,
+          "ci_95_ms": [
+            51.2907,
+            51.5135
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 38576789.5,
+          "p95_ns": 40004220.0,
+          "p99_ns": 42668113.1,
+          "mean_ns": 38753687.9,
+          "min_ns": 37560342.0,
+          "max_ns": 44130163.0,
+          "ci_95_low_ns": 38522837.5,
+          "ci_95_high_ns": 38691316.1,
+          "median_ms": 38.5768,
+          "p95_ms": 40.0042,
+          "p99_ms": 42.6681,
+          "ci_95_ms": [
+            38.5228,
+            38.6913
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W6",
+      "config": "writes_x1000",
+      "params": {
+        "write_count": 1000,
+        "write_size": 4096,
+        "file_size": 1048576
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 32.38,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 3259208.5,
+          "p95_ns": 3402136.2,
+          "p99_ns": 3434009.0,
+          "mean_ns": 3260868.8,
+          "min_ns": 3089149.0,
+          "max_ns": 3494638.0,
+          "ci_95_low_ns": 3241644.0,
+          "ci_95_high_ns": 3275905.2,
+          "median_ms": 3.2592,
+          "p95_ms": 3.4021,
+          "p99_ms": 3.434,
+          "ci_95_ms": [
+            3.2416,
+            3.2759
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 12888704.5,
+          "p95_ns": 13452963.7,
+          "p99_ns": 13816878.9,
+          "mean_ns": 12945195.5,
+          "min_ns": 12497672.0,
+          "max_ns": 13966121.0,
+          "ci_95_low_ns": 12844566.0,
+          "ci_95_high_ns": 12914447.9,
+          "median_ms": 12.8887,
+          "p95_ms": 13.453,
+          "p99_ms": 13.8169,
+          "ci_95_ms": [
+            12.8446,
+            12.9144
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 32000265.5,
+          "p95_ns": 33803225.2,
+          "p99_ns": 36255067.1,
+          "mean_ns": 32247221.6,
+          "min_ns": 30755582.0,
+          "max_ns": 36681131.0,
+          "ci_95_low_ns": 31977637.0,
+          "ci_95_high_ns": 32027188.0,
+          "median_ms": 32.0003,
+          "p95_ms": 33.8032,
+          "p99_ms": 36.2551,
+          "ci_95_ms": [
+            31.9776,
+            32.0272
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 30875077.5,
+          "p95_ns": 32216454.0,
+          "p99_ns": 35072700.8,
+          "mean_ns": 31022758.7,
+          "min_ns": 29959340.0,
+          "max_ns": 37759246.0,
+          "ci_95_low_ns": 30783518.0,
+          "ci_95_high_ns": 30967755.0,
+          "median_ms": 30.8751,
+          "p95_ms": 32.2165,
+          "p99_ms": 35.0727,
+          "ci_95_ms": [
+            30.7835,
+            30.9678
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 18057645.0,
+          "p95_ns": 18796279.4,
+          "p99_ns": 19808096.3,
+          "mean_ns": 18131678.2,
+          "min_ns": 17395251.0,
+          "max_ns": 21664341.0,
+          "ci_95_low_ns": 18013052.0,
+          "ci_95_high_ns": 18087466.0,
+          "median_ms": 18.0576,
+          "p95_ms": 18.7963,
+          "p99_ms": 19.8081,
+          "ci_95_ms": [
+            18.0131,
+            18.0875
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 76011175.5,
+          "p95_ns": 79224418.4,
+          "p99_ns": 80668916.2,
+          "mean_ns": 76215175.9,
+          "min_ns": 73600692.0,
+          "max_ns": 84507627.0,
+          "ci_95_low_ns": 75872300.0,
+          "ci_95_high_ns": 76190632.8,
+          "median_ms": 76.0112,
+          "p95_ms": 79.2244,
+          "p99_ms": 80.6689,
+          "ci_95_ms": [
+            75.8723,
+            76.1906
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 62823486.0,
+          "p95_ns": 64983102.8,
+          "p99_ns": 66927353.0,
+          "mean_ns": 63114479.2,
+          "min_ns": 61025290.0,
+          "max_ns": 69125017.0,
+          "ci_95_low_ns": 62650459.0,
+          "ci_95_high_ns": 63135760.0,
+          "median_ms": 62.8235,
+          "p95_ms": 64.9831,
+          "p99_ms": 66.9274,
+          "ci_95_ms": [
+            62.6505,
+            63.1358
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W7",
+      "config": "files_x1",
+      "params": {
+        "file_count": 1,
+        "write_size": 4096
+      },
+      "warmup_count": 10,
+      "repeats": 100,
+      "wall_time_s": 9.97,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 1015120.0,
+          "p95_ns": 1155613.4,
+          "p99_ns": 1193711.1,
+          "mean_ns": 1042329.4,
+          "min_ns": 977267.0,
+          "max_ns": 1243217.0,
+          "ci_95_low_ns": 1007368.0,
+          "ci_95_high_ns": 1043615.0,
+          "median_ms": 1.0151,
+          "p95_ms": 1.1556,
+          "p99_ms": 1.1937,
+          "ci_95_ms": [
+            1.0074,
+            1.0436
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 12640459.0,
+          "p95_ns": 13289305.0,
+          "p99_ns": 13565280.3,
+          "mean_ns": 12711670.8,
+          "min_ns": 12297512.0,
+          "max_ns": 13631240.0,
+          "ci_95_low_ns": 12612308.4,
+          "ci_95_high_ns": 12689836.0,
+          "median_ms": 12.6405,
+          "p95_ms": 13.2893,
+          "p99_ms": 13.5653,
+          "ci_95_ms": [
+            12.6123,
+            12.6898
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 3664942.0,
+          "p95_ns": 3832617.4,
+          "p99_ns": 3868742.0,
+          "mean_ns": 3657575.6,
+          "min_ns": 3441979.0,
+          "max_ns": 3900616.0,
+          "ci_95_low_ns": 3635226.0,
+          "ci_95_high_ns": 3677660.5,
+          "median_ms": 3.6649,
+          "p95_ms": 3.8326,
+          "p99_ms": 3.8687,
+          "ci_95_ms": [
+            3.6352,
+            3.6777
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 29408584.5,
+          "p95_ns": 33009839.9,
+          "p99_ns": 33407305.2,
+          "mean_ns": 29684026.9,
+          "min_ns": 28985914.0,
+          "max_ns": 33502168.0,
+          "ci_95_low_ns": 29314510.0,
+          "ci_95_high_ns": 29496896.5,
+          "median_ms": 29.4086,
+          "p95_ms": 33.0098,
+          "p99_ms": 33.4073,
+          "ci_95_ms": [
+            29.3145,
+            29.4969
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 17208114.5,
+          "p95_ns": 18033068.6,
+          "p99_ns": 19603681.8,
+          "mean_ns": 17362134.2,
+          "min_ns": 16862653.0,
+          "max_ns": 20636929.0,
+          "ci_95_low_ns": 17194321.0,
+          "ci_95_high_ns": 17291608.0,
+          "median_ms": 17.2081,
+          "p95_ms": 18.0331,
+          "p99_ms": 19.6037,
+          "ci_95_ms": [
+            17.1943,
+            17.2916
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 45807256.5,
+          "p95_ns": 49314395.2,
+          "p99_ns": 49609765.0,
+          "mean_ns": 46053273.2,
+          "min_ns": 45074184.0,
+          "max_ns": 49773906.0,
+          "ci_95_low_ns": 45708467.2,
+          "ci_95_high_ns": 45895010.0,
+          "median_ms": 45.8073,
+          "p95_ms": 49.3144,
+          "p99_ms": 49.6098,
+          "ci_95_ms": [
+            45.7085,
+            45.895
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 33236322.5,
+          "p95_ns": 34262836.9,
+          "p99_ns": 36645288.8,
+          "mean_ns": 33391424.1,
+          "min_ns": 32521268.0,
+          "max_ns": 36941283.0,
+          "ci_95_low_ns": 33141446.0,
+          "ci_95_high_ns": 33356477.5,
+          "median_ms": 33.2363,
+          "p95_ms": 34.2628,
+          "p99_ms": 36.6453,
+          "ci_95_ms": [
+            33.1414,
+            33.3565
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W7",
+      "config": "files_x10",
+      "params": {
+        "file_count": 10,
+        "write_size": 4096
+      },
+      "warmup_count": 10,
+      "repeats": 100,
+      "wall_time_s": 12.08,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 1169395.0,
+          "p95_ns": 1296039.5,
+          "p99_ns": 1396033.5,
+          "mean_ns": 1192044.0,
+          "min_ns": 1125118.0,
+          "max_ns": 1403708.0,
+          "ci_95_low_ns": 1163878.0,
+          "ci_95_high_ns": 1181058.5,
+          "median_ms": 1.1694,
+          "p95_ms": 1.296,
+          "p99_ms": 1.396,
+          "ci_95_ms": [
+            1.1639,
+            1.1811
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 12736559.0,
+          "p95_ns": 13273846.3,
+          "p99_ns": 13561343.2,
+          "mean_ns": 12779743.5,
+          "min_ns": 12328590.0,
+          "max_ns": 13707784.0,
+          "ci_95_low_ns": 12687566.0,
+          "ci_95_high_ns": 12811951.0,
+          "median_ms": 12.7366,
+          "p95_ms": 13.2738,
+          "p99_ms": 13.5613,
+          "ci_95_ms": [
+            12.6876,
+            12.812
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 6564022.5,
+          "p95_ns": 6942451.8,
+          "p99_ns": 8150202.6,
+          "mean_ns": 6601469.3,
+          "min_ns": 6143099.0,
+          "max_ns": 9821485.0,
+          "ci_95_low_ns": 6536925.0,
+          "ci_95_high_ns": 6592727.0,
+          "median_ms": 6.564,
+          "p95_ms": 6.9425,
+          "p99_ms": 8.1502,
+          "ci_95_ms": [
+            6.5369,
+            6.5927
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 40811030.5,
+          "p95_ns": 43946200.4,
+          "p99_ns": 44506021.7,
+          "mean_ns": 41037033.7,
+          "min_ns": 40003124.0,
+          "max_ns": 45175033.0,
+          "ci_95_low_ns": 40595784.0,
+          "ci_95_high_ns": 40917047.0,
+          "median_ms": 40.811,
+          "p95_ms": 43.9462,
+          "p99_ms": 44.506,
+          "ci_95_ms": [
+            40.5958,
+            40.917
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 18558325.5,
+          "p95_ns": 19428967.5,
+          "p99_ns": 19977799.7,
+          "mean_ns": 18675723.7,
+          "min_ns": 18093647.0,
+          "max_ns": 21825600.0,
+          "ci_95_low_ns": 18464810.0,
+          "ci_95_high_ns": 18676529.0,
+          "median_ms": 18.5583,
+          "p95_ms": 19.429,
+          "p99_ms": 19.9778,
+          "ci_95_ms": [
+            18.4648,
+            18.6765
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 60120481.5,
+          "p95_ns": 63305055.9,
+          "p99_ns": 64384682.8,
+          "mean_ns": 60418246.5,
+          "min_ns": 58850621.0,
+          "max_ns": 64478023.0,
+          "ci_95_low_ns": 59896680.0,
+          "ci_95_high_ns": 60288987.4,
+          "median_ms": 60.1205,
+          "p95_ms": 63.3051,
+          "p99_ms": 64.3847,
+          "ci_95_ms": [
+            59.8967,
+            60.289
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 37706552.0,
+          "p95_ns": 39128193.5,
+          "p99_ns": 41184417.1,
+          "mean_ns": 37870467.2,
+          "min_ns": 36821229.0,
+          "max_ns": 43254021.0,
+          "ci_95_low_ns": 37609719.0,
+          "ci_95_high_ns": 37824860.3,
+          "median_ms": 37.7066,
+          "p95_ms": 39.1282,
+          "p99_ms": 41.1844,
+          "ci_95_ms": [
+            37.6097,
+            37.8249
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W7",
+      "config": "files_x100",
+      "params": {
+        "file_count": 100,
+        "write_size": 4096
+      },
+      "warmup_count": 10,
+      "repeats": 100,
+      "wall_time_s": 32.3,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 3278275.0,
+          "p95_ns": 3434066.0,
+          "p99_ns": 3492196.2,
+          "mean_ns": 3294682.4,
+          "min_ns": 3098508.0,
+          "max_ns": 3616858.0,
+          "ci_95_low_ns": 3262492.0,
+          "ci_95_high_ns": 3286659.0,
+          "median_ms": 3.2783,
+          "p95_ms": 3.4341,
+          "p99_ms": 3.4922,
+          "ci_95_ms": [
+            3.2625,
+            3.2867
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 12955262.0,
+          "p95_ns": 13692521.1,
+          "p99_ns": 13839578.2,
+          "mean_ns": 13047687.0,
+          "min_ns": 12483145.0,
+          "max_ns": 13971569.0,
+          "ci_95_low_ns": 12899460.0,
+          "ci_95_high_ns": 13026568.0,
+          "median_ms": 12.9553,
+          "p95_ms": 13.6925,
+          "p99_ms": 13.8396,
+          "ci_95_ms": [
+            12.8995,
+            13.0266
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 33108830.5,
+          "p95_ns": 37348752.6,
+          "p99_ns": 40682006.8,
+          "mean_ns": 34207106.2,
+          "min_ns": 31537088.0,
+          "max_ns": 41494971.0,
+          "ci_95_low_ns": 32930669.0,
+          "ci_95_high_ns": 34000194.0,
+          "median_ms": 33.1088,
+          "p95_ms": 37.3488,
+          "p99_ms": 40.682,
+          "ci_95_ms": [
+            32.9307,
+            34.0002
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 151092993.5,
+          "p95_ns": 157108911.1,
+          "p99_ns": 157843256.0,
+          "mean_ns": 151740992.8,
+          "min_ns": 148846670.0,
+          "max_ns": 158055312.0,
+          "ci_95_low_ns": 150699727.0,
+          "ci_95_high_ns": 151426862.5,
+          "median_ms": 151.093,
+          "p95_ms": 157.1089,
+          "p99_ms": 157.8433,
+          "ci_95_ms": [
+            150.6997,
+            151.4269
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 30292720.0,
+          "p95_ns": 31530414.9,
+          "p99_ns": 32205668.4,
+          "mean_ns": 30433434.6,
+          "min_ns": 29448602.0,
+          "max_ns": 32572601.0,
+          "ci_95_low_ns": 30136663.0,
+          "ci_95_high_ns": 30408189.8,
+          "median_ms": 30.2927,
+          "p95_ms": 31.5304,
+          "p99_ms": 32.2057,
+          "ci_95_ms": [
+            30.1367,
+            30.4082
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 198854749.0,
+          "p95_ns": 204837279.3,
+          "p99_ns": 207999780.5,
+          "mean_ns": 198995786.1,
+          "min_ns": 194561145.0,
+          "max_ns": 208595709.0,
+          "ci_95_low_ns": 197525280.0,
+          "ci_95_high_ns": 199594002.0,
+          "median_ms": 198.8547,
+          "p95_ms": 204.8373,
+          "p99_ms": 207.9998,
+          "ci_95_ms": [
+            197.5253,
+            199.594
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 77288718.0,
+          "p95_ns": 80551428.1,
+          "p99_ns": 82504363.3,
+          "mean_ns": 77681082.5,
+          "min_ns": 74752909.0,
+          "max_ns": 83605368.0,
+          "ci_95_low_ns": 76955441.0,
+          "ci_95_high_ns": 77482976.5,
+          "median_ms": 77.2887,
+          "p95_ms": 80.5514,
+          "p99_ms": 82.5044,
+          "ci_95_ms": [
+            76.9554,
+            77.483
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W7",
+      "config": "files_x500",
+      "params": {
+        "file_count": 500,
+        "write_size": 4096
+      },
+      "warmup_count": 10,
+      "repeats": 100,
+      "wall_time_s": 123.23,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 13640982.5,
+          "p95_ns": 13908950.7,
+          "p99_ns": 14445682.7,
+          "mean_ns": 13697227.5,
+          "min_ns": 13254385.0,
+          "max_ns": 17595830.0,
+          "ci_95_low_ns": 13598625.0,
+          "ci_95_high_ns": 13687112.0,
+          "median_ms": 13.641,
+          "p95_ms": 13.909,
+          "p99_ms": 14.4457,
+          "ci_95_ms": [
+            13.5986,
+            13.6871
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 13317206.0,
+          "p95_ns": 13870371.4,
+          "p99_ns": 14069273.0,
+          "mean_ns": 13340694.5,
+          "min_ns": 12714105.0,
+          "max_ns": 14269645.0,
+          "ci_95_low_ns": 13256271.0,
+          "ci_95_high_ns": 13349437.9,
+          "median_ms": 13.3172,
+          "p95_ms": 13.8704,
+          "p99_ms": 14.0693,
+          "ci_95_ms": [
+            13.2563,
+            13.3494
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 166974049.5,
+          "p95_ns": 177394860.7,
+          "p99_ns": 179300613.6,
+          "mean_ns": 163977936.7,
+          "min_ns": 148659360.0,
+          "max_ns": 180711027.0,
+          "ci_95_low_ns": 154287670.5,
+          "ci_95_high_ns": 173765191.0,
+          "median_ms": 166.974,
+          "p95_ms": 177.3949,
+          "p99_ms": 179.3006,
+          "ci_95_ms": [
+            154.2877,
+            173.7652
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 645601763.5,
+          "p95_ns": 659124246.6,
+          "p99_ns": 664560984.1,
+          "mean_ns": 646239576.1,
+          "min_ns": 634333130.0,
+          "max_ns": 667677320.0,
+          "ci_95_low_ns": 642854965.8,
+          "ci_95_high_ns": 647503638.0,
+          "median_ms": 645.6018,
+          "p95_ms": 659.1242,
+          "p99_ms": 664.561,
+          "ci_95_ms": [
+            642.855,
+            647.5036
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 83075494.5,
+          "p95_ns": 85070293.6,
+          "p99_ns": 87554264.5,
+          "mean_ns": 83279841.8,
+          "min_ns": 80971923.0,
+          "max_ns": 88697170.0,
+          "ci_95_low_ns": 82948735.0,
+          "ci_95_high_ns": 83288226.0,
+          "median_ms": 83.0755,
+          "p95_ms": 85.0703,
+          "p99_ms": 87.5543,
+          "ci_95_ms": [
+            82.9487,
+            83.2882
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 824808269.5,
+          "p95_ns": 846073290.9,
+          "p99_ns": 852059484.6,
+          "mean_ns": 823558207.3,
+          "min_ns": 800273342.0,
+          "max_ns": 854681462.0,
+          "ci_95_low_ns": 817802825.0,
+          "ci_95_high_ns": 829326652.0,
+          "median_ms": 824.8083,
+          "p95_ms": 846.0733,
+          "p99_ms": 852.0595,
+          "ci_95_ms": [
+            817.8028,
+            829.3267
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 255371643.0,
+          "p95_ns": 262169969.6,
+          "p99_ns": 262699307.9,
+          "mean_ns": 255446230.4,
+          "min_ns": 249161323.0,
+          "max_ns": 267668701.0,
+          "ci_95_low_ns": 254070494.0,
+          "ci_95_high_ns": 256071575.5,
+          "median_ms": 255.3716,
+          "p95_ms": 262.17,
+          "p99_ms": 262.6993,
+          "ci_95_ms": [
+            254.0705,
+            256.0716
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W8",
+      "config": "rename_x1",
+      "params": {
+        "file_count": 1
+      },
+      "warmup_count": 10,
+      "repeats": 100,
+      "wall_time_s": 9.83,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 1009183.5,
+          "p95_ns": 1163669.1,
+          "p99_ns": 1217683.6,
+          "mean_ns": 1033906.0,
+          "min_ns": 967140.0,
+          "max_ns": 1234277.0,
+          "ci_95_low_ns": 1003038.0,
+          "ci_95_high_ns": 1018825.4,
+          "median_ms": 1.0092,
+          "p95_ms": 1.1637,
+          "p99_ms": 1.2177,
+          "ci_95_ms": [
+            1.003,
+            1.0188
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 12559830.0,
+          "p95_ns": 13252531.2,
+          "p99_ns": 13434565.1,
+          "mean_ns": 12637114.8,
+          "min_ns": 12212587.0,
+          "max_ns": 15024122.0,
+          "ci_95_low_ns": 12520091.0,
+          "ci_95_high_ns": 12589791.0,
+          "median_ms": 12.5598,
+          "p95_ms": 13.2525,
+          "p99_ms": 13.4346,
+          "ci_95_ms": [
+            12.5201,
+            12.5898
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 3616543.5,
+          "p95_ns": 3782252.5,
+          "p99_ns": 4435479.2,
+          "mean_ns": 3654317.0,
+          "min_ns": 3399097.0,
+          "max_ns": 6616473.0,
+          "ci_95_low_ns": 3600296.8,
+          "ci_95_high_ns": 3642209.0,
+          "median_ms": 3.6165,
+          "p95_ms": 3.7823,
+          "p99_ms": 4.4355,
+          "ci_95_ms": [
+            3.6003,
+            3.6422
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 28330678.0,
+          "p95_ns": 29725477.2,
+          "p99_ns": 32406385.9,
+          "mean_ns": 28574587.1,
+          "min_ns": 27740044.0,
+          "max_ns": 33049676.0,
+          "ci_95_low_ns": 28212809.8,
+          "ci_95_high_ns": 28519530.2,
+          "median_ms": 28.3307,
+          "p95_ms": 29.7255,
+          "p99_ms": 32.4064,
+          "ci_95_ms": [
+            28.2128,
+            28.5195
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 17126751.0,
+          "p95_ns": 18038065.2,
+          "p99_ns": 18320356.8,
+          "mean_ns": 17246607.4,
+          "min_ns": 16795606.0,
+          "max_ns": 18708515.0,
+          "ci_95_low_ns": 17105136.0,
+          "ci_95_high_ns": 17205545.3,
+          "median_ms": 17.1268,
+          "p95_ms": 18.0381,
+          "p99_ms": 18.3204,
+          "ci_95_ms": [
+            17.1051,
+            17.2055
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 44659303.0,
+          "p95_ns": 46429164.2,
+          "p99_ns": 48549833.3,
+          "mean_ns": 44866018.9,
+          "min_ns": 43754144.0,
+          "max_ns": 49214351.0,
+          "ci_95_low_ns": 44530272.0,
+          "ci_95_high_ns": 44773932.4,
+          "median_ms": 44.6593,
+          "p95_ms": 46.4292,
+          "p99_ms": 48.5498,
+          "ci_95_ms": [
+            44.5303,
+            44.7739
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 32995794.5,
+          "p95_ns": 33970721.8,
+          "p99_ns": 34553461.6,
+          "mean_ns": 33129423.2,
+          "min_ns": 32304067.0,
+          "max_ns": 34608567.0,
+          "ci_95_low_ns": 32930739.0,
+          "ci_95_high_ns": 33148919.0,
+          "median_ms": 32.9958,
+          "p95_ms": 33.9707,
+          "p99_ms": 34.5535,
+          "ci_95_ms": [
+            32.9307,
+            33.1489
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W8",
+      "config": "rename_x10",
+      "params": {
+        "file_count": 10
+      },
+      "warmup_count": 10,
+      "repeats": 100,
+      "wall_time_s": 10.47,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 1162586.0,
+          "p95_ns": 1302991.9,
+          "p99_ns": 1368234.6,
+          "mean_ns": 1170120.0,
+          "min_ns": 1055557.0,
+          "max_ns": 1424032.0,
+          "ci_95_low_ns": 1147047.0,
+          "ci_95_high_ns": 1173447.0,
+          "median_ms": 1.1626,
+          "p95_ms": 1.303,
+          "p99_ms": 1.3682,
+          "ci_95_ms": [
+            1.147,
+            1.1734
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 12603025.5,
+          "p95_ns": 13192126.7,
+          "p99_ns": 13474858.4,
+          "mean_ns": 12681558.1,
+          "min_ns": 12251139.0,
+          "max_ns": 13480736.0,
+          "ci_95_low_ns": 12553404.0,
+          "ci_95_high_ns": 12644057.0,
+          "median_ms": 12.603,
+          "p95_ms": 13.1921,
+          "p99_ms": 13.4749,
+          "ci_95_ms": [
+            12.5534,
+            12.6441
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 5395604.5,
+          "p95_ns": 5818861.4,
+          "p99_ns": 6909026.3,
+          "mean_ns": 5460169.4,
+          "min_ns": 5069104.0,
+          "max_ns": 8568002.0,
+          "ci_95_low_ns": 5356844.0,
+          "ci_95_high_ns": 5440937.0,
+          "median_ms": 5.3956,
+          "p95_ms": 5.8189,
+          "p99_ms": 6.909,
+          "ci_95_ms": [
+            5.3568,
+            5.4409
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 28821127.5,
+          "p95_ns": 31995017.2,
+          "p99_ns": 32415271.7,
+          "mean_ns": 29182269.2,
+          "min_ns": 28097972.0,
+          "max_ns": 33101707.0,
+          "ci_95_low_ns": 28709419.0,
+          "ci_95_high_ns": 28979699.0,
+          "median_ms": 28.8211,
+          "p95_ms": 31.995,
+          "p99_ms": 32.4153,
+          "ci_95_ms": [
+            28.7094,
+            28.9797
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 17306588.5,
+          "p95_ns": 17815748.0,
+          "p99_ns": 18824620.6,
+          "mean_ns": 17372724.0,
+          "min_ns": 16919921.0,
+          "max_ns": 19035156.0,
+          "ci_95_low_ns": 17289443.0,
+          "ci_95_high_ns": 17349750.2,
+          "median_ms": 17.3066,
+          "p95_ms": 17.8157,
+          "p99_ms": 18.8246,
+          "ci_95_ms": [
+            17.2894,
+            17.3498
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 47024109.0,
+          "p95_ns": 50060004.4,
+          "p99_ns": 50532816.4,
+          "mean_ns": 47323996.7,
+          "min_ns": 46143990.0,
+          "max_ns": 51517804.0,
+          "ci_95_low_ns": 46841617.0,
+          "ci_95_high_ns": 47266722.4,
+          "median_ms": 47.0241,
+          "p95_ms": 50.06,
+          "p99_ms": 50.5328,
+          "ci_95_ms": [
+            46.8416,
+            47.2667
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 34750867.0,
+          "p95_ns": 36120392.2,
+          "p99_ns": 38251095.3,
+          "mean_ns": 34970817.2,
+          "min_ns": 34166692.0,
+          "max_ns": 38289537.0,
+          "ci_95_low_ns": 34698661.0,
+          "ci_95_high_ns": 34901475.0,
+          "median_ms": 34.7509,
+          "p95_ms": 36.1204,
+          "p99_ms": 38.2511,
+          "ci_95_ms": [
+            34.6987,
+            34.9015
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W8",
+      "config": "rename_x100",
+      "params": {
+        "file_count": 100
+      },
+      "warmup_count": 10,
+      "repeats": 100,
+      "wall_time_s": 17.73,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 3232460.0,
+          "p95_ns": 3400229.0,
+          "p99_ns": 3440691.9,
+          "mean_ns": 3233785.6,
+          "min_ns": 2912944.0,
+          "max_ns": 3541361.0,
+          "ci_95_low_ns": 3205991.0,
+          "ci_95_high_ns": 3268637.0,
+          "median_ms": 3.2325,
+          "p95_ms": 3.4002,
+          "p99_ms": 3.4407,
+          "ci_95_ms": [
+            3.206,
+            3.2686
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 12824417.0,
+          "p95_ns": 13656064.1,
+          "p99_ns": 13832451.4,
+          "mean_ns": 12917747.4,
+          "min_ns": 12510872.0,
+          "max_ns": 14482725.0,
+          "ci_95_low_ns": 12774516.5,
+          "ci_95_high_ns": 12896527.0,
+          "median_ms": 12.8244,
+          "p95_ms": 13.6561,
+          "p99_ms": 13.8325,
+          "ci_95_ms": [
+            12.7745,
+            12.8965
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 22318179.5,
+          "p95_ns": 26271864.4,
+          "p99_ns": 26481806.5,
+          "mean_ns": 23257448.1,
+          "min_ns": 21158561.0,
+          "max_ns": 27428489.0,
+          "ci_95_low_ns": 22250506.0,
+          "ci_95_high_ns": 22601367.6,
+          "median_ms": 22.3182,
+          "p95_ms": 26.2719,
+          "p99_ms": 26.4818,
+          "ci_95_ms": [
+            22.2505,
+            22.6014
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 41234503.0,
+          "p95_ns": 43057591.5,
+          "p99_ns": 45480950.3,
+          "mean_ns": 41422220.5,
+          "min_ns": 39868544.0,
+          "max_ns": 46616803.0,
+          "ci_95_low_ns": 41150661.0,
+          "ci_95_high_ns": 41326168.0,
+          "median_ms": 41.2345,
+          "p95_ms": 43.0576,
+          "p99_ms": 45.481,
+          "ci_95_ms": [
+            41.1507,
+            41.3262
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 19691369.0,
+          "p95_ns": 20817625.8,
+          "p99_ns": 23108012.3,
+          "mean_ns": 19868170.7,
+          "min_ns": 19065675.0,
+          "max_ns": 23413755.0,
+          "ci_95_low_ns": 19604280.0,
+          "ci_95_high_ns": 19780843.6,
+          "median_ms": 19.6914,
+          "p95_ms": 20.8176,
+          "p99_ms": 23.108,
+          "ci_95_ms": [
+            19.6043,
+            19.7808
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 76746168.0,
+          "p95_ns": 80734023.8,
+          "p99_ns": 84483275.0,
+          "mean_ns": 77597416.0,
+          "min_ns": 74583198.0,
+          "max_ns": 84589201.0,
+          "ci_95_low_ns": 76474591.1,
+          "ci_95_high_ns": 77258788.7,
+          "median_ms": 76.7462,
+          "p95_ms": 80.734,
+          "p99_ms": 84.4833,
+          "ci_95_ms": [
+            76.4746,
+            77.2588
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 53097123.0,
+          "p95_ns": 57175917.9,
+          "p99_ns": 57971979.9,
+          "mean_ns": 53793794.3,
+          "min_ns": 51605591.0,
+          "max_ns": 57986914.0,
+          "ci_95_low_ns": 52857189.0,
+          "ci_95_high_ns": 53427461.1,
+          "median_ms": 53.0971,
+          "p95_ms": 57.1759,
+          "p99_ms": 57.972,
+          "ci_95_ms": [
+            52.8572,
+            53.4275
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W8",
+      "config": "rename_x500",
+      "params": {
+        "file_count": 500
+      },
+      "warmup_count": 10,
+      "repeats": 100,
+      "wall_time_s": 64.63,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 13365780.0,
+          "p95_ns": 13652921.6,
+          "p99_ns": 13810771.0,
+          "mean_ns": 13359153.2,
+          "min_ns": 13025660.0,
+          "max_ns": 13842645.0,
+          "ci_95_low_ns": 13318009.0,
+          "ci_95_high_ns": 13401048.0,
+          "median_ms": 13.3658,
+          "p95_ms": 13.6529,
+          "p99_ms": 13.8108,
+          "ci_95_ms": [
+            13.318,
+            13.401
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 13336167.5,
+          "p95_ns": 14049366.6,
+          "p99_ns": 14240843.2,
+          "mean_ns": 13387595.3,
+          "min_ns": 12854902.0,
+          "max_ns": 14390258.0,
+          "ci_95_low_ns": 13250055.0,
+          "ci_95_high_ns": 13397031.2,
+          "median_ms": 13.3362,
+          "p95_ms": 14.0494,
+          "p99_ms": 14.2408,
+          "ci_95_ms": [
+            13.2501,
+            13.397
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 104011442.0,
+          "p95_ns": 106850026.7,
+          "p99_ns": 108145810.9,
+          "mean_ns": 104173449.8,
+          "min_ns": 96686201.0,
+          "max_ns": 109684066.0,
+          "ci_95_low_ns": 103506047.0,
+          "ci_95_high_ns": 104579832.5,
+          "median_ms": 104.0114,
+          "p95_ms": 106.85,
+          "p99_ms": 108.1458,
+          "ci_95_ms": [
+            103.506,
+            104.5798
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 220246051.5,
+          "p95_ns": 224186947.6,
+          "p99_ns": 225860784.0,
+          "mean_ns": 219857800.7,
+          "min_ns": 213585475.0,
+          "max_ns": 234587037.0,
+          "ci_95_low_ns": 219455291.0,
+          "ci_95_high_ns": 220902262.1,
+          "median_ms": 220.2461,
+          "p95_ms": 224.1869,
+          "p99_ms": 225.8608,
+          "ci_95_ms": [
+            219.4553,
+            220.9023
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 28096785.0,
+          "p95_ns": 29896980.0,
+          "p99_ns": 31093201.2,
+          "mean_ns": 28311754.6,
+          "min_ns": 27349501.0,
+          "max_ns": 32885413.0,
+          "ci_95_low_ns": 27985353.5,
+          "ci_95_high_ns": 28294822.0,
+          "median_ms": 28.0968,
+          "p95_ms": 29.897,
+          "p99_ms": 31.0932,
+          "ci_95_ms": [
+            27.9854,
+            28.2948
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 337614682.5,
+          "p95_ns": 342321528.1,
+          "p99_ns": 344486120.7,
+          "mean_ns": 337418845.8,
+          "min_ns": 330577077.0,
+          "max_ns": 351446782.0,
+          "ci_95_low_ns": 336717522.0,
+          "ci_95_high_ns": 338349674.0,
+          "median_ms": 337.6147,
+          "p95_ms": 342.3215,
+          "p99_ms": 344.4861,
+          "ci_95_ms": [
+            336.7175,
+            338.3497
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 100,
+          "excluded": 0,
+          "median_ns": 134716355.0,
+          "p95_ns": 139921559.2,
+          "p99_ns": 141324527.1,
+          "mean_ns": 134967725.2,
+          "min_ns": 130091710.0,
+          "max_ns": 142003079.0,
+          "ci_95_low_ns": 134106306.0,
+          "ci_95_high_ns": 135430746.0,
+          "median_ms": 134.7164,
+          "p95_ms": 139.9216,
+          "p99_ms": 141.3245,
+          "ci_95_ms": [
+            134.1063,
+            135.4307
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W10a",
+      "config": "single_1KiB",
+      "params": {
+        "total_bytes": 1024,
+        "variant": "single"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 237.69,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 962321.0,
+          "p95_ns": 1127286.0,
+          "p99_ns": 1185253.9,
+          "mean_ns": 988581.1,
+          "min_ns": 931313.0,
+          "max_ns": 1229388.0,
+          "ci_95_low_ns": 958759.0,
+          "ci_95_high_ns": 967210.0,
+          "median_ms": 0.9623,
+          "p95_ms": 1.1273,
+          "p99_ms": 1.1853,
+          "ci_95_ms": [
+            0.9588,
+            0.9672
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 13365290.5,
+          "p95_ns": 14016116.4,
+          "p99_ns": 14254094.7,
+          "mean_ns": 13422354.9,
+          "min_ns": 12783107.0,
+          "max_ns": 16400803.0,
+          "ci_95_low_ns": 13320802.0,
+          "ci_95_high_ns": 13385229.5,
+          "median_ms": 13.3653,
+          "p95_ms": 14.0161,
+          "p99_ms": 14.2541,
+          "ci_95_ms": [
+            13.3208,
+            13.3852
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 3286726.0,
+          "p95_ns": 3493202.4,
+          "p99_ns": 3547278.5,
+          "mean_ns": 3273221.3,
+          "min_ns": 2079058.0,
+          "max_ns": 3603309.0,
+          "ci_95_low_ns": 3268811.5,
+          "ci_95_high_ns": 3309388.5,
+          "median_ms": 3.2867,
+          "p95_ms": 3.4932,
+          "p99_ms": 3.5473,
+          "ci_95_ms": [
+            3.2688,
+            3.3094
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 27312381.0,
+          "p95_ns": 28309891.0,
+          "p99_ns": 31084862.3,
+          "mean_ns": 27467017.0,
+          "min_ns": 26592857.0,
+          "max_ns": 31449998.0,
+          "ci_95_low_ns": 27239642.5,
+          "ci_95_high_ns": 27379392.0,
+          "median_ms": 27.3124,
+          "p95_ms": 28.3099,
+          "p99_ms": 31.0849,
+          "ci_95_ms": [
+            27.2396,
+            27.3794
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17080098.0,
+          "p95_ns": 17799548.1,
+          "p99_ns": 18417366.4,
+          "mean_ns": 17191757.8,
+          "min_ns": 16715360.0,
+          "max_ns": 21179583.0,
+          "ci_95_low_ns": 17056981.5,
+          "ci_95_high_ns": 17096021.5,
+          "median_ms": 17.0801,
+          "p95_ms": 17.7995,
+          "p99_ms": 18.4174,
+          "ci_95_ms": [
+            17.057,
+            17.096
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 43996349.5,
+          "p95_ns": 45513495.1,
+          "p99_ns": 48076518.1,
+          "mean_ns": 44162593.2,
+          "min_ns": 42981786.0,
+          "max_ns": 48447582.0,
+          "ci_95_low_ns": 43899550.0,
+          "ci_95_high_ns": 44091120.5,
+          "median_ms": 43.9963,
+          "p95_ms": 45.5135,
+          "p99_ms": 48.0765,
+          "ci_95_ms": [
+            43.8995,
+            44.0911
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 33822069.0,
+          "p95_ns": 34793259.5,
+          "p99_ns": 36889082.6,
+          "mean_ns": 33937673.4,
+          "min_ns": 32620023.0,
+          "max_ns": 38199793.0,
+          "ci_95_low_ns": 33761517.5,
+          "ci_95_high_ns": 33880419.0,
+          "median_ms": 33.8221,
+          "p95_ms": 34.7933,
+          "p99_ms": 36.8891,
+          "ci_95_ms": [
+            33.7615,
+            33.8804
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W10a",
+      "config": "single_10KiB",
+      "params": {
+        "total_bytes": 10240,
+        "variant": "single"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 240.44,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1008206.0,
+          "p95_ns": 1205489.7,
+          "p99_ns": 1262231.2,
+          "mean_ns": 1042110.8,
+          "min_ns": 933897.0,
+          "max_ns": 1779864.0,
+          "ci_95_low_ns": 996472.5,
+          "ci_95_high_ns": 1027900.5,
+          "median_ms": 1.0082,
+          "p95_ms": 1.2055,
+          "p99_ms": 1.2622,
+          "ci_95_ms": [
+            0.9965,
+            1.0279
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 13467780.0,
+          "p95_ns": 13930237.2,
+          "p99_ns": 14269983.2,
+          "mean_ns": 13500402.5,
+          "min_ns": 12739387.0,
+          "max_ns": 14878856.0,
+          "ci_95_low_ns": 13435690.0,
+          "ci_95_high_ns": 13499837.0,
+          "median_ms": 13.4678,
+          "p95_ms": 13.9302,
+          "p99_ms": 14.27,
+          "ci_95_ms": [
+            13.4357,
+            13.4998
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 3385863.0,
+          "p95_ns": 3598986.0,
+          "p99_ns": 4188402.8,
+          "mean_ns": 3405094.3,
+          "min_ns": 3098228.0,
+          "max_ns": 5670494.0,
+          "ci_95_low_ns": 3369695.0,
+          "ci_95_high_ns": 3404869.5,
+          "median_ms": 3.3859,
+          "p95_ms": 3.599,
+          "p99_ms": 4.1884,
+          "ci_95_ms": [
+            3.3697,
+            3.4049
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 27552594.5,
+          "p95_ns": 28691574.9,
+          "p99_ns": 31202339.3,
+          "mean_ns": 27727611.6,
+          "min_ns": 26772834.0,
+          "max_ns": 34418045.0,
+          "ci_95_low_ns": 27427825.5,
+          "ci_95_high_ns": 27649392.0,
+          "median_ms": 27.5526,
+          "p95_ms": 28.6916,
+          "p99_ms": 31.2023,
+          "ci_95_ms": [
+            27.4278,
+            27.6494
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 17163172.5,
+          "p95_ns": 18087179.9,
+          "p99_ns": 20338254.0,
+          "mean_ns": 17278250.4,
+          "min_ns": 16662631.0,
+          "max_ns": 20741898.0,
+          "ci_95_low_ns": 17130907.0,
+          "ci_95_high_ns": 17220511.5,
+          "median_ms": 17.1632,
+          "p95_ms": 18.0872,
+          "p99_ms": 20.3383,
+          "ci_95_ms": [
+            17.1309,
+            17.2205
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 44471992.0,
+          "p95_ns": 45946091.6,
+          "p99_ns": 47969504.4,
+          "mean_ns": 44633108.5,
+          "min_ns": 42990378.0,
+          "max_ns": 51490776.0,
+          "ci_95_low_ns": 44379733.5,
+          "ci_95_high_ns": 44545707.0,
+          "median_ms": 44.472,
+          "p95_ms": 45.9461,
+          "p99_ms": 47.9695,
+          "ci_95_ms": [
+            44.3797,
+            44.5457
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 34052923.5,
+          "p95_ns": 35551781.7,
+          "p99_ns": 37628348.6,
+          "mean_ns": 34232630.9,
+          "min_ns": 33191731.0,
+          "max_ns": 37928536.0,
+          "ci_95_low_ns": 33967928.5,
+          "ci_95_high_ns": 34127127.5,
+          "median_ms": 34.0529,
+          "p95_ms": 35.5518,
+          "p99_ms": 37.6283,
+          "ci_95_ms": [
+            33.9679,
+            34.1271
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W10a",
+      "config": "single_100KiB",
+      "params": {
+        "total_bytes": 102400,
+        "variant": "single"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 242.58,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1181582.5,
+          "p95_ns": 1332893.4,
+          "p99_ns": 1389223.0,
+          "mean_ns": 1204505.2,
+          "min_ns": 1110521.0,
+          "max_ns": 1537800.0,
+          "ci_95_low_ns": 1171561.0,
+          "ci_95_high_ns": 1199601.5,
+          "median_ms": 1.1816,
+          "p95_ms": 1.3329,
+          "p99_ms": 1.3892,
+          "ci_95_ms": [
+            1.1716,
+            1.1996
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 14155840.5,
+          "p95_ns": 14901529.7,
+          "p99_ns": 15644507.4,
+          "mean_ns": 14171415.3,
+          "min_ns": 13286721.0,
+          "max_ns": 16011447.0,
+          "ci_95_low_ns": 14048742.0,
+          "ci_95_high_ns": 14246178.0,
+          "median_ms": 14.1558,
+          "p95_ms": 14.9015,
+          "p99_ms": 15.6445,
+          "ci_95_ms": [
+            14.0487,
+            14.2462
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 4067707.5,
+          "p95_ns": 12220325.4,
+          "p99_ns": 16078567.1,
+          "mean_ns": 5086170.1,
+          "min_ns": 3768060.0,
+          "max_ns": 20365323.0,
+          "ci_95_low_ns": 4040540.0,
+          "ci_95_high_ns": 4098682.0,
+          "median_ms": 4.0677,
+          "p95_ms": 12.2203,
+          "p99_ms": 16.0786,
+          "ci_95_ms": [
+            4.0405,
+            4.0987
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 28779887.0,
+          "p95_ns": 35174960.1,
+          "p99_ns": 41245969.3,
+          "mean_ns": 29468815.6,
+          "min_ns": 27898441.0,
+          "max_ns": 49396842.0,
+          "ci_95_low_ns": 28671845.5,
+          "ci_95_high_ns": 28850670.0,
+          "median_ms": 28.7799,
+          "p95_ms": 35.175,
+          "p99_ms": 41.246,
+          "ci_95_ms": [
+            28.6718,
+            28.8507
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 18132373.0,
+          "p95_ns": 25900407.6,
+          "p99_ns": 26319167.0,
+          "mean_ns": 18783860.7,
+          "min_ns": 17570967.0,
+          "max_ns": 26769273.0,
+          "ci_95_low_ns": 18089875.0,
+          "ci_95_high_ns": 18194707.6,
+          "median_ms": 18.1324,
+          "p95_ms": 25.9004,
+          "p99_ms": 26.3192,
+          "ci_95_ms": [
+            18.0899,
+            18.1947
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 47126074.5,
+          "p95_ns": 62338160.0,
+          "p99_ns": 69459149.3,
+          "mean_ns": 48726400.9,
+          "min_ns": 45475832.0,
+          "max_ns": 73864688.0,
+          "ci_95_low_ns": 46992820.5,
+          "ci_95_high_ns": 47237433.0,
+          "median_ms": 47.1261,
+          "p95_ms": 62.3382,
+          "p99_ms": 69.4591,
+          "ci_95_ms": [
+            46.9928,
+            47.2374
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 36869871.0,
+          "p95_ns": 51994313.1,
+          "p99_ns": 52631260.3,
+          "mean_ns": 38262166.0,
+          "min_ns": 35490084.0,
+          "max_ns": 54940088.0,
+          "ci_95_low_ns": 36765497.0,
+          "ci_95_high_ns": 36978157.5,
+          "median_ms": 36.8699,
+          "p95_ms": 51.9943,
+          "p99_ms": 52.6313,
+          "ci_95_ms": [
+            36.7655,
+            36.9782
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W10a",
+      "config": "single_1MiB",
+      "params": {
+        "total_bytes": 1048576,
+        "variant": "single"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 255.25,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 4329292.5,
+          "p95_ns": 4572407.9,
+          "p99_ns": 4732401.4,
+          "mean_ns": 4354085.1,
+          "min_ns": 4060969.0,
+          "max_ns": 5447356.0,
+          "ci_95_low_ns": 4318677.0,
+          "ci_95_high_ns": 4344657.0,
+          "median_ms": 4.3293,
+          "p95_ms": 4.5724,
+          "p99_ms": 4.7324,
+          "ci_95_ms": [
+            4.3187,
+            4.3447
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 19449758.5,
+          "p95_ns": 23658350.7,
+          "p99_ns": 23971844.3,
+          "mean_ns": 19517741.7,
+          "min_ns": 14827035.0,
+          "max_ns": 25450350.0,
+          "ci_95_low_ns": 18746229.0,
+          "ci_95_high_ns": 20074790.0,
+          "median_ms": 19.4498,
+          "p95_ms": 23.6584,
+          "p99_ms": 23.9718,
+          "ci_95_ms": [
+            18.7462,
+            20.0748
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 11099412.0,
+          "p95_ns": 13758191.1,
+          "p99_ns": 18378649.8,
+          "mean_ns": 11314072.6,
+          "min_ns": 9413761.0,
+          "max_ns": 21363472.0,
+          "ci_95_low_ns": 11043505.0,
+          "ci_95_high_ns": 11194254.0,
+          "median_ms": 11.0994,
+          "p95_ms": 13.7582,
+          "p99_ms": 18.3786,
+          "ci_95_ms": [
+            11.0435,
+            11.1943
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 40634510.5,
+          "p95_ns": 43967483.2,
+          "p99_ns": 45105482.1,
+          "mean_ns": 40924617.6,
+          "min_ns": 38655499.0,
+          "max_ns": 50193712.0,
+          "ci_95_low_ns": 40413713.0,
+          "ci_95_high_ns": 40769002.1,
+          "median_ms": 40.6345,
+          "p95_ms": 43.9675,
+          "p99_ms": 45.1055,
+          "ci_95_ms": [
+            40.4137,
+            40.769
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 28289124.0,
+          "p95_ns": 29404432.1,
+          "p99_ns": 31673346.9,
+          "mean_ns": 28440713.9,
+          "min_ns": 27473396.0,
+          "max_ns": 32391437.0,
+          "ci_95_low_ns": 28236290.5,
+          "ci_95_high_ns": 28375516.0,
+          "median_ms": 28.2891,
+          "p95_ms": 29.4044,
+          "p99_ms": 31.6733,
+          "ci_95_ms": [
+            28.2363,
+            28.3755
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 71855294.5,
+          "p95_ns": 76893432.3,
+          "p99_ns": 78868291.8,
+          "mean_ns": 71756431.9,
+          "min_ns": 64414050.0,
+          "max_ns": 81616264.0,
+          "ci_95_low_ns": 70729584.0,
+          "ci_95_high_ns": 72596049.0,
+          "median_ms": 71.8553,
+          "p95_ms": 76.8934,
+          "p99_ms": 78.8683,
+          "ci_95_ms": [
+            70.7296,
+            72.596
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 63691525.0,
+          "p95_ns": 65475886.8,
+          "p99_ns": 67271523.1,
+          "mean_ns": 63754342.9,
+          "min_ns": 61686043.0,
+          "max_ns": 67939418.0,
+          "ci_95_low_ns": 63571923.0,
+          "ci_95_high_ns": 63854431.7,
+          "median_ms": 63.6915,
+          "p95_ms": 65.4759,
+          "p99_ms": 67.2715,
+          "ci_95_ms": [
+            63.5719,
+            63.8544
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W10b",
+      "config": "entries_x10",
+      "params": {
+        "entries": 10,
+        "per_entry_bytes": 1024,
+        "variant": "multi"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 254.39,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 8230223.0,
+          "p95_ns": 8419932.0,
+          "p99_ns": 8587408.8,
+          "mean_ns": 8227677.0,
+          "min_ns": 7899427.0,
+          "max_ns": 8925652.0,
+          "ci_95_low_ns": 8217756.5,
+          "ci_95_high_ns": 8251769.0,
+          "median_ms": 8.2302,
+          "p95_ms": 8.4199,
+          "p99_ms": 8.5874,
+          "ci_95_ms": [
+            8.2178,
+            8.2518
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 24033058.0,
+          "p95_ns": 24933400.7,
+          "p99_ns": 25466067.5,
+          "mean_ns": 24133788.0,
+          "min_ns": 23475703.0,
+          "max_ns": 27780621.0,
+          "ci_95_low_ns": 23963603.0,
+          "ci_95_high_ns": 24069794.0,
+          "median_ms": 24.0331,
+          "p95_ms": 24.9334,
+          "p99_ms": 25.4661,
+          "ci_95_ms": [
+            23.9636,
+            24.0698
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 11851795.0,
+          "p95_ns": 12191999.2,
+          "p99_ns": 12310465.4,
+          "mean_ns": 11856570.8,
+          "min_ns": 10652926.0,
+          "max_ns": 12524000.0,
+          "ci_95_low_ns": 11823230.0,
+          "ci_95_high_ns": 11880498.0,
+          "median_ms": 11.8518,
+          "p95_ms": 12.192,
+          "p99_ms": 12.3105,
+          "ci_95_ms": [
+            11.8232,
+            11.8805
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 27670728.0,
+          "p95_ns": 28769585.3,
+          "p99_ns": 31406737.5,
+          "mean_ns": 27841709.1,
+          "min_ns": 26970900.0,
+          "max_ns": 34968242.0,
+          "ci_95_low_ns": 27595965.0,
+          "ci_95_high_ns": 27753383.5,
+          "median_ms": 27.6707,
+          "p95_ms": 28.7696,
+          "p99_ms": 31.4067,
+          "ci_95_ms": [
+            27.596,
+            27.7534
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 27901967.0,
+          "p95_ns": 29090415.1,
+          "p99_ns": 29910383.0,
+          "mean_ns": 28071213.1,
+          "min_ns": 27346428.0,
+          "max_ns": 31778035.0,
+          "ci_95_low_ns": 27851683.5,
+          "ci_95_high_ns": 28003864.0,
+          "median_ms": 27.902,
+          "p95_ms": 29.0904,
+          "p99_ms": 29.9104,
+          "ci_95_ms": [
+            27.8517,
+            28.0039
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 63635478.0,
+          "p95_ns": 65479358.0,
+          "p99_ns": 67233201.9,
+          "mean_ns": 63832067.9,
+          "min_ns": 62398896.0,
+          "max_ns": 70846913.0,
+          "ci_95_low_ns": 63544930.0,
+          "ci_95_high_ns": 63729412.5,
+          "median_ms": 63.6355,
+          "p95_ms": 65.4794,
+          "p99_ms": 67.2332,
+          "ci_95_ms": [
+            63.5449,
+            63.7294
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 63861760.5,
+          "p95_ns": 65505912.2,
+          "p99_ns": 66947727.8,
+          "mean_ns": 63999038.6,
+          "min_ns": 62965295.0,
+          "max_ns": 68737126.0,
+          "ci_95_low_ns": 63777882.0,
+          "ci_95_high_ns": 63910646.0,
+          "median_ms": 63.8618,
+          "p95_ms": 65.5059,
+          "p99_ms": 66.9477,
+          "ci_95_ms": [
+            63.7779,
+            63.9106
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W10b",
+      "config": "entries_x100",
+      "params": {
+        "entries": 100,
+        "per_entry_bytes": 1024,
+        "variant": "multi"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 305.64,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 62155574.5,
+          "p95_ns": 63573592.9,
+          "p99_ns": 64107171.5,
+          "mean_ns": 62181499.1,
+          "min_ns": 59938305.0,
+          "max_ns": 66555057.0,
+          "ci_95_low_ns": 62073059.5,
+          "ci_95_high_ns": 62251185.0,
+          "median_ms": 62.1556,
+          "p95_ms": 63.5736,
+          "p99_ms": 64.1072,
+          "ci_95_ms": [
+            62.0731,
+            62.2512
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 24737112.5,
+          "p95_ns": 25700079.2,
+          "p99_ns": 26233920.4,
+          "mean_ns": 24739746.6,
+          "min_ns": 23707711.0,
+          "max_ns": 27712038.0,
+          "ci_95_low_ns": 24634413.0,
+          "ci_95_high_ns": 24824447.0,
+          "median_ms": 24.7371,
+          "p95_ms": 25.7001,
+          "p99_ms": 26.2339,
+          "ci_95_ms": [
+            24.6344,
+            24.8244
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 102637902.0,
+          "p95_ns": 105590945.1,
+          "p99_ns": 110413398.6,
+          "mean_ns": 102969287.6,
+          "min_ns": 100670975.0,
+          "max_ns": 113754257.0,
+          "ci_95_low_ns": 102470047.0,
+          "ci_95_high_ns": 102755202.5,
+          "median_ms": 102.6379,
+          "p95_ms": 105.5909,
+          "p99_ms": 110.4134,
+          "ci_95_ms": [
+            102.47,
+            102.7552
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 29237511.0,
+          "p95_ns": 30255429.2,
+          "p99_ns": 33266484.2,
+          "mean_ns": 29411598.0,
+          "min_ns": 28423146.0,
+          "max_ns": 33753521.0,
+          "ci_95_low_ns": 29160932.0,
+          "ci_95_high_ns": 29325274.6,
+          "median_ms": 29.2375,
+          "p95_ms": 30.2554,
+          "p99_ms": 33.2665,
+          "ci_95_ms": [
+            29.1609,
+            29.3253
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 30164598.5,
+          "p95_ns": 31095565.6,
+          "p99_ns": 33706939.8,
+          "mean_ns": 30224464.9,
+          "min_ns": 29402717.0,
+          "max_ns": 34198329.0,
+          "ci_95_low_ns": 30088264.0,
+          "ci_95_high_ns": 30231365.5,
+          "median_ms": 30.1646,
+          "p95_ms": 31.0956,
+          "p99_ms": 33.7069,
+          "ci_95_ms": [
+            30.0883,
+            30.2314
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 156759786.5,
+          "p95_ns": 161183160.1,
+          "p99_ns": 164365885.5,
+          "mean_ns": 157120632.2,
+          "min_ns": 154259036.0,
+          "max_ns": 167745083.0,
+          "ci_95_low_ns": 156568567.0,
+          "ci_95_high_ns": 156988495.2,
+          "median_ms": 156.7598,
+          "p95_ms": 161.1832,
+          "p99_ms": 164.3659,
+          "ci_95_ms": [
+            156.5686,
+            156.9885
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 158181019.5,
+          "p95_ns": 161171190.3,
+          "p99_ns": 163567644.2,
+          "mean_ns": 158430829.4,
+          "min_ns": 155848587.0,
+          "max_ns": 169610502.0,
+          "ci_95_low_ns": 158010544.5,
+          "ci_95_high_ns": 158366903.0,
+          "median_ms": 158.181,
+          "p95_ms": 161.1712,
+          "p99_ms": 163.5676,
+          "ci_95_ms": [
+            158.0105,
+            158.3669
+          ]
+        }
+      }
+    },
+    {
+      "workload_id": "W10b",
+      "config": "entries_x1000",
+      "params": {
+        "entries": 1000,
+        "per_entry_bytes": 1024,
+        "variant": "multi"
+      },
+      "warmup_count": 10,
+      "repeats": 200,
+      "wall_time_s": 814.14,
+      "raw_excluded": 0,
+      "spec_excluded": 0,
+      "spec_errors": [],
+      "stats": {
+        "raw_tool": {
+          "name": "raw_tool",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 599609397.0,
+          "p95_ns": 611697151.6,
+          "p99_ns": 619012507.5,
+          "mean_ns": 599462354.9,
+          "min_ns": 583706132.0,
+          "max_ns": 621067919.0,
+          "ci_95_low_ns": 598070758.0,
+          "ci_95_high_ns": 600442304.0,
+          "median_ms": 599.6094,
+          "p95_ms": 611.6972,
+          "p99_ms": 619.0125,
+          "ci_95_ms": [
+            598.0708,
+            600.4423
+          ]
+        },
+        "spec_begin": {
+          "name": "spec_begin",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 30749610.5,
+          "p95_ns": 35267714.6,
+          "p99_ns": 36171841.3,
+          "mean_ns": 30827790.4,
+          "min_ns": 25803808.0,
+          "max_ns": 38601652.0,
+          "ci_95_low_ns": 29863903.5,
+          "ci_95_high_ns": 31604903.0,
+          "median_ms": 30.7496,
+          "p95_ms": 35.2677,
+          "p99_ms": 36.1718,
+          "ci_95_ms": [
+            29.8639,
+            31.6049
+          ]
+        },
+        "spec_run": {
+          "name": "spec_run",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1011017210.0,
+          "p95_ns": 1023939432.4,
+          "p99_ns": 1032912233.8,
+          "mean_ns": 1012563081.0,
+          "min_ns": 1001800786.0,
+          "max_ns": 1041951014.0,
+          "ci_95_low_ns": 1010015051.0,
+          "ci_95_high_ns": 1012356490.0,
+          "median_ms": 1011.0172,
+          "p95_ms": 1023.9394,
+          "p99_ms": 1032.9122,
+          "ci_95_ms": [
+            1010.0151,
+            1012.3565
+          ]
+        },
+        "spec_commit": {
+          "name": "spec_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 45112212.5,
+          "p95_ns": 48040426.2,
+          "p99_ns": 48941636.5,
+          "mean_ns": 45331990.7,
+          "min_ns": 43697504.0,
+          "max_ns": 49499227.0,
+          "ci_95_low_ns": 45012271.0,
+          "ci_95_high_ns": 45221407.0,
+          "median_ms": 45.1122,
+          "p95_ms": 48.0404,
+          "p99_ms": 48.9416,
+          "ci_95_ms": [
+            45.0123,
+            45.2214
+          ]
+        },
+        "spec_rollback": {
+          "name": "spec_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 41407601.0,
+          "p95_ns": 42493489.5,
+          "p99_ns": 44233659.2,
+          "mean_ns": 41507863.9,
+          "min_ns": 40226402.0,
+          "max_ns": 45058750.0,
+          "ci_95_low_ns": 41312339.0,
+          "ci_95_high_ns": 41481212.0,
+          "median_ms": 41.4076,
+          "p95_ms": 42.4935,
+          "p99_ms": 44.2337,
+          "ci_95_ms": [
+            41.3123,
+            41.4812
+          ]
+        },
+        "spec_total_commit": {
+          "name": "spec_total_commit",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1087358199.5,
+          "p95_ns": 1100349042.0,
+          "p99_ns": 1110068286.3,
+          "mean_ns": 1088722862.1,
+          "min_ns": 1074408704.0,
+          "max_ns": 1121529007.0,
+          "ci_95_low_ns": 1086578144.0,
+          "ci_95_high_ns": 1088570769.1,
+          "median_ms": 1087.3582,
+          "p95_ms": 1100.349,
+          "p99_ms": 1110.0683,
+          "ci_95_ms": [
+            1086.5781,
+            1088.5708
+          ]
+        },
+        "spec_total_rollback": {
+          "name": "spec_total_rollback",
+          "n": 200,
+          "excluded": 0,
+          "median_ns": 1091096545.5,
+          "p95_ns": 1112119499.6,
+          "p99_ns": 1118942122.6,
+          "mean_ns": 1093913280.9,
+          "min_ns": 1077800746.0,
+          "max_ns": 1185555015.0,
+          "ci_95_low_ns": 1090011673.5,
+          "ci_95_high_ns": 1093544723.0,
+          "median_ms": 1091.0965,
+          "p95_ms": 1112.1195,
+          "p99_ms": 1118.9421,
+          "ci_95_ms": [
+            1090.0117,
+            1093.5447
+          ]
+        }
+      }
+    }
+  ]
+}

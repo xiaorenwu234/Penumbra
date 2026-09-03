@@ -1,0 +1,36 @@
+=== [1/2] Penumbra full suite (W1-W10) — 2026-09-03 10:48:52 ===
+══════════════════════════════════════════════════════════
+  RQ3 Performance Experiment Launcher
+══════════════════════════════════════════════════════════
+[1/7] 清理旧进程和挂载...
+[2/7] 准备目录...
+[3/7] 构建 benchmark 程序...
+make: 进入目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/benchmarks”
+make: 对“all”无需做任何事。
+make: 离开目录“/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/benchmarks”
+  Done
+[4/7] 启动 ShadowFS...
+  ShadowFS PID=1911912 OK
+  FUSE 挂载: /tmp/shadow-rq2-test/mnt OK
+[5/7] 启动 ShadowProc...
+  ShadowProc PID=1911948 OK
+[6/7] 启动 Orchestrator...
+  Orchestrator PID=1911967 OK
+  Socket: /tmp/shadow-orch.sock OK
+  Orchestrator 连接测试: OK
+[7/7] 运行 RQ3 实验...
+
+
+######################################################################
+  WORKLOAD W1 [noop] (repeats=1000)
+######################################################################
+  [harness] Starting W1 [noop] repeats=1000
+  [harness]   Measuring raw execution ...
+  [harness]   raw progress: 200/1000
+  [harness]   raw progress: 400/1000
+  [harness]   raw progress: 600/1000
+  [harness]   raw progress: 800/1000
+  [harness]   raw progress: 1000/1000
+  [harness]   Measuring spec (commit) ...
+  [harness]   spec(commit) progress: 200/1000
+已终止
