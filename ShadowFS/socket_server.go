@@ -41,6 +41,10 @@ type Request struct {
 	// Group-level finalization (Phase 3).
 	GroupID         int   `json:"group_id,omitempty"`
 	GraphGeneration int64 `json:"graph_generation,omitempty"`
+
+	// graph_stats: zero the cumulative work counters after snapshotting them,
+	// so an experiment can delimit one measured phase with a single RPC.
+	Reset bool `json:"reset,omitempty"`
 }
 
 // Response is the JSON response format for the socket API.
@@ -75,6 +79,10 @@ type Response struct {
 	GroupID         int      `json:"group_id,omitempty"`
 	Members         []string `json:"members,omitempty"`
 	GraphGeneration int64    `json:"graph_generation,omitempty"`
+
+	// Graph carries the dependency-graph snapshot (shape + cumulative work
+	// counters + daemon memory) for the scalability experiments.
+	Graph *backend.GraphStats `json:"graph,omitempty"`
 }
 
 // NewSocketServer creates and starts a Unix socket server at the given path.
@@ -444,6 +452,21 @@ func (s *SocketServer) handleRequest(req Request) Response {
 			return Response{Status: "error", Message: err.Error()}
 		}
 		return Response{Status: "ok"}
+
+	case "graph_stats":
+		// Read-only introspection for the dependency-graph scaling experiments:
+		// node/edge/version counts, SCC shape, cumulative per-operation work
+		// (edge insertion, SCC detection, cascade walk, group finalization,
+		// rollback) and the daemon's Go heap. With reset=true the cumulative
+		// counters are zeroed AFTER being snapshotted, so one RPC both reports
+		// the previous phase and opens the next measurement window.
+		var st backend.GraphStats
+		if req.Reset {
+			st = shadowBackend.ResetGraphStats()
+		} else {
+			st = shadowBackend.GraphStatsSnapshot()
+		}
+		return Response{Status: "ok", Graph: &st}
 
 	default:
 		return Response{Status: "error", Message: "unknown action: " + req.Action}

@@ -1,0 +1,23 @@
+========================================================================
+  EXPERIMENT: exp4_dependency_propagation
+  Duration: 41.5s
+  Trials: 10 completed / 10 attempted (0 skipped, 0 infra_error)
+  Property checks: 67
+========================================================================
+
+  Property                        Violations        Rate                95% CI
+  ----------------------------  ------------  ----------  --------------------
+  rollback_set_mismatch                  0/7    0.000000  [0.000000, 0.409616]
+  downstream_not_rolled_back            0/22    0.000000  [0.000000, 0.154373]
+  unrelated_branch_affected             0/29    0.000000  [0.000000, 0.119445]
+  scc_partial_finalization               0/2    0.000000  [0.000000, 0.841886]
+  premature_downstream_release           0/2    0.000000  [0.000000, 0.841886]
+  dependency_edge_missing                0/4    0.000000  [0.000000, 0.602365]
+  absence_rollback_restores              0/1    0.000000  [0.000000, 0.975000]
+
+========================================================================
+
+  0 violations across 67 property checks in 10 completed trials
+
+  RESULT: ALL SAFETY PROPERTIES HELD
+========================================================================

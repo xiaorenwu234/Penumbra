@@ -1,0 +1,201 @@
+{
+  "experiment": "exp4_dependency_propagation",
+  "duration_seconds": 61.3,
+  "start_time": 1788772142.7347472,
+  "end_time": 1788772204.0361905,
+  "metadata": {
+    "orch_sock": "/tmp/shadow-orch.sock",
+    "shadowfs_mount": "/tmp/shadow-rq2-test/mnt",
+    "backing_store": "/tmp/shadow-rq2-test/orig",
+    "repeats": 1,
+    "run_id": "72142734"
+  },
+  "attempted_trials": 6,
+  "completed_trials": 5,
+  "skipped_trials": 0,
+  "infra_error_trials": 1,
+  "infrastructure_errors": 1,
+  "property_checks": 6,
+  "violations": 0,
+  "has_infra_errors": true,
+  "exit_code": 2,
+  "counters": {
+    "rollback_set_mismatch": {
+      "count": 0,
+      "total": 5,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.5218237501049814
+      ],
+      "details": []
+    },
+    "downstream_not_rolled_back": {
+      "count": 0,
+      "total": 0,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        1.0
+      ],
+      "details": []
+    },
+    "unrelated_branch_affected": {
+      "count": 0,
+      "total": 0,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        1.0
+      ],
+      "details": []
+    },
+    "scc_partial_finalization": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "premature_downstream_release": {
+      "count": 0,
+      "total": 0,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        1.0
+      ],
+      "details": []
+    },
+    "dependency_edge_missing": {
+      "count": 0,
+      "total": 0,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        1.0
+      ],
+      "details": []
+    }
+  },
+  "empty_counters": [
+    "downstream_not_rolled_back",
+    "unrelated_branch_affected",
+    "premature_downstream_release",
+    "dependency_edge_missing"
+  ],
+  "infra_errors": [
+    {
+      "scope": "dir-enumeration-0",
+      "stage": "InfrastructureError",
+      "message": "[INFRA:orchestrator_session_run] timeout: command timed out: 'ls -1 /tmp/shadow-rq2-test/mnt/exp4/direnum-72142734-0 > /dev/null'"
+    }
+  ],
+  "trials": [
+    {
+      "trial_id": "dir-enumeration-0",
+      "status": "infra_error",
+      "assertions": [],
+      "scenario": "dep_directory_enumeration",
+      "error": {
+        "scope": "dir-enumeration-0",
+        "stage": "InfrastructureError",
+        "message": "[INFRA:orchestrator_session_run] timeout: command timed out: 'ls -1 /tmp/shadow-rq2-test/mnt/exp4/direnum-72142734-0 > /dev/null'"
+      }
+    },
+    {
+      "trial_id": "chain-topology-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "chain trial=0 mismatch=False",
+          "meta": {
+            "topology": "chain",
+            "trial": 0
+          }
+        }
+      ],
+      "scenario": "topology_chain"
+    },
+    {
+      "trial_id": "fanout-topology-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "fanout trial=0 mismatch=False",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0
+          }
+        }
+      ],
+      "scenario": "topology_fanout"
+    },
+    {
+      "trial_id": "diamond-topology-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "diamond trial=0 mismatch=False",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0
+          }
+        }
+      ],
+      "scenario": "topology_diamond"
+    },
+    {
+      "trial_id": "independent-topology-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "independent trial=0 mismatch=False",
+          "meta": {
+            "topology": "independent",
+            "trial": 0
+          }
+        }
+      ],
+      "scenario": "topology_independent"
+    },
+    {
+      "trial_id": "scc-topology-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "scc trial=0 mismatch=False",
+          "meta": {
+            "topology": "scc",
+            "trial": 0
+          }
+        },
+        {
+          "property": "scc_partial_finalization",
+          "passed": true,
+          "detail": "scc trial=0 partial=False",
+          "meta": {
+            "topology": "scc",
+            "trial": 0
+          }
+        }
+      ],
+      "scenario": "topology_scc"
+    }
+  ],
+  "trials_truncated": false,
+  "total_trials": 6
+}

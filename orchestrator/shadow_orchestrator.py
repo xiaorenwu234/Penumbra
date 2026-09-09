@@ -49,6 +49,7 @@ import socket
 import os
 import sys
 import argparse
+import contextlib
 import logging
 import threading
 import signal
@@ -72,6 +73,44 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("orchestrator")
+
+
+def _ms_since(t0: float) -> float:
+    """Milliseconds elapsed since a time.perf_counter() reading.
+
+    The RQ3 scalability experiments have to report WHERE commit latency goes
+    (authorize / prepare_resolution / freeze / begin_finalize / wait / release
+    / ack), not just one opaque total, because the interesting question is
+    whether the dependency-graph work or the process-layer work dominates as
+    the agent count grows. Every phase of the finalization path therefore
+    stamps its own duration into the response.
+    """
+    return round((time.perf_counter() - t0) * 1000.0, 3)
+
+
+@contextlib.contextmanager
+def _timed_lock(lock, tm: Dict[str, float], wait_key: str, hold_key: str):
+    """Acquire `lock`, stamping the queue wait and the critical-section hold.
+
+    Lock WAIT is reported separately from lock HOLD: under a contended workload
+    the graph-sequence lock is the serialization point, so a rising wait next to
+    a flat hold means the per-commit graph work is constant and the queue is
+    what costs -- the distinction the contended-workload curve needs.
+
+    The hold stamp is in a finally because several paths return from INSIDE the
+    critical section. The important one is _fs_group_finalize's
+    authorized_pending return (an SCC member committing before its siblings),
+    which is exactly the case whose lock-hold time the SCC experiment reports;
+    a plain stamp after the block would silently drop it.
+    """
+    _t_wait = time.perf_counter()
+    with lock:
+        tm[wait_key] = _ms_since(_t_wait)
+        _t_hold = time.perf_counter()
+        try:
+            yield
+        finally:
+            tm[hold_key] = _ms_since(_t_hold)
 
 
 class SocketClient:
@@ -455,6 +494,14 @@ class ShadowOrchestrator:
 
         # Track observation state: cgroup_id → {log_path, cgroup_inode}
         self._observe_state: Dict[str, Dict[str, Any]] = {}
+
+        # Per-SESSION observation state: session_id → {log_path, cgroup_inode,
+        # cgroup_id, epoch_id} (or {"error": ...} when start_observe failed).
+        # The session path records the epoch's real trace so that
+        # session_resolve_epoch can audit the SEALED trace with the same
+        # PolicyIR it installs prospectively.
+        self._session_observe: Dict[str, Dict[str, Any]] = {}
+        self._session_trace_dir: Optional[str] = None
 
         # Per-epoch policy decisions that have passed audit and been recorded
         # in ShadowFS via authorize(epoch), but whose SCC may not yet be ready
@@ -878,7 +925,8 @@ class ShadowOrchestrator:
 
     def _fs_group_finalize(self, epoch_id: str, cgroup_id: str,
                            proc_policy: Optional[Dict] = None,
-                           pre_frozen_cgroup: Optional[str] = None) -> dict:
+                           pre_frozen_cgroup: Optional[str] = None,
+                           timings: Optional[Dict[str, float]] = None) -> dict:
         """Group-level ShadowFS finalization: prepare_resolution → begin_finalize →
         poll get_finalize_status. Replaces the single-epoch "commit" +
         "can_release" pair with the group-aware flow (Phase 3).
@@ -896,7 +944,15 @@ class ShadowOrchestrator:
           - state: "finalized", "failed", or "pending" (on success)
           - finalize_err: str (on failure)
           - message: str (on error)
+
+        timings: optional dict filled in-place with the per-phase millisecond
+        breakdown (fs_authorize_ms, fs_prepare_resolution_ms, fs_freeze_ms,
+        fs_begin_finalize_ms, fs_wait_finalized_ms, authz_to_finalized_ms,
+        finalize_lock_wait_ms, finalize_lock_held_ms). It is the caller's dict
+        so a commit can merge these into its own breakdown; when omitted the
+        stamps go to a throwaway dict (zero behaviour change).
         """
+        tm = timings if timings is not None else {}
         # Step 1: prepare_resolution — compute the SCC, get group_id + graph_gen.
         #
         # FUNDAMENTAL CONCURRENCY FIX: The _graph_sequence_lock serializes the
@@ -910,7 +966,10 @@ class ShadowOrchestrator:
         if epoch_id:
             prep_req["epoch_id"] = epoch_id
 
-        with self._graph_sequence_lock:
+        # Lock wait/hold are stamped by _timed_lock, including on the early
+        # authorized_pending return from inside the critical section.
+        with _timed_lock(self._graph_sequence_lock, tm,
+                         "finalize_lock_wait_ms", "finalize_lock_held_ms"):
             # CRITICAL ORDERING: authorize MUST come BEFORE prepare_resolution.
             # ShadowFS's authorize action advances graph_generation internally.
             # If prepare runs first, it returns gen=N, then authorize advances
@@ -927,7 +986,9 @@ class ShadowOrchestrator:
             if epoch_id:
                 auth_req["epoch_id"] = epoch_id
             try:
+                _t_auth = time.perf_counter()
                 auth = self.fs_client.request(auth_req)
+                tm["fs_authorize_ms"] = _ms_since(_t_auth)
             except Exception as e:  # noqa: BLE001
                 return {"status": "error", "message": f"authorize: {e}"}
             if not isinstance(auth, dict) or auth.get("status") != "ok":
@@ -938,6 +999,10 @@ class ShadowOrchestrator:
                                                             cgroup_id, proc_policy)
             if auth.get("policy_hash") and auth.get("policy_hash") != policy_hash:
                 return {"status": "error", "message": "ShadowFS policy_hash mismatch"}
+            # "authorization-completion -> finalization" starts here: the epoch
+            # is authorized, everything after this line is the cost of turning
+            # that authorization into a durably published group.
+            _t_authz_done = time.perf_counter()
             if hasattr(self, "_journal"):
                 # Post-action bookkeeping (the authorize RPC already happened):
                 # written now, made durable by the flush before this function
@@ -950,7 +1015,9 @@ class ShadowOrchestrator:
             # Step 1b: prepare_resolution — NOW returns the post-authorize
             # graph_generation. No ShadowFS call between here and begin_finalize.
             try:
+                _t_prep = time.perf_counter()
                 prep = self.fs_client.request(prep_req)
+                tm["fs_prepare_resolution_ms"] = _ms_since(_t_prep)
             except Exception as e:  # noqa: BLE001
                 return {"status": "error", "message": f"prepare_resolution: {e}"}
             if prep.get("status") != "ok":
@@ -989,6 +1056,7 @@ class ShadowOrchestrator:
             # ShadowFS's graph_generation, so this is safe inside the lock.)
             proc_client = getattr(self, "proc_client", None)
             if proc_client is not None:
+                _t_freeze = time.perf_counter()
                 for mcg in member_cgroups:
                     if mcg == pre_frozen_cgroup:
                         # Already frozen whole-cgroup by quiesce_for_commit
@@ -1009,6 +1077,7 @@ class ShadowOrchestrator:
                         self._cancel_group(group_id)
                         return {"status": "error",
                                 "message": f"freeze {mcg}: {freeze_resp}"}
+                tm["fs_freeze_ms"] = _ms_since(_t_freeze)
 
             # The authorized record (durable=False) needs no dedicated flush:
             # if lost to a crash the epoch replays as UNDECIDED (commit_intent
@@ -1033,9 +1102,10 @@ class ShadowOrchestrator:
                 })
             except Exception as e:  # noqa: BLE001
                 fin = {"status": "error", "message": str(e)}
+            tm["fs_begin_finalize_ms"] = _ms_since(_t0)
             if os.environ.get("SHADOW_TRACE_TIMING") == "1":
                 print(f"[timing] fs.begin_finalize_rpc "
-                      f"{(time.perf_counter() - _t0) * 1000:.3f}ms",
+                      f"{tm['fs_begin_finalize_ms']:.3f}ms",
                       file=sys.stderr, flush=True)
 
             # ShadowFS's internal async state machine (epoch transitions,
@@ -1049,6 +1119,10 @@ class ShadowOrchestrator:
             if "graph_generation mismatch" in fin_msg:
                 log.info("  begin_finalize: mismatch (ShadowFS internal async) "
                          "— re-preparing with fresh graph state")
+                # Counted, not just logged: this is the orchestrator-visible
+                # side of graph revalidation, the complement of ShadowFS's
+                # finalize_rejected_toctou counter.
+                tm["graph_revalidations"] = tm.get("graph_revalidations", 0.0) + 1
                 try:
                     prep2 = self.fs_client.request(prep_req)
                     if prep2.get("status") == "ok":
@@ -1087,6 +1161,7 @@ class ShadowOrchestrator:
         # paying the old 20ms quantization per poll.
         state = fin.get("state", "pending")
         poll_count = 0
+        _t_poll = time.perf_counter()
         while state == "pending":
             poll_count += 1
             if poll_count > 15000:  # 30s timeout (at 2ms interval)
@@ -1107,6 +1182,14 @@ class ShadowOrchestrator:
             if status.get("status") != "ok":
                 return status
             state = status.get("state", "pending")
+
+        # BeginFinalize promotes synchronously, so this is normally ~0ms: an
+        # SCC whose members are still converging shows up HERE (and as
+        # authorized_pending), which is exactly the finalization-wait signal
+        # the SCC experiment measures.
+        tm["fs_wait_finalized_ms"] = _ms_since(_t_poll)
+        tm["finalize_polls"] = float(poll_count)
+        tm["authz_to_finalized_ms"] = _ms_since(_t_authz_done)
 
         finalize_err = ""
         if state == "failed":
@@ -1235,7 +1318,11 @@ class ShadowOrchestrator:
         if session_id and is_primary_session:
             try:
                 proxy = self._get_proxy()
-                proxy.finalize_commit(session_id)
+                # Forward the member's authorized policy: without it ShadowProc
+                # resumes the candidate ENFORCED + allow-all, releasing effects
+                # this epoch was never authorized for (same contract as the
+                # sibling path's _release_proc below).
+                proxy.finalize_commit(session_id, proc_policy=proc_policy)
                 return True, proxy.get_output(session_id)
             except Exception as e:  # noqa: BLE001
                 log.error("  finalize_commit(%s) failed during group release: %s", session_id, e)
@@ -1994,6 +2081,33 @@ class ShadowOrchestrator:
         resp = self.fs_client.request({"action": "list_agents"})
         return resp.get("agents", [])
 
+    def epoch_states(self) -> List[dict]:
+        """Per-epoch ShadowFS state (epoch_id/state/versions/cgroup/session).
+
+        list_agents() deliberately returns only IDs. The experiments need the
+        state-machine position to distinguish "authorized but not finalized"
+        (an SCC still waiting for a sibling member) from "finalized", and to
+        poll a contended commit to completion instead of trusting the first
+        response.
+        """
+        resp = self.fs_client.request({"action": "list_agents"})
+        return resp.get("agents_info", []) or []
+
+    def graph_stats(self, reset: bool = False) -> dict:
+        """Dependency-graph shape + cumulative maintenance counters (ShadowFS).
+
+        Measurement-only surface: nothing here influences a decision. An
+        experiment resets the counters, runs a phase, then reads the delta to
+        attribute edges inserted, Tarjan sweeps, cascade-set queries and
+        TOCTOU revalidations to the invocations it issued. reset=True returns
+        the PRE-reset snapshot, so reporting one phase and starting the next
+        from a clean delta is a single RPC.
+
+        Returns the ShadowFS response: {"status": "ok", "graph": {...}}.
+        """
+        return self.fs_client.request({"action": "graph_stats",
+                                       "reset": bool(reset)})
+
     def list_frozen(self, cgroup_id: Optional[str] = None) -> List[dict]:
         """List frozen processes, optionally filtered by cgroup."""
         if cgroup_id:
@@ -2287,6 +2401,13 @@ class ShadowOrchestrator:
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
             return {"status": "error", "message": f"unknown session {session_id}"}
+        # Per-phase breakdown of epoch begin. The multi-agent scaling
+        # experiment reports these separately because inserting a graph node is
+        # O(1) while forking the candidate is a process-layer cost: which of the
+        # two dominates decides whether the epoch-begin curve may flatten as
+        # the agent count grows.
+        tm: Dict[str, float] = {}
+        _t_begin = time.perf_counter()
         # Resolve the owning agent (declared at session_open, or supplied here).
         # This enforces immutable ownership: if the session already has an
         # owner, the supplied agent_id MUST match it.
@@ -2298,6 +2419,7 @@ class ShadowOrchestrator:
         # nothing half-open. Note this serializes the agent across ALL of its
         # sessions, not just this one.
         busy = self._agent_barrier(aid, session_id)
+        tm["agent_barrier_ms"] = _ms_since(_t_begin)
         if busy is not None:
             return busy
         # The orchestrator (not ShadowFS) mints the EpochID: the epoch -- not
@@ -2312,13 +2434,17 @@ class ShadowOrchestrator:
         # graph and advances graph_generation. Without this, a concurrent
         # begin_epoch can advance the graph between another thread's
         # prepare_resolution and begin_finalize, causing TOCTOU mismatch.
+        _t_lock = time.perf_counter()
         with self._graph_sequence_lock:
+            tm["begin_lock_wait_ms"] = _ms_since(_t_lock)
+            _t_fs = time.perf_counter()
             fs_resp = self.fs_client.request({
                 "action": "begin_epoch",
                 "epoch_id": epoch_id,
                 "cgroup_id": cgroup_id,
                 "session_id": session_id,
             })
+            tm["fs_begin_epoch_ms"] = _ms_since(_t_fs)
         if fs_resp.get("status") != "ok":
             log.error("  ShadowFS begin_epoch failed: %s", fs_resp.get("message"))
             # Nothing is in flight after a failed open -- free the agent slot or
@@ -2328,6 +2454,7 @@ class ShadowOrchestrator:
         with self._sessions_lock:
             self._session_epochs[session_id] = epoch_id
         # Step 2: ShadowProc baseline/candidate fork.
+        _t_proc = time.perf_counter()
         try:
             self._get_proxy().begin_epoch(session_id)
         except NotAdmissibleError as e:
@@ -2358,7 +2485,15 @@ class ShadowOrchestrator:
             log.error("  begin_epoch (process layer) failed: %s", e)
             self._agent_release(aid)
             return {"status": "error", "message": str(e)}
-        return {"status": "ok", "cgroup_id": cgroup_id, "epoch_id": epoch_id}
+        # Step 3: start recording the epoch's real syscall trace. The candidate
+        # is parked at its command boundary here, so nothing the epoch does can
+        # precede the recorder. Only active when ShadowObserve is configured;
+        # a start failure is remembered so resolve can fail closed.
+        self._session_start_observe(session_id, cgroup_id, epoch_id)
+        tm["proc_begin_epoch_ms"] = _ms_since(_t_proc)
+        tm["total_ms"] = _ms_since(_t_begin)
+        return {"status": "ok", "cgroup_id": cgroup_id, "epoch_id": epoch_id,
+                "timings": tm}
 
     def session_commit_epoch(self, session_id: str,
                              agent_id: Optional[str] = None,
@@ -2454,6 +2589,9 @@ class ShadowOrchestrator:
                                  agent_id=aid or "",
                                  metadata=policy_metadata or {})
             try:
+                # The trace is discarded with the epoch; stop the recorder so it
+                # cannot keep writing into a log nobody will ever audit.
+                self._session_stop_observe(session_id)
                 return self._rollback_epoch_impl(session_id)
             finally:
                 self._agent_release(aid)
@@ -2487,12 +2625,79 @@ class ShadowOrchestrator:
                              metadata=policy_metadata or {})
 
         try:
-            return self._commit_epoch_impl(session_id, proc_policy=proc_policy)
+            # RETROSPECTIVE AUDIT of the sealed trace, using the SAME PolicyIR
+            # that is about to be installed prospectively. This is the step that
+            # makes "allow" a decision the SYSTEM takes: if the epoch already
+            # performed an operation the policy does not allow, the epoch is
+            # rejected here and never promoted.
+            audit = self._session_seal_and_audit(session_id, ir)
+            if audit.get("error"):
+                # FAIL CLOSED: the trace could not be sealed or parsed, so the
+                # epoch's history is unknown. Rolling back is the only sound
+                # outcome -- promoting would release unaudited effects.
+                log.error("  audit fail-closed sid=%s: %s",
+                          session_id, audit["error"])
+                self._journal.append("resolve_audit_fail_closed",
+                                     sid=session_id, agent_id=aid or "",
+                                     reason=audit["error"])
+                rb = self._rollback_epoch_impl(session_id)
+                return {"status": "error",
+                        "message": f"audit fail-closed: {audit['error']}",
+                        "resolved": "deny", "audit": audit,
+                        "rollback_status": rb.get("status")}
+            if audit.get("audited") and audit.get("violations"):
+                vsum = "; ".join(
+                    str(v)[:200] for v in audit["violations"][:5])
+                log.warning("  audit REJECTED epoch sid=%s (%d violations): %s",
+                            session_id, len(audit["violations"]), vsum)
+                self._journal.append("resolve_audit_reject", sid=session_id,
+                                     agent_id=aid or "",
+                                     policy_hash=self._policy_hash(proc_policy),
+                                     violations=audit["violations"][:50])
+                rb = self._rollback_epoch_impl(session_id)
+                if rb.get("status") != "ok":
+                    return {"status": "error",
+                            "message": "audit rejected the epoch but rollback "
+                                       f"failed: {rb.get('message')}",
+                            "resolved": "deny", "audit": audit}
+                # The RPC itself succeeded: the system audited the sealed trace
+                # and refused the epoch on its own.
+                return {"status": "ok", "resolved": "deny",
+                        "audit_rejected": True, "audit": audit}
+            result = self._commit_epoch_impl(session_id,
+                                             proc_policy=proc_policy)
+            if isinstance(result, dict) and audit.get("audited"):
+                result.setdefault("resolved", "allow")
+                result.setdefault("audit", audit)
+            return result
         finally:
             self._agent_release(aid)
 
     def _commit_epoch_impl(self, session_id: str,
                            proc_policy: Optional[Dict] = None) -> dict:
+        """Time the commit and attach the per-phase breakdown to the response.
+
+        Thin wrapper, so EVERY caller (session_commit_epoch, the allow path of
+        session_resolve_epoch, crash recovery) gets `timings` without threading
+        a dict through each of them. The stamps themselves are written by
+        _commit_epoch_impl_timed and by _fs_group_finalize into the same dict.
+
+        total_ms brackets the whole implementation, so it equals the sum of the
+        stamped phases plus the parts that are not individually stamped (sibling
+        release loop, journal appends). A caller can therefore always tell how
+        much of a commit is accounted for.
+        """
+        tm: Dict[str, float] = {}
+        _t0 = time.perf_counter()
+        result = self._commit_epoch_impl_timed(session_id, proc_policy, tm)
+        tm["total_ms"] = _ms_since(_t0)
+        if isinstance(result, dict):
+            result.setdefault("timings", tm)
+        return result
+
+    def _commit_epoch_impl_timed(self, session_id: str,
+                                 proc_policy: Optional[Dict] = None,
+                                 timings: Optional[Dict[str, float]] = None) -> dict:
         """
         Accept the current epoch: keep the candidate as canonical (ShadowProc)
         AND durably PROMOTE the epoch's file changes (ShadowFS). The session
@@ -2515,6 +2720,7 @@ class ShadowOrchestrator:
             return {"status": "error",
                     "message": "proc_policy is required for _commit_epoch_impl. "
                                "The implicit allow-all path has been removed."}
+        tm = timings if timings is not None else {}
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
             return {"status": "error", "message": f"unknown session {session_id}"}
@@ -2534,7 +2740,9 @@ class ShadowOrchestrator:
         # layer cannot finalize we can still roll the epoch back losslessly.
         quiesce_frozen = False
         try:
+            _t_quiesce = time.perf_counter()
             quiesce_frozen = proxy.quiesce_for_commit(session_id)
+            tm["proc_quiesce_ms"] = _ms_since(_t_quiesce)
         except Exception as e:  # noqa: BLE001
             log.error("  quiesce_for_commit (process layer) failed: %s", e)
             return {"status": "error", "message": str(e)}
@@ -2551,7 +2759,8 @@ class ShadowOrchestrator:
             # caller's allowed_ops. No allow-all fallback.
             fs_result = self._fs_group_finalize(epoch_id, cgroup_id,
                                                 proc_policy=proc_policy,
-                                                pre_frozen_cgroup=(cgroup_id if quiesce_frozen else None))
+                                                pre_frozen_cgroup=(cgroup_id if quiesce_frozen else None),
+                                                timings=tm)
             if fs_result.get("status") != "ok":
                 log.error("  ShadowFS group finalize failed: %s -- baseline "
                           "preserved", fs_result.get("message"))
@@ -2586,6 +2795,7 @@ class ShadowOrchestrator:
             # ever needs the last FS-committed-but-unreleased epoch's output,
             # which the incremental record provides.
             committed_output = proxy.snapshot_epoch_output(session_id)
+            _t_journal = time.perf_counter()
             member_policies = self._member_policies(fs_result["members"])
             # Non-durable: the release_intent append below is durable and no
             # externally-visible step runs between the two (only local dict
@@ -2632,6 +2842,8 @@ class ShadowOrchestrator:
             # Release sibling members first. If any sibling cannot be released,
             # keep the primary session fenced and do NOT ack the group.
             sibling_failed = False
+            tm["journal_ms"] = _ms_since(_t_journal)
+            _t_release = time.perf_counter()
             for idx, mcg in enumerate(member_cgroups):
                 if mcg == cgroup_id:
                     continue
@@ -2671,8 +2883,11 @@ class ShadowOrchestrator:
 
             # All siblings are out (or none exist). Release the primary session
             # via the SessionProxy-specific commit path, then mark it done.
+            # proc_policy (mandatory, checked above) is the policy this epoch was
+            # audited against: the candidate's still-fenced effects must be
+            # resumed UNDER IT, not under ShadowProc's allow-all default.
             try:
-                proxy.finalize_commit(session_id)
+                proxy.finalize_commit(session_id, proc_policy=proc_policy)
             except Exception as e:  # noqa: BLE001
                 # Outcome is already durably COMMITTED and release_intent is
                 # durable: recovery/retry must finish the primary release before
@@ -2698,9 +2913,11 @@ class ShadowOrchestrator:
             # without this step the released shell waits on a frozen child
             # forever and the epoch's held effects never get out -- exactly
             # the "commit -> full release" the SessionProxy contract promises.
-            # continue_by_cgroup resumes them under ENFORCED+allow-all so the
-            # held syscalls auto-restart and run to completion. Must happen
-            # BEFORE the group ack (effects out first, then ack).
+            # The SAME authorized policy is forwarded: a policy-less
+            # continue_by_cgroup would reinstall ENFORCED+allow-all over the
+            # policy finalize_commit just installed, widening the release for
+            # every process still in the cgroup. Must happen BEFORE the group
+            # ack (effects out first, then ack).
             try:
                 frozen_resp = self.proc_client.request(
                     {"action": "list_frozen", "cgroup_id": cgroup_id})
@@ -2717,7 +2934,8 @@ class ShadowOrchestrator:
                 try:
                     resume_resp = self.proc_client.request(
                         {"action": "continue_by_cgroup",
-                         "cgroup_id": cgroup_id})
+                         "cgroup_id": cgroup_id,
+                         "policy": proc_policy})
                 except Exception as e:  # noqa: BLE001
                     resume_resp = {"status": "error", "message": str(e)}
                 if resume_resp.get("status") != "ok":
@@ -2730,6 +2948,7 @@ class ShadowOrchestrator:
                     log.info("  Fence released: resumed PIDs %s",
                              resume_resp.get("pids", []))
             released_cgroups.add(cgroup_id)
+            tm["proc_release_ms"] = _ms_since(_t_release)
             self._record_epoch_result(primary_member or (epoch_id or ""),
                                       cgroup_id, committed_output,
                                       fs_result["group_id"])
@@ -2742,8 +2961,10 @@ class ShadowOrchestrator:
 
             # External effects for every member are out -- only now may ShadowFS
             # drop the group's terminal records.
+            _t_ack = time.perf_counter()
             acked = self._fs_group_ack(fs_result["group_id"], cgroup_id,
                                        epoch_id or "")
+            tm["fs_ack_ms"] = _ms_since(_t_ack)
             if not acked:
                 self._park_pending_group(fs_result["group_id"],
                                          fs_result["members"],
@@ -2776,7 +2997,9 @@ class ShadowOrchestrator:
         # replay from release_intent), but this keeps the invariant simple.
         # Together with commit_intent and release_intent this is 3 fsyncs per
         # commit (was 9).
+        _t_flush = time.perf_counter()
         self._journal.flush()
+        tm["journal_flush_ms"] = _ms_since(_t_flush)
         self._drop_authorized_members(fs_result["members"])
         with self._sessions_lock:
             self._session_epochs.pop(session_id, None)
@@ -2811,6 +3034,23 @@ class ShadowOrchestrator:
             self._agent_release(aid)
 
     def _rollback_epoch_impl(self, session_id: str) -> dict:
+        """Time the rollback and attach the per-phase breakdown + cascade size.
+
+        Same wrapper rationale as _commit_epoch_impl: the deny path of
+        session_resolve_epoch, the audit fail-closed path and the explicit
+        session_rollback_epoch all end up here, and the cascading-rollback
+        experiment needs fs-vs-process attribution for each of them.
+        """
+        tm: Dict[str, float] = {}
+        _t0 = time.perf_counter()
+        result = self._rollback_epoch_impl_timed(session_id, tm)
+        tm["total_ms"] = _ms_since(_t0)
+        if isinstance(result, dict):
+            result.setdefault("timings", tm)
+        return result
+
+    def _rollback_epoch_impl_timed(self, session_id: str,
+                                   timings: Optional[Dict[str, float]] = None) -> dict:
         """
         Roll back the current epoch losslessly: undo the epoch's file changes
         (ShadowFS), then discard the candidate and resume the pristine baseline
@@ -2825,6 +3065,7 @@ class ShadowOrchestrator:
         cgroup_id = self._session_cgroup(session_id)
         if not cgroup_id:
             return {"status": "error", "message": f"unknown session {session_id}"}
+        tm = timings if timings is not None else {}
         epoch_id = self._session_epoch(session_id)
         log.info("SESSION_ROLLBACK_EPOCH sid=%s cgroup=%s epoch=%s",
                  session_id, cgroup_id, epoch_id or "<active>")
@@ -2837,15 +3078,19 @@ class ShadowOrchestrator:
             rb_req = {"action": "rollback_epoch", "cgroup_id": cgroup_id}
             if epoch_id:
                 rb_req["epoch_id"] = epoch_id
+            _t_lock = time.perf_counter()
             with self._graph_sequence_lock:
+                tm["rollback_lock_wait_ms"] = _ms_since(_t_lock)
+                _t_rpc = time.perf_counter()
                 fs_resp = self.fs_client.request(rb_req)
+                tm["fs_rollback_ms"] = _ms_since(_t_rpc)
         except Exception as e:  # noqa: BLE001 - fail closed: do not touch procs
             log.error("  ShadowFS rollback_epoch unreachable: %s -- "
                       "NOT rolling back the process layer", e)
             return {"status": "error", "message": str(e)}
         if os.environ.get("SHADOW_TRACE_TIMING") == "1":
             print(f"[timing] rb.rollback_epoch_rpc "
-                  f"{(time.perf_counter() - _t0) * 1000:.3f}ms",
+                  f"{tm.get('fs_rollback_ms', _ms_since(_t0)):.3f}ms",
                   file=sys.stderr, flush=True)
         if fs_resp.get("status") != "ok":
             # Refused/failed: the file state cannot be undone, so leave the
@@ -2866,14 +3111,19 @@ class ShadowOrchestrator:
             print(f"[timing] rb.proxy_reject "
                   f"{(time.perf_counter() - _t1) * 1000:.3f}ms",
                   file=sys.stderr, flush=True)
+        tm["proc_rollback_ms"] = _ms_since(_t1)
         self._journal.append("rollback", sid=session_id, cgroup=cgroup_id,
                              epoch=epoch_id or "")
         affected_epochs = fs_resp.get("affected_epochs", []) or ([epoch_id] if epoch_id else [])
+        _t_cleanup = time.perf_counter()
         self._cleanup_after_rollback([cgroup_id], affected_epochs)
+        tm["cleanup_ms"] = _ms_since(_t_cleanup)
         with self._sessions_lock:
             self._session_epochs.pop(session_id, None)
         self._recovered_outputs.pop(session_id, None)
-        return {"status": "ok"}
+        # affected_epochs is reported because cascading-rollback cost is only
+        # interpretable next to the size of the cascade it undid.
+        return {"status": "ok", "affected_epochs": affected_epochs}
 
     def session_get_output(self, session_id: str) -> dict:
         """Return the session's committed (commit-gated) transcript.
@@ -2894,6 +3144,9 @@ class ShadowOrchestrator:
 
     def session_close(self, session_id: str) -> dict:
         """Tear down the session (kills its cgroup, releases the FIFO/cgroup)."""
+        # Stop any observation still attached to the session (closed mid-epoch),
+        # otherwise the recorder keeps a dead cgroup inode registered forever.
+        self._session_stop_observe(session_id)
         proxy = self._get_proxy()
         proxy.close_session(session_id)
         with self._sessions_lock:
@@ -2996,6 +3249,190 @@ class ShadowOrchestrator:
         if resp.get("status") == "ok":
             log.info("STOP_OBSERVE cgroup=%s", cgroup_id)
         return resp
+
+    # ── Session-scoped observation (retrospective audit of a speculative epoch)
+
+    def _session_trace_path(self, epoch_id: str, cgroup_id: str) -> str:
+        """Per-epoch trace file. Created lazily under a private temp dir."""
+        if self._session_trace_dir is None:
+            self._session_trace_dir = tempfile.mkdtemp(
+                prefix="shadow-epoch-trace-")
+        safe_epoch = (epoch_id or "none").replace("/", "_")
+        safe_cg = cgroup_id.strip("/").replace("/", "_") or "cgroup"
+        return os.path.join(self._session_trace_dir,
+                            f"{safe_epoch}-{safe_cg}.jsonl")
+
+    def _session_start_observe(self, session_id: str, cgroup_id: str,
+                               epoch_id: str) -> None:
+        """Start recording the epoch's real syscall trace.
+
+        No-op when ShadowObserve is not configured (the session path then
+        behaves exactly as before: no retrospective audit is possible, and
+        resolve reports ``audited=False`` instead of pretending it audited).
+
+        A failure is remembered in ``_session_observe[session_id]['error']`` so
+        that :meth:`_session_seal_and_audit` can fail the epoch closed rather
+        than committing work whose history was never captured.
+        """
+        if not self.observe_client:
+            return
+        try:
+            cgroup_path = self._get_proxy().sessions[session_id].cgroup_path
+            cgroup_inode = os.stat(cgroup_path).st_ino
+        except Exception as e:  # noqa: BLE001
+            log.error("  session observe: cannot resolve cgroup inode for "
+                      "sid=%s: %s", session_id, e)
+            self._session_observe[session_id] = {
+                "error": f"cgroup inode unavailable: {e}"}
+            return
+        log_path = self._session_trace_path(epoch_id, cgroup_id)
+        try:
+            resp = self.observe_client.request({
+                "action": "start_observe",
+                "cgroup_id": cgroup_inode,
+                "log_path": log_path,
+                "epoch_id": epoch_id or None,
+            })
+        except Exception as e:  # noqa: BLE001
+            log.error("  session observe: start_observe unreachable "
+                      "sid=%s: %s", session_id, e)
+            self._session_observe[session_id] = {
+                "error": f"start_observe unreachable: {e}"}
+            return
+        if resp.get("status") != "ok":
+            log.error("  session observe: start_observe failed sid=%s: %s",
+                      session_id, resp.get("message"))
+            self._session_observe[session_id] = {
+                "error": f"start_observe: {resp.get('message')}"}
+            return
+        log.info("  session observe: recording sid=%s epoch=%s log=%s",
+                 session_id, epoch_id, log_path)
+        self._session_observe[session_id] = {
+            "log_path": log_path,
+            "cgroup_inode": cgroup_inode,
+            "cgroup_id": cgroup_id,
+            "epoch_id": epoch_id,
+        }
+        # Mirror into the cgroup-keyed map the diagnostics actions use.
+        self._observe_state[cgroup_id] = {"log_path": log_path,
+                                          "cgroup_inode": cgroup_inode}
+
+    def _session_stop_observe(self, session_id: str) -> Optional[dict]:
+        """Stop (and forget) the session's recorder. Idempotent, best effort."""
+        state = self._session_observe.pop(session_id, None)
+        if state is None or not self.observe_client:
+            return None
+        cgroup_id = state.get("cgroup_id")
+        if cgroup_id and self._observe_state.get(cgroup_id, {}).get(
+                "log_path") == state.get("log_path"):
+            self._observe_state.pop(cgroup_id, None)
+        inode = state.get("cgroup_inode")
+        if not inode:
+            return None
+        try:
+            return self.observe_client.request({
+                "action": "stop_observe", "cgroup_id": inode})
+        except Exception as e:  # noqa: BLE001 - teardown must not raise
+            log.warning("  session observe: stop_observe failed sid=%s: %s",
+                        session_id, e)
+            return None
+
+    def _session_seal_and_audit(self, session_id: str, ir) -> dict:
+        """Drain + seal the epoch trace, then audit it against ``ir``.
+
+        This is the retrospective projection of the SAME PolicyIR that
+        ``session_resolve_epoch`` installs prospectively, which is what makes
+        the two projections comparable instead of independently written.
+
+        Returns one of:
+          {"audited": False, "reason": ...}  no recorder for this epoch
+          {"audited": True, "sealed": True, "complete": True,
+           "total_events": N, "violations": [...]}
+          {"audited": False, "error": ...}   seal/audit failed -> FAIL CLOSED
+        """
+        state = self._session_observe.get(session_id)
+        if not self.observe_client:
+            return {"audited": False,
+                    "reason": "ShadowObserve not configured"}
+        if state is None:
+            return {"audited": False,
+                    "reason": "no observation active for this session"}
+        if state.get("error"):
+            # The recorder never started: the epoch's history is unknown.
+            return {"audited": False, "error": state["error"]}
+
+        log_path = state["log_path"]
+        inode = state["cgroup_inode"]
+
+        # Step 1: seal. stop_observe drains the ring-buffer tail and closes the
+        # log, so the audit sees a complete, immutable record.
+        try:
+            stop_resp = self.observe_client.request({
+                "action": "stop_observe", "cgroup_id": inode})
+        except Exception as e:  # noqa: BLE001
+            self._session_observe.pop(session_id, None)
+            return {"audited": False, "error": f"stop_observe unreachable: {e}"}
+        self._session_observe.pop(session_id, None)
+        cgroup_id = state.get("cgroup_id")
+        if cgroup_id and self._observe_state.get(cgroup_id, {}).get(
+                "log_path") == log_path:
+            self._observe_state.pop(cgroup_id, None)
+
+        # An incomplete log implies rollback: dropped events, path-reconstruction
+        # failures or a write error mean the record is not faithful, and auditing
+        # it could pass unaudited effects. `complete` defaults to False so an
+        # older daemon also fails closed.
+        if (stop_resp.get("status") != "ok"
+                or not stop_resp.get("complete", False)
+                or stop_resp.get("dropped_events", 0) > 0
+                or stop_resp.get("path_errors", 0) > 0
+                or stop_resp.get("write_error", False)
+                or stop_resp.get("drain_error", False)):
+            return {"audited": False, "sealed": False,
+                    "error": "observation log incomplete at stop "
+                             f"(complete={stop_resp.get('complete')}, "
+                             f"dropped={stop_resp.get('dropped_events')}, "
+                             f"path_errors={stop_resp.get('path_errors')}, "
+                             f"write_error={stop_resp.get('write_error')}, "
+                             f"drain_error={stop_resp.get('drain_error')}, "
+                             f"status={stop_resp.get('status')})"}
+
+        # Step 2: audit the SEALED trace with the policy's audit projection.
+        try:
+            audit_rules = ir.to_audit_rules()
+        except ValueError as e:
+            return {"audited": False, "sealed": True,
+                    "error": f"invalid policy (audit rules): {e}"}
+        try:
+            audit_resp = self.observe_client.request({
+                "action": "audit", "log_path": log_path,
+                "rules": audit_rules})
+        except Exception as e:  # noqa: BLE001
+            return {"audited": False, "sealed": True,
+                    "error": f"audit unreachable: {e}"}
+        if audit_resp.get("status") != "ok":
+            return {"audited": False, "sealed": True,
+                    "error": f"audit failed: {audit_resp.get('message')}"}
+        # Same fail-closed rule as submit_policy: an unparsable record is an
+        # unknown event that may hide a violation.
+        if (not audit_resp.get("complete", False)
+                or audit_resp.get("parse_errors", 0) > 0):
+            return {"audited": False, "sealed": True,
+                    "error": "audit log integrity failure "
+                             f"(complete={audit_resp.get('complete')}, "
+                             f"parse_errors={audit_resp.get('parse_errors')})",
+                    "total_events": audit_resp.get("total_events", 0)}
+
+        violations = audit_resp.get("violations", []) or []
+        log.info("  session audit sid=%s: %d events, %d violations",
+                 session_id, audit_resp.get("total_events", 0),
+                 len(violations))
+        return {"audited": True, "sealed": True, "complete": True,
+                "log_path": log_path,
+                "total_events": audit_resp.get("total_events", 0),
+                "total_violations": audit_resp.get("total_violations",
+                                                   len(violations)),
+                "violations": violations}
 
     def submit_policy(self, cgroup_id: str, allowed_ops: List[Dict]) -> dict:
         """
@@ -3532,6 +3969,13 @@ class OrchestratorServer:
                 if not epoch_id:
                     return {"status": "error", "message": "epoch_id required"}
                 return self.orch.get_epoch_result(epoch_id)
+
+            elif action == "epoch_states":
+                return {"status": "ok", "epochs": self.orch.epoch_states()}
+
+            elif action == "graph_stats":
+                # Passthrough to ShadowFS: the dependency graph lives there.
+                return self.orch.graph_stats(bool(req.get("reset", False)))
 
             elif action == "start_observe":
                 if not cgroup_id:

@@ -1,0 +1,129 @@
+{
+  "experiment": "exp2_audit_consistency",
+  "duration_seconds": 124.57,
+  "start_time": 1788769644.4367669,
+  "end_time": 1788769769.0048382,
+  "metadata": {
+    "orch_sock": "/tmp/shadow-orch.sock",
+    "shadowfs_mount": "/tmp/shadow-rq2-test/mnt",
+    "backing_store": "/tmp/shadow-rq2-test/orig",
+    "repeats": 1,
+    "run_id": "69644436"
+  },
+  "attempted_trials": 6,
+  "completed_trials": 2,
+  "skipped_trials": 0,
+  "infra_error_trials": 4,
+  "infrastructure_errors": 4,
+  "property_checks": 2,
+  "violations": 0,
+  "has_infra_errors": true,
+  "exit_code": 2,
+  "counters": {
+    "dual_path_rollback_complete": {
+      "count": 0,
+      "total": 2,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.8418861169915808
+      ],
+      "details": []
+    }
+  },
+  "empty_counters": [],
+  "infra_errors": [
+    {
+      "scope": "hist-write-allowed-0",
+      "stage": "resolve_fail_closed",
+      "message": "audit fail-closed: start_observe unreachable: Connection to /tmp/shadow_observe.sock closed"
+    },
+    {
+      "scope": "hist-write-rejected-0",
+      "stage": "resolve_fail_closed",
+      "message": "audit fail-closed: start_observe unreachable: [Errno 32] Broken pipe"
+    },
+    {
+      "scope": "allow-hist-deny-future-0",
+      "stage": "resolve_fail_closed",
+      "message": "invalid policy (compile failed): unknown policy event_type: 'READ'"
+    },
+    {
+      "scope": "future-connect-denied-0",
+      "stage": "resolve_fail_closed",
+      "message": "invalid policy (compile failed): unknown policy event_type: 'READ'"
+    }
+  ],
+  "trials": [
+    {
+      "trial_id": "hist-write-allowed-0",
+      "status": "infra_error",
+      "assertions": [],
+      "scenario": "allow_history",
+      "error": {
+        "scope": "hist-write-allowed-0",
+        "stage": "resolve_fail_closed",
+        "message": "audit fail-closed: start_observe unreachable: Connection to /tmp/shadow_observe.sock closed"
+      }
+    },
+    {
+      "trial_id": "hist-write-rejected-0",
+      "status": "infra_error",
+      "assertions": [],
+      "scenario": "reject_history",
+      "error": {
+        "scope": "hist-write-rejected-0",
+        "stage": "resolve_fail_closed",
+        "message": "audit fail-closed: start_observe unreachable: [Errno 32] Broken pipe"
+      }
+    },
+    {
+      "trial_id": "allow-hist-deny-future-0",
+      "status": "infra_error",
+      "assertions": [],
+      "scenario": "allow_history_deny_future",
+      "error": {
+        "scope": "allow-hist-deny-future-0",
+        "stage": "resolve_fail_closed",
+        "message": "invalid policy (compile failed): unknown policy event_type: 'READ'"
+      }
+    },
+    {
+      "trial_id": "future-connect-denied-0",
+      "status": "infra_error",
+      "assertions": [],
+      "scenario": "deny_future_connect",
+      "error": {
+        "scope": "future-connect-denied-0",
+        "stage": "resolve_fail_closed",
+        "message": "invalid policy (compile failed): unknown policy event_type: 'READ'"
+      }
+    },
+    {
+      "trial_id": "dual-path-rename-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-hardlink-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    }
+  ],
+  "trials_truncated": false,
+  "total_trials": 6
+}

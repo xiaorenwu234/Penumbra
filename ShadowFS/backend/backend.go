@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -156,6 +157,12 @@ type Backend struct {
 	chkptDone    chan struct{} // closed when checkpointLoop exits
 	closeOnce    sync.Once
 
+	// chkptHeartbeat is the UnixNano of the last completed checkpointLoop pass,
+	// read by stallWatchdog to detect a total wedge. Atomic, and the watchdog
+	// touches no other backend state: b.mu/b.opRW are what a wedge contends, so
+	// the detector must not need them.
+	chkptHeartbeat atomic.Int64
+
 	// Open FD tracking: epochID → list of tracked fds. When a cascade
 	// rollback cleans up an epoch, all its tracked fds are force-closed so
 	// the process gets EBADF on the next I/O instead of silently reading a
@@ -167,6 +174,10 @@ type Backend struct {
 	// tracked (orig) logical paths whose speculative versions were removed,
 	// so the FUSE layer can drop stale kernel dentry cache entries. Set once
 	// at startup; read without locking.
+	//
+	// It is invoked ONLY through notifyInvalidated, with no backend lock held.
+	// Delivering an invalidation writes a notify message to /dev/fuse, which
+	// blocks in the kernel and can stay blocked.
 	invalidateFn func(paths []string)
 
 	// mountDir is the FUSE mountpoint (set once at startup via SetMountDir).
@@ -193,6 +204,10 @@ type Backend struct {
 	// Per-epoch statistics for summary logging (Optimization 5).
 	epochStats   map[EpochID]*EpochStats
 	epochStatsMu sync.Mutex
+
+	// Dependency-graph scalability counters (see graph_stats.go). Guarded by
+	// mu, measurement-only: never persisted, never consulted for a decision.
+	graphCtr graphCounters
 }
 
 // SetMountDir records the FUSE mountpoint so commit-time writable-MAP_SHARED
@@ -207,8 +222,35 @@ func (b *Backend) SetMountDir(dir string) {
 // SetInvalidateCallback registers a function invoked after a rollback with the
 // tracked logical paths whose versions were removed, so the FUSE layer can
 // invalidate stale kernel dentry cache entries. Must be set before serving.
+//
+// The callback runs on the rolling-back goroutine with NO backend lock held,
+// and it is allowed to block: the FUSE layer implements it as a notify write
+// to /dev/fuse, which the kernel may stall (it needs dcache locks that a
+// request this same daemon has not answered yet may be holding).
 func (b *Backend) SetInvalidateCallback(fn func(paths []string)) {
 	b.invalidateFn = fn
+}
+
+// notifyInvalidated delivers the stale-dentry notifications a rollback
+// produced. It must be called with b.mu AND b.opRW both released.
+//
+// That ordering is the whole point. This ends in a write to /dev/fuse, and a
+// write there can block indefinitely: the kernel has to take the dcache locks
+// for the entry being invalidated, and those can already be held by a process
+// sitting in a FUSE request that this daemon has not answered. Calling it from
+// inside rollbackInternal -- which runs with b.mu held -- turned that ordinary
+// possibility into a total wedge: the notify blocked, b.mu stayed held, and
+// since b.mu is the one lock every mutating operation, the WAL worker and the
+// five-second checkpoint all need, the daemon went completely silent. No
+// panic, no error, no further log line from any goroutine, just a process
+// alive in S state that never answers anything again. A SIGQUIT dump shows the
+// holder parked in unix.Writev on the fuse descriptor with a dozen goroutines
+// queued behind it on sync.Mutex.Lock.
+func (b *Backend) notifyInvalidated(paths []string) {
+	if b.invalidateFn == nil || len(paths) == 0 {
+		return
+	}
+	b.invalidateFn(paths)
 }
 
 // NewBackend creates a Backend. stagingDir is the version-store root (write
@@ -292,8 +334,10 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 	b.cleanOrphanRenameTemps()
 	b.nextApply = b.seq + 1
 
+	b.chkptHeartbeat.Store(time.Now().UnixNano())
 	go b.walWorker()
 	go b.checkpointLoop()
+	go b.stallWatchdog()
 	return b, nil
 }
 
@@ -335,7 +379,10 @@ func (b *Backend) replayWAL(records []WALRecord) error {
 					ep.State = AuthorizedPending
 				}
 			case "rollback":
-				_ = b.rollbackInternal(EpochID(rec.EpochID))
+				// The returned paths are dropped: replay happens inside
+				// NewBackend, before any FUSE mount exists, so there is no
+				// kernel dentry cache left to invalidate.
+				_, _ = b.rollbackInternal(EpochID(rec.EpochID))
 			case "read_dep":
 				b.readDepInternal(EpochID(rec.EpochID), VersionID(rec.ReadVersion))
 			case "release_ack":
@@ -520,11 +567,14 @@ func (b *Backend) checkpointLoop() {
 		select {
 		case <-b.stopCh:
 			b.checkpoint()
+			b.beat()
 			return
 		case <-ticker.C:
 			b.checkpoint()
+			b.beat()
 		case <-b.chkptTrigger:
 			b.checkpoint()
+			b.beat()
 		}
 	}
 }
@@ -566,6 +616,81 @@ func (b *Backend) checkpoint() {
 		log.Printf("[backend] checkpoint truncate WAL failed: %v", err)
 	}
 	log.Printf("[backend] checkpoint complete (snapshot seq=%d)", state.Seq)
+}
+
+// beat records that checkpointLoop finished a pass. The checkpoint is the one
+// operation that must acquire opRW.Lock() every five seconds, so its heartbeat
+// going stale is the earliest, most reliable sign of the total-wedge failure
+// mode (see stallWatchdog).
+func (b *Backend) beat() {
+	b.chkptHeartbeat.Store(time.Now().UnixNano())
+}
+
+// stallWatchdogThreshold is how stale the checkpoint heartbeat may get before
+// the backend is declared wedged. checkpointLoop ticks every checkpointInterval
+// and a healthy checkpoint() returns in milliseconds, so 30s is several missed
+// ticks: far beyond any legitimate snapshot, short enough to fire while the
+// process is still alive and the wedged goroutines are still parked on locks.
+const stallWatchdogThreshold = 30 * time.Second
+
+// stallWatchdogTick is how often the heartbeat is re-checked.
+const stallWatchdogTick = 5 * time.Second
+
+// stallWatchdog dumps every goroutine stack when the checkpoint heartbeat goes
+// stale. This is the automatic form of `sudo kill -QUIT <pid>`: the daemon's
+// worst failure mode is a TOTAL WEDGE -- no panic, no error, every OS thread in
+// S state, the five-second checkpoint silently stops -- and the only evidence
+// that names the culprit is the goroutine dump showing who holds b.mu/opRW and
+// who is queued behind them. Capturing it here, from inside the process, means
+// the evidence exists before anyone notices the log went quiet and before the
+// process is killed and that state is lost.
+//
+// It reads one atomic and takes NO backend lock. b.mu and b.opRW are exactly
+// what a wedge contends, so a watchdog that needed either would deadlock behind
+// the thing it exists to diagnose.
+func (b *Backend) stallWatchdog() {
+	ticker := time.NewTicker(stallWatchdogTick)
+	defer ticker.Stop()
+	var lastDump time.Time
+	for {
+		select {
+		case <-b.stopCh:
+			return
+		case <-ticker.C:
+			last := time.Unix(0, b.chkptHeartbeat.Load())
+			stall := time.Since(last)
+			if stall < stallWatchdogThreshold {
+				continue
+			}
+			// While still wedged, re-dump at most once a minute: enough to show
+			// whether anything moves, not enough to bury the log.
+			if !lastDump.IsZero() && time.Since(lastDump) < time.Minute {
+				continue
+			}
+			lastDump = time.Now()
+			log.Printf("[watchdog] WEDGED: no checkpoint completed for %s "+
+				"(threshold %s); dumping all goroutine stacks.\n%s",
+				stall.Round(time.Millisecond), stallWatchdogThreshold,
+				allGoroutineStacks())
+		}
+	}
+}
+
+// allGoroutineStacks returns every goroutine's stack, growing the buffer until
+// runtime.Stack reports it all fit. A fixed buffer silently truncates, and with
+// hundreds of goroutines queued on a contended lock the one holding it can be
+// exactly what got cut off.
+func allGoroutineStacks() []byte {
+	size := 1 << 20
+	for i := 0; i < 8; i++ {
+		buf := make([]byte, size)
+		if n := runtime.Stack(buf, true); n < size {
+			return buf[:n]
+		}
+		size *= 2
+	}
+	buf := make([]byte, size)
+	return buf[:runtime.Stack(buf, true)]
 }
 
 // Close stops the checkpoint loop and the WAL worker, and performs a
@@ -680,9 +805,17 @@ func (b *Backend) LogEpochSummary(epochID EpochID) {
 
 // --- FD tracking ---
 
-// TrackedFD wraps a raw file descriptor with a safe double-close guard.
-// Both the FUSE Release handler and the cascade rollback path may try to
-// close the fd; the atomic flag ensures exactly one syscall.Close runs.
+// TrackedFD wraps a raw file descriptor and is the ONLY thing allowed to
+// close it. Two paths want it closed -- the FUSE Release handler and a
+// cascade rollback (CloseEpochFDs) -- and the atomic flag makes exactly one
+// syscall.Close run.
+//
+// That single-closer rule is load-bearing, not tidiness. Closing an fd makes
+// its NUMBER available for immediate reuse by any other goroutine in the
+// daemon, so a second close does not harmlessly fail with EBADF: it lands on
+// whichever descriptor got that number next -- the WAL file, an accepted
+// control connection, or another epoch's stage copy. Callers that keep the raw
+// number after a force close must check IsClosed first (trackedHandle.dead).
 type TrackedFD struct {
 	fd     int
 	closed atomic.Bool
@@ -958,6 +1091,9 @@ func (b *Backend) addDependency(on, dependent EpochID) {
 	if on == dependent {
 		return
 	}
+	// Instrumented (RQ3 dependency-insertion latency): one time.Since plus a
+	// counter, both under the mu this function is already called with.
+	t0 := time.Now()
 	set, ok := b.dependents[on]
 	if !ok {
 		set = make(map[EpochID]struct{})
@@ -966,6 +1102,7 @@ func (b *Backend) addDependency(on, dependent EpochID) {
 	if _, exists := set[dependent]; !exists {
 		set[dependent] = struct{}{}
 		b.graphGen++
+		b.graphCtr.edgeInsertions++
 		log.Printf("[backend] addDependency: %q depends on %q", dependent, on)
 	}
 	rev, ok := b.dependsOn[dependent]
@@ -974,6 +1111,7 @@ func (b *Backend) addDependency(on, dependent EpochID) {
 		b.dependsOn[dependent] = rev
 	}
 	rev[on] = struct{}{}
+	b.graphCtr.edgeInsertNs += uint64(time.Since(t0))
 }
 
 func (b *Backend) reachableFrom(start EpochID) map[EpochID]struct{} {
@@ -2016,15 +2154,52 @@ func (b *Backend) discardEpochWALBuf(epochID EpochID) {
 // RollbackWithAffected performs a cascading rollback and returns the
 // affected epoch set (including the target itself) so the orchestrator can
 // coordinate the process layer.
-func (b *Backend) RollbackWithAffected(epochID EpochID) (AffectedSet, error) {
-	b.opRW.RLock()
-	defer b.opRW.RUnlock()
+func (b *Backend) RollbackWithAffected(epochID EpochID) (set AffectedSet, err error) {
+	// Instrumented as ONE cascade: the scalability number an experiment needs
+	// is the cost of rolling back a node together with everything that depends
+	// on it (graph walk + WAL barrier + staging cleanup), not of its parts.
+	// The counter update re-takes mu, which every return path of the locked
+	// region has already released before returning.
+	t0 := time.Now()
+	var elapsed time.Duration
+	defer func() {
+		b.mu.Lock()
+		b.graphCtr.rollbacks++
+		b.graphCtr.rollbackNs += uint64(elapsed)
+		b.graphCtr.rollbackNodes += uint64(len(set.Epochs))
+		b.mu.Unlock()
+	}()
 
+	var invalidated []string
+	func() {
+		b.opRW.RLock()
+		defer b.opRW.RUnlock()
+		set, invalidated, err = b.rollbackUnderOpLock(epochID)
+	}()
+
+	// Measured before the notification on purpose: this experiment reports
+	// rollback latency, and folding in a /dev/fuse round-trip that the kernel
+	// may stall for arbitrarily long would report the daemon's cache-invalidation
+	// plumbing as the cost of the cascade itself.
+	elapsed = time.Since(t0)
+
+	// Every backend lock is released above, and only now is the kernel told
+	// about the dentries the rollback made stale. See notifyInvalidated.
+	b.notifyInvalidated(invalidated)
+	return set, err
+}
+
+// rollbackUnderOpLock is the locked region of RollbackWithAffected. It must be
+// called with opRW held for reading; it takes and releases b.mu itself, and it
+// leaves no lock held on any return path. The paths it returns are the ones
+// whose kernel dentries the rollback made stale -- the CALLER delivers them,
+// after releasing opRW as well.
+func (b *Backend) rollbackUnderOpLock(epochID EpochID) (AffectedSet, []string, error) {
 	b.mu.Lock()
 	if _, ok := b.epochs[epochID]; !ok {
 		b.mu.Unlock()
 		log.Printf("[backend] Rollback: epoch %q not found, no-op", epochID)
-		return AffectedSet{}, nil
+		return AffectedSet{}, nil, nil
 	}
 	// Fast-path pre-check (before allocating a seq / writing WAL). The
 	// AUTHORITATIVE gate is inside rollbackInternal, which also catches the
@@ -2033,7 +2208,7 @@ func (b *Backend) RollbackWithAffected(epochID EpochID) (AffectedSet, error) {
 	if blk := b.rollbackBlockedBy(b.reachableFrom(epochID)); blk != "" {
 		st := b.epochs[blk].State
 		b.mu.Unlock()
-		return AffectedSet{}, fmt.Errorf("rollback refused: epoch %q is %s (promotion started; published state cannot be undone)", blk, st)
+		return AffectedSet{}, nil, fmt.Errorf("rollback refused: epoch %q is %s (promotion started; published state cannot be undone)", blk, st)
 	}
 	seqNum := b.nextSeq()
 	rec := WALRecord{EpochID: string(epochID), SeqNum: seqNum, ControlOp: "rollback"}
@@ -2042,7 +2217,7 @@ func (b *Backend) RollbackWithAffected(epochID EpochID) (AffectedSet, error) {
 	if err := <-b.submitWAL(rec); err != nil {
 		log.Printf("[backend] Rollback WAL: %v", err)
 		b.applyTurnAbort(seqNum)
-		return AffectedSet{}, err
+		return AffectedSet{}, nil, err
 	}
 
 	// Fix 3: WAL barrier BEFORE deleting recovery state (fail-closed).
@@ -2050,7 +2225,7 @@ func (b *Backend) RollbackWithAffected(epochID EpochID) (AffectedSet, error) {
 	if err := b.FlushEpochWAL(epochID); err != nil {
 		log.Printf("[backend] Rollback WAL barrier failed: %v", err)
 		b.applyTurnAbort(seqNum)
-		return AffectedSet{}, fmt.Errorf("rollback WAL barrier: %w", err)
+		return AffectedSet{}, nil, fmt.Errorf("rollback WAL barrier: %w", err)
 	}
 
 	b.mu.Lock()
@@ -2062,8 +2237,8 @@ func (b *Backend) RollbackWithAffected(epochID EpochID) (AffectedSet, error) {
 
 	// Compute affected set before rollback executes cleanup.
 	set := b.affectedSetLocked(epochID)
-	err := b.rollbackInternal(epochID)
-	return set, err
+	invalidated, err := b.rollbackInternal(epochID)
+	return set, invalidated, err
 }
 
 // affectedSetLocked snapshots the cascade set of epochID. Must be called
@@ -2093,16 +2268,28 @@ func (b *Backend) GetAffected(epochID EpochID) AffectedSet {
 	if _, ok := b.epochs[epochID]; !ok {
 		return AffectedSet{}
 	}
-	return b.affectedSetLocked(epochID)
+	// Instrumented: the cascade-set walk is what a rollback decision costs
+	// BEFORE anything is undone, and it grows with the reachable set.
+	t0 := time.Now()
+	set := b.affectedSetLocked(epochID)
+	b.graphCtr.affectedQueries++
+	b.graphCtr.affectedQueryNs += uint64(time.Since(t0))
+	b.graphCtr.affectedNodes += uint64(len(set.Epochs))
+	return set
 }
 
 // rollbackInternal performs the cascading rollback: remove every affected
 // epoch's versions from the chains (re-exposing predecessor versions), drop
 // the epochs and their staging trees. Must be called with b.mu held. Used
-// both by RollbackWithAffected and by replayWAL.
-func (b *Backend) rollbackInternal(epochID EpochID) error {
+// both by rollbackUnderOpLock and by replayWAL.
+//
+// It RETURNS the tracked (orig) logical paths whose speculative versions were
+// removed rather than handing them to invalidateFn itself, because delivering
+// them is a blocking kernel round-trip and b.mu is held in here. See
+// notifyInvalidated for what that combination did.
+func (b *Backend) rollbackInternal(epochID EpochID) ([]string, error) {
 	if _, ok := b.epochs[epochID]; !ok {
-		return nil
+		return nil, nil
 	}
 	affected := b.reachableFrom(epochID)
 	// Authoritative guard (shared by live apply AND WAL replay): refuse if
@@ -2111,7 +2298,7 @@ func (b *Backend) rollbackInternal(epochID EpochID) error {
 	// rollback record that raced a lower-seq commit becomes a safe no-op.
 	if blk := b.rollbackBlockedBy(affected); blk != "" {
 		log.Printf("[backend] Rollback refused: epoch=%q is %s (promotion started)", blk, b.epochs[blk].State)
-		return fmt.Errorf("rollback refused: epoch %q is %s (promotion started; published state cannot be undone)", blk, b.epochs[blk].State)
+		return nil, fmt.Errorf("rollback refused: epoch %q is %s (promotion started; published state cannot be undone)", blk, b.epochs[blk].State)
 	}
 	memberList := make([]EpochID, 0, len(affected))
 	for id := range affected {
@@ -2132,6 +2319,14 @@ func (b *Backend) rollbackInternal(epochID EpochID) error {
 	touched := make(map[ObjectID]struct{})
 	for id := range affected {
 		ep := b.epochs[id]
+		// reachableFrom walks graph edges, and an edge can name an epoch that
+		// is no longer in b.epochs -- affectedSetLocked guards the same lookup
+		// for the same reason. There is no recover() anywhere in this daemon,
+		// so a nil dereference here would not degrade the rollback, it would
+		// take the whole process down mid-cascade.
+		if ep == nil {
+			continue
+		}
 		for _, vid := range ep.Versions {
 			if v, ok := b.versionByID[vid]; ok {
 				touched[v.LogicalPath] = struct{}{}
@@ -2166,14 +2361,17 @@ func (b *Backend) rollbackInternal(epochID EpochID) error {
 	}
 	b.cleanupEpochs(affected)
 
-	if b.invalidateFn != nil && len(touched) > 0 {
-		paths := make([]string, 0, len(touched))
-		for p := range touched {
-			paths = append(paths, p)
-		}
-		b.invalidateFn(paths)
+	// Returned, not delivered: b.mu is held in here and the delivery blocks in
+	// the kernel. rollbackUnderOpLock hands these to notifyInvalidated once
+	// every lock is down.
+	if len(touched) == 0 {
+		return nil, nil
 	}
-	return nil
+	paths := make([]string, 0, len(touched))
+	for p := range touched {
+		paths = append(paths, p)
+	}
+	return paths, nil
 }
 
 // cleanupEpochs drops the affected epochs and every graph edge touching
@@ -2947,10 +3145,23 @@ func (b *Backend) finalizeEpoch(epochID EpochID) {
 }
 
 // computeSCCs returns the strongly-connected components of the current
-// dependency graph (edges: dependent -> upstream, from b.dependsOn) using
-// iterative Tarjan. Every tracked epoch appears in exactly one component.
+// dependency graph, counting the work it does (see graph_stats.go). SCC
+// detection runs on EVERY group resolution and on every finalize-readiness
+// sweep over the WHOLE graph, so its cost is a first-class scalability
+// number, not an implementation detail.
 // Must be called with b.mu held.
 func (b *Backend) computeSCCs() [][]EpochID {
+	t0 := time.Now()
+	sccs := b.computeSCCsLocked()
+	b.graphCtr.sccComputations++
+	b.graphCtr.sccComputeNs += uint64(time.Since(t0))
+	return sccs
+}
+
+// computeSCCsLocked is the uninstrumented Tarjan sweep (edges: dependent ->
+// upstream, from b.dependsOn). Every tracked epoch appears in exactly one
+// component. Must be called with b.mu held.
+func (b *Backend) computeSCCsLocked() [][]EpochID {
 	index := make(map[EpochID]int, len(b.epochs))
 	lowlink := make(map[EpochID]int, len(b.epochs))
 	onStack := make(map[EpochID]bool, len(b.epochs))
@@ -3047,6 +3258,83 @@ func (b *Backend) sccMembership() map[EpochID]int {
 		}
 	}
 	return m
+}
+
+// sccContainingLocked returns the SCC currently holding id as a set, or nil if
+// id is no longer in the graph. Must be called with b.mu held.
+//
+// Uses computeSCCsLocked rather than the instrumented computeSCCs. That counter
+// is documented as covering group resolution and the finalize-readiness sweeps;
+// a per-group TOCTOU gate is neither. The distinction is not cosmetic: in the
+// run this gate was fixed from, begin_finalize ran 2844 times for a single
+// group, so an instrumented gate would let a retry storm -- itself the defect --
+// define the reported cost of SCC detection.
+func (b *Backend) sccContainingLocked(id EpochID) map[EpochID]struct{} {
+	if _, ok := b.epochs[id]; !ok {
+		return nil
+	}
+	for _, scc := range b.computeSCCsLocked() {
+		here := false
+		for _, m := range scc {
+			if m == id {
+				here = true
+				break
+			}
+		}
+		if !here {
+			continue
+		}
+		set := make(map[EpochID]struct{}, len(scc))
+		for _, m := range scc {
+			set[m] = struct{}{}
+		}
+		return set
+	}
+	return nil
+}
+
+// groupStillAtomicLocked reports whether g's members still form exactly one
+// strongly-connected component. Must be called with b.mu held.
+//
+// This replaced a comparison against the whole-graph b.graphGen counter, and
+// the difference is the entire fix. That counter is bumped by addDependency,
+// cleanupEpochs, release-ack AND beginEpochInternal, so under N concurrent
+// agents every single BeginEpoch invalidated every in-flight finalization --
+// and BeginEpoch only inserts an ISOLATED node, with no edges, which cannot
+// change any existing epoch's SCC. Optimistic retry then starved against a
+// graph that kept moving. Measured on the RQ3 scaling run: 48 rejected attempts
+// per published group as the routine case (finalize=51 calls for 3 nodes,
+// finalize=101 for 5), and one SCC that took 2844 attempts over 121s, hit the
+// 120s drain timeout, and never published at all. The contended/16 cell
+// completed 0 of 80 invocations with 16 epochs stranded in authorized_pending.
+//
+// Comparing the member set asks the only question that actually matters: is the
+// cycle this group was prepared for still exactly that cycle? It is immune to
+// unrelated graph activity by construction, and it still rejects the one case
+// that must be rejected -- a new edge closing a cycle THROUGH the group grows
+// the SCC, so the prepared member set is stale and the orchestrator has to
+// re-prepare. Edges that do not close such a cycle are already handled where
+// they belong: tryPromoteObject refuses to promote while an upstream outside
+// this SCC is un-finalized.
+//
+// It is also the only variant that survives a restart. g.members is persisted
+// in the checkpoint; b.graphGen was not, so after recovery the counter came
+// back as 0 while restored groups still carried their original generation and
+// every pending group was refused forever.
+func (b *Backend) groupStillAtomicLocked(g *finalizeGroup) bool {
+	if g == nil || len(g.members) == 0 {
+		return false
+	}
+	cur := b.sccContainingLocked(g.members[0])
+	if len(cur) != len(g.members) {
+		return false
+	}
+	for _, m := range g.members {
+		if _, ok := cur[m]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // tryFinalizeSCCs finalizes every strongly-connected component that is
@@ -3200,7 +3488,18 @@ type PrepareResolutionResult struct {
 // freezes all members, then calls BeginFinalize with the same graph_generation
 // to detect TOCTOU changes (a new dependency inserted between prepare and
 // finalize would change the generation and cause BeginFinalize to refuse).
-func (b *Backend) PrepareResolution(epochID EpochID) (PrepareResolutionResult, error) {
+func (b *Backend) PrepareResolution(epochID EpochID) (res PrepareResolutionResult, err error) {
+	// Instrumented: prepare_resolution is where ONE commit pays whole-graph SCC
+	// detection, so it is the per-commit share of dependency-graph maintenance.
+	// The counter update re-takes mu; every return path below releases it first.
+	t0 := time.Now()
+	defer func() {
+		b.mu.Lock()
+		b.graphCtr.prepareCalls++
+		b.graphCtr.prepareNs += uint64(time.Since(t0))
+		b.mu.Unlock()
+	}()
+
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 	b.mu.Lock()
@@ -3279,12 +3578,28 @@ type BeginFinalizeResult struct {
 }
 
 // BeginFinalize starts the promote/finalize pass for an entire group (SCC).
-// The graph_generation must match the current b.graphGen; a mismatch means
-// the dependency graph changed between PrepareResolution and BeginFinalize
-// (TOCTOU) and the call is refused. Every member must already be independently
-// AuthorizedPending; this function must not authorize one member on behalf of
-// another.
-func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (BeginFinalizeResult, error) {
+// The group is revalidated against the CURRENT graph: its members must still
+// form exactly one SCC, otherwise the cycle it was prepared for has changed
+// (TOCTOU) and the call is refused. graphGeneration is carried for diagnostics
+// only -- refusing on a mismatch against the whole-graph counter is what used
+// to starve publication under concurrency; see groupStillAtomicLocked. Every
+// member must already be independently AuthorizedPending; this function must
+// not authorize one member on behalf of another.
+func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (res BeginFinalizeResult, err error) {
+	// Instrumented as ONE group finalization: WAL barrier + quiesce + promote
+	// for every SCC member. This is the daemon-side cost behind the
+	// orchestrator's "authorization-completion -> finalization" latency.
+	t0 := time.Now()
+	defer func() {
+		b.mu.Lock()
+		b.graphCtr.finalizeCalls++
+		b.graphCtr.finalizeNs += uint64(time.Since(t0))
+		if g, ok := b.activeGroups[groupID]; ok && g.state == "finalized" {
+			b.graphCtr.finalizedNodes += uint64(len(g.members))
+		}
+		b.mu.Unlock()
+	}()
+
 	b.opRW.RLock()
 	defer b.opRW.RUnlock()
 
@@ -3297,12 +3612,6 @@ func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (BeginFinali
 	if g.state == "finalized" {
 		b.mu.Unlock()
 		return BeginFinalizeResult{Status: "finalized"}, nil
-	}
-	if b.graphGen != graphGeneration {
-		b.mu.Unlock()
-		return BeginFinalizeResult{}, fmt.Errorf(
-			"begin_finalize: graph_generation mismatch (caller=%d, current=%d): dependency graph changed (TOCTOU)",
-			graphGeneration, b.graphGen)
 	}
 	// Verify every member is still present, independently authorized, and not
 	// already finalizing. A primary epoch's policy decision must not authorize
@@ -3321,6 +3630,22 @@ func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (BeginFinali
 			b.mu.Unlock()
 			return BeginFinalizeResult{}, fmt.Errorf("begin_finalize: member %q already %s", id, ep.State)
 		}
+	}
+
+	// Revalidate the group against the current graph. This is the TOCTOU gate.
+	// It runs AFTER the per-member pass above on purpose: a vanished member is
+	// reported as "member disappeared", which says what actually happened,
+	// rather than being flattened into a stale member set.
+	if !b.groupStillAtomicLocked(g) {
+		// Counted separately: this is the TOCTOU revalidation rate. A workload
+		// that keeps closing NEW cycles through this group between prepare and
+		// finalize shows up here as rejected attempts, each forcing the
+		// orchestrator to re-prepare (an extra whole-graph SCC sweep).
+		b.graphCtr.finalizeRejectedTOCTOU++
+		b.mu.Unlock()
+		return BeginFinalizeResult{}, fmt.Errorf(
+			"begin_finalize: group %d is no longer atomic (prepared members=%v at graph_generation=%d, caller=%d): its SCC membership changed, re-prepare required (TOCTOU)",
+			groupID, g.members, g.graphGen, graphGeneration)
 	}
 
 	members := append([]EpochID(nil), g.members...)

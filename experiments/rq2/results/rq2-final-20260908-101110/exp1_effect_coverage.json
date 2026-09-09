@@ -1,0 +1,3195 @@
+{
+  "experiment": "exp1_effect_coverage",
+  "duration_seconds": 9.19,
+  "start_time": 1788833483.985538,
+  "end_time": 1788833493.1744235,
+  "metadata": {},
+  "attempted_trials": 245,
+  "completed_trials": 245,
+  "skipped_trials": 0,
+  "infra_error_trials": 0,
+  "infrastructure_errors": 0,
+  "property_checks": 248,
+  "violations": 0,
+  "has_infra_errors": false,
+  "exit_code": 0,
+  "counters": {
+    "escaped_before_auth": {
+      "count": 0,
+      "total": 38,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.09251276141587811
+      ],
+      "details": []
+    },
+    "incorrectly_allowed": {
+      "count": 0,
+      "total": 134,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.027153482879799518
+      ],
+      "details": []
+    },
+    "incorrectly_denied": {
+      "count": 0,
+      "total": 47,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.0754857336910581
+      ],
+      "details": []
+    },
+    "duplicated_after_restart": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "missing_audit_events": {
+      "count": 0,
+      "total": 26,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.13227460449775436
+      ],
+      "details": []
+    },
+    "effect_not_observed": {
+      "count": 0,
+      "total": 2,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.8418861169915808
+      ],
+      "details": []
+    }
+  },
+  "empty_counters": [],
+  "infra_errors": [],
+  "trials": [
+    {
+      "trial_id": "fs_write-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=0: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=0: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=0: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=0: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=0: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=0: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=0: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=0: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=0: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=0: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=0: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=0: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=0: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rmdir trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rmdir trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rmdir trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rmdir trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_read-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_read trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_read-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_read trial=0: op denied (ret=7 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_read-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_read trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_read-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_read trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_read-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_read trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "net_connect-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "net_connect trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "net_connect-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "net_connect trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "net_connect-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_connect trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "net_connect-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "net_connect trial=0: violation event recorded (probe_pid=2262504, pids=[2262504])",
+          "meta": {
+            "event": "CONNECT"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "CONNECT"
+      }
+    },
+    {
+      "trial_id": "net_connect-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_connect trial=0: allowed despite only SYSTEM/MOUNT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "net_connect-endpoint_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "net_connect trial=0: allowed endpoint denied (port=19999 ret=0 errno=0)"
+        },
+        {
+          "property": "effect_not_observed",
+          "passed": true,
+          "detail": "net_connect trial=0: effect not observed (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "endpoint_allow"
+    },
+    {
+      "trial_id": "net_connect-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_connect trial=0: allowed despite only sibling BIND being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "net_connect-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_connect trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "net_bind-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "net_bind trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "net_bind-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "net_bind trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "net_bind-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_bind trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "net_bind-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "net_bind trial=0: violation event recorded (probe_pid=2262746, pids=[2262746])",
+          "meta": {
+            "event": "BIND"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "BIND"
+      }
+    },
+    {
+      "trial_id": "net_bind-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_bind trial=0: allowed despite only SYSTEM/MOUNT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "net_bind-endpoint_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "net_bind trial=0: allowed endpoint denied (port=19998 ret=0 errno=0)"
+        },
+        {
+          "property": "effect_not_observed",
+          "passed": true,
+          "detail": "net_bind trial=0: effect not observed (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "endpoint_allow"
+    },
+    {
+      "trial_id": "net_bind-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_bind trial=0: allowed despite only sibling CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "net_bind-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_bind trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "net_send-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "net_send trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "net_send-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "net_send trial=0: denied despite allow policy (ret=16 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "net_send-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_send trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "net_send-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "net_send trial=0: violation event recorded (probe_pid=2262895, pids=[2262895])",
+          "meta": {
+            "event": "SEND"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "SEND"
+      }
+    },
+    {
+      "trial_id": "net_send-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_send trial=0: allowed despite only SYSTEM/MOUNT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "net_send-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_send trial=0: allowed despite only sibling CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "net_send-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "net_send trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "ipc_pipe-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "ipc_pipe trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "ipc_pipe-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "ipc_pipe trial=0: denied despite allow policy (ret=9 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "ipc_pipe-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_pipe trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "ipc_pipe-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "ipc_pipe trial=0: violation event recorded (probe_pid=2262902, pids=[2262902])",
+          "meta": {
+            "event": "PIPE_WRITE"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "PIPE_WRITE"
+      }
+    },
+    {
+      "trial_id": "ipc_pipe-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_pipe trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "ipc_pipe-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_pipe trial=0: allowed despite only sibling SHM being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "ipc_pipe-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_pipe trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "ipc_unix-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "ipc_unix trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "ipc_unix-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "ipc_unix trial=0: denied despite allow policy (ret=9 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "ipc_unix-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_unix trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "ipc_unix-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "ipc_unix trial=0: violation event recorded (probe_pid=2262913, pids=[2262913])",
+          "meta": {
+            "event": "SEND"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "SEND"
+      }
+    },
+    {
+      "trial_id": "ipc_unix-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_unix trial=0: allowed despite only SYSTEM/MOUNT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "ipc_unix-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_unix trial=0: allowed despite only sibling CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "ipc_unix-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_unix trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "ipc_shm-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "ipc_shm trial=0: denied despite allow policy (ret=32815 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "ipc_msg-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "ipc_msg trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "ipc_msg-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "ipc_msg trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "ipc_msg-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_msg trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "ipc_msg-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "ipc_msg trial=0: violation event recorded (probe_pid=2262928, pids=[2262928])",
+          "meta": {
+            "event": "MSG"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "MSG"
+      }
+    },
+    {
+      "trial_id": "ipc_msg-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_msg trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "ipc_msg-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_msg trial=0: allowed despite only sibling SHM being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "ipc_msg-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_msg trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "ipc_sem-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "ipc_sem trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "ipc_sem-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "ipc_sem trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "ipc_sem-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_sem trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "ipc_sem-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "ipc_sem trial=0: violation event recorded (probe_pid=2262945, pids=[2262945])",
+          "meta": {
+            "event": "SEM"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "SEM"
+      }
+    },
+    {
+      "trial_id": "ipc_sem-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_sem trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "ipc_sem-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_sem trial=0: allowed despite only sibling SHM being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "ipc_sem-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_sem trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "ipc_mq-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "ipc_mq trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "ipc_mq-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "ipc_mq trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "ipc_mq-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_mq trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "ipc_mq-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "ipc_mq trial=0: violation event recorded (probe_pid=2262951, pids=[2262951])",
+          "meta": {
+            "event": "MQ"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "MQ"
+      }
+    },
+    {
+      "trial_id": "ipc_mq-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_mq trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "ipc_mq-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_mq trial=0: allowed despite only sibling SHM being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "ipc_mq-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "ipc_mq trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "ipc_mmap-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "ipc_mmap trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sig_kill-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sig_kill trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sig_ptrace-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sig_ptrace trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "priv_setuid-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "priv_setuid trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "priv_setuid-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "priv_setuid trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "priv_setuid-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setuid trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "priv_setuid-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "priv_setuid trial=0: violation event recorded (probe_pid=2262962, pids=[2262962])",
+          "meta": {
+            "event": "SETUID"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "SETUID"
+      }
+    },
+    {
+      "trial_id": "priv_setuid-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setuid trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "priv_setuid-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setuid trial=0: allowed despite only sibling SETGID being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "priv_setuid-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setuid trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "priv_setgid-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "priv_setgid trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "priv_setgid-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "priv_setgid trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "priv_setgid-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setgid trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "priv_setgid-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "priv_setgid trial=0: violation event recorded (probe_pid=2262986, pids=[2262986])",
+          "meta": {
+            "event": "SETGID"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "SETGID"
+      }
+    },
+    {
+      "trial_id": "priv_setgid-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setgid trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "priv_setgid-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setgid trial=0: allowed despite only sibling SETUID being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "priv_setgid-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setgid trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "priv_setgroups-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "priv_setgroups trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "priv_setgroups-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "priv_setgroups trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "priv_setgroups-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setgroups trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "priv_setgroups-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "priv_setgroups trial=0: violation event recorded (probe_pid=2262992, pids=[2262992])",
+          "meta": {
+            "event": "SETGROUPS"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "SETGROUPS"
+      }
+    },
+    {
+      "trial_id": "priv_setgroups-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setgroups trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "priv_setgroups-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_setgroups trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "priv_capset-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "priv_capset trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "priv_capset-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "priv_capset trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "priv_capset-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_capset trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "priv_capset-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "priv_capset trial=0: violation event recorded (probe_pid=2262997, pids=[2262997])",
+          "meta": {
+            "event": "CAPSET"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "CAPSET"
+      }
+    },
+    {
+      "trial_id": "priv_capset-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_capset trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "priv_capset-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "priv_capset trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "priv_exec-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "priv_exec trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "out_write-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "out_write trial=0: denied despite allow policy (ret=-999 errno=-999)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "out_sendfile-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "out_sendfile trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "out_sendfile-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "out_sendfile trial=0: denied despite allow policy (ret=13 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "out_sendfile-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "out_sendfile trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "out_sendfile-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "out_sendfile trial=0: violation event recorded (probe_pid=2263005, pids=[2263005])",
+          "meta": {
+            "event": "SENDFILE"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "SENDFILE"
+      }
+    },
+    {
+      "trial_id": "out_sendfile-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "out_sendfile trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "out_sendfile-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "out_sendfile trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "out_splice-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "out_splice trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "out_splice-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "out_splice trial=0: denied despite allow policy (ret=11 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "out_splice-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "out_splice trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "out_splice-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "out_splice trial=0: violation event recorded (probe_pid=2263040, pids=[2263040, 2263040])",
+          "meta": {
+            "event": "SPLICE"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "SPLICE"
+      }
+    },
+    {
+      "trial_id": "out_splice-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "out_splice trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "out_splice-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "out_splice trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "out_io_uring-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "out_io_uring trial=0: denied despite allow policy (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_mount-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_mount trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_mount-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_mount trial=0: denied despite allow policy (ret=0 errno=17)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_mount-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_mount trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_mount-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_mount trial=0: violation event recorded (probe_pid=2263059, pids=[2263059])",
+          "meta": {
+            "event": "MOUNT"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "MOUNT"
+      }
+    },
+    {
+      "trial_id": "sys_mount-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_mount trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_mount-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_mount trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_umount-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_umount trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_umount-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_umount trial=0: denied despite allow policy (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_umount-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_umount trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_umount-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_umount trial=0: violation event recorded (probe_pid=2263066, pids=[2263066])",
+          "meta": {
+            "event": "UMOUNT"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "UMOUNT"
+      }
+    },
+    {
+      "trial_id": "sys_umount-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_umount trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_umount-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_umount trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_unshare-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_unshare trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_unshare-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_unshare trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_unshare-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_unshare trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_unshare-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_unshare trial=0: violation event recorded (probe_pid=2263077, pids=[2263077])",
+          "meta": {
+            "event": "UNSHARE"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "UNSHARE"
+      }
+    },
+    {
+      "trial_id": "sys_unshare-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_unshare trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_unshare-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_unshare trial=0: allowed despite only sibling MOUNT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "sys_unshare-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_unshare trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_setns-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_setns trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_setns-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_setns trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_setns-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_setns trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_setns-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_setns trial=0: violation event recorded (probe_pid=2263083, pids=[2263083])",
+          "meta": {
+            "event": "SETNS"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "SETNS"
+      }
+    },
+    {
+      "trial_id": "sys_setns-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_setns trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_setns-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_setns trial=0: allowed despite only sibling MOUNT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "sys_setns-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_setns trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_keyctl-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_keyctl trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_keyctl-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_keyctl trial=0: denied despite allow policy (ret=-1 errno=128)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_keyctl-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_keyctl trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_keyctl-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_keyctl trial=0: violation event recorded (probe_pid=2263089, pids=[2263089])",
+          "meta": {
+            "event": "KEYCTL"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "KEYCTL"
+      }
+    },
+    {
+      "trial_id": "sys_keyctl-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_keyctl trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_keyctl-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_keyctl trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "sys_keyctl-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_keyctl trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_add_key-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_add_key trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_add_key-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_add_key trial=0: denied despite allow policy (ret=-1 errno=128)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_add_key-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_add_key trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_add_key-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_add_key trial=0: violation event recorded (probe_pid=2263095, pids=[2263095])",
+          "meta": {
+            "event": "ADD_KEY"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "ADD_KEY"
+      }
+    },
+    {
+      "trial_id": "sys_add_key-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_add_key trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_add_key-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_add_key trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "sys_add_key-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_add_key trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_request_key-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_request_key trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_request_key-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_request_key trial=0: denied despite allow policy (ret=-1 errno=128)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_request_key-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_request_key trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_request_key-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_request_key trial=0: violation event recorded (probe_pid=2263101, pids=[2263101])",
+          "meta": {
+            "event": "REQUEST_KEY"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "REQUEST_KEY"
+      }
+    },
+    {
+      "trial_id": "sys_request_key-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_request_key trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_request_key-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_request_key trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "sys_request_key-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_request_key trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_bpf-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_bpf trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_bpf-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_bpf trial=0: denied despite allow policy (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_bpf-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_bpf trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_bpf-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_bpf trial=0: violation event recorded (probe_pid=2263118, pids=[2263118])",
+          "meta": {
+            "event": "BPF"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "BPF"
+      }
+    },
+    {
+      "trial_id": "sys_bpf-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_bpf trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_bpf-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_bpf trial=0: allowed despite only sibling MOUNT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "sys_bpf-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_bpf trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_perf-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_perf trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_perf-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_perf trial=0: denied despite allow policy (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_perf-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_perf trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_perf-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_perf trial=0: violation event recorded (probe_pid=2263124, pids=[2263124])",
+          "meta": {
+            "event": "PERF_EVENT_OPEN"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "PERF_EVENT_OPEN"
+      }
+    },
+    {
+      "trial_id": "sys_perf-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_perf trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_perf-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_perf trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "sys_perf-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_perf trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_tty_ioctl-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_tty_ioctl trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_tty_ioctl-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_tty_ioctl trial=0: denied despite allow policy (ret=-1 errno=25)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_tty_ioctl-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_tty_ioctl trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_tty_ioctl-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_tty_ioctl trial=0: violation event recorded (probe_pid=2263132, pids=[2263132])",
+          "meta": {
+            "event": "TTY_IOCTL"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "TTY_IOCTL"
+      }
+    },
+    {
+      "trial_id": "sys_tty_ioctl-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_tty_ioctl trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_tty_ioctl-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_tty_ioctl trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "sys_tty_ioctl-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_tty_ioctl trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_process_vm-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_process_vm trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_process_vm-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_process_vm trial=0: denied despite allow policy (ret=4 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_process_vm-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_process_vm trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_process_vm-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_process_vm trial=0: violation event recorded (probe_pid=2263144, pids=[2263144])",
+          "meta": {
+            "event": "PROCESS_VM_READV"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "PROCESS_VM_READV"
+      }
+    },
+    {
+      "trial_id": "sys_process_vm-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_process_vm trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_process_vm-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_process_vm trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "sys_process_vm-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_process_vm trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sys_process_vm_writev-fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "sys_process_vm_writev trial=0: probe exited without fence"
+        }
+      ],
+      "scenario": "fence"
+    },
+    {
+      "trial_id": "sys_process_vm_writev-allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sys_process_vm_writev trial=0: denied despite allow policy (ret=64 errno=0)"
+        }
+      ],
+      "scenario": "allow"
+    },
+    {
+      "trial_id": "sys_process_vm_writev-deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_process_vm_writev trial=0: succeeded despite deny (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "deny"
+    },
+    {
+      "trial_id": "sys_process_vm_writev-audit-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "missing_audit_events",
+          "passed": true,
+          "detail": "sys_process_vm_writev trial=0: violation event recorded (probe_pid=2263150, pids=[2263150])",
+          "meta": {
+            "event": "PROCESS_VM_WRITEV"
+          }
+        }
+      ],
+      "scenario": "audit",
+      "meta": {
+        "event": "PROCESS_VM_WRITEV"
+      }
+    },
+    {
+      "trial_id": "sys_process_vm_writev-cross_class_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_process_vm_writev trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "cross_class_isolation"
+    },
+    {
+      "trial_id": "sys_process_vm_writev-sibling_isolation-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_process_vm_writev trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+        }
+      ],
+      "scenario": "sibling_isolation"
+    },
+    {
+      "trial_id": "sys_process_vm_writev-fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "sys_process_vm_writev trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+        }
+      ],
+      "scenario": "fail_closed"
+    },
+    {
+      "trial_id": "sig_kill-signal_endpoint_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "sig_kill trial=0: allowed target denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "signal_endpoint_allow"
+    }
+  ],
+  "trials_truncated": false,
+  "total_trials": 245
+}

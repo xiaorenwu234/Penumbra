@@ -40,9 +40,15 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# experiments/rq2/ (framework.*) and speculative_shadow/ (policy.*) must both be
+# importable regardless of the CWD the harness is launched from.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJ = os.path.dirname(os.path.dirname(_HERE))  # .../speculative_shadow
+for _p in (_HERE, _PROJ):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
+from framework.errors import InfrastructureError, infra
 from framework.client import ShadowProcClient, ShadowFSClient
 from framework.cgroup import CgroupManager
 from framework.oracle import EffectOracle, FileSnapshot
@@ -58,13 +64,20 @@ RUN_EXPERIMENTS = os.environ.get("SHADOW_RUN_RQ2_EXPERIMENTS") == "1"
 class Experiment5:
     """Fail-closed and concurrency experiment."""
 
-    # BPF map capacity limit. Exp5 runs with a FRESH ShadowProc daemon
-    # (restarted after exp1-4), so the full map capacity is available.
-    # Empirically the map holds ~2500 entries; we cap at 2400 to leave
-    # buffer for teardown operations and ensure all 16 test types get
-    # an equal share (~150 trials each).
+    # BPF map capacity ceiling for LIVE cgroups. Exp5 runs with a FRESH
+    # ShadowProc daemon (restarted after exp1-4), so the full map capacity is
+    # available. Most faults reuse a single shared persistent cgroup (see
+    # _get_persistent_cgroup), so they consume one map slot regardless of trial
+    # count. The ceiling only bites faults that create a fresh cgroup per trial
+    # (PID/cgroup reuse); those tear the cgroup down again each trial, so
+    # _cgroups_created tracks LIVE cgroups and stays far below the ceiling.
+    # Empirically the map holds ~2500 entries; we cap at 2400 to leave buffer
+    # for teardown operations.
     MAX_CGROUPS_PER_RUN = 2400
-    NUM_FAULT_TYPES = 15  # Total number of fault injection test methods
+    # Number of fault-injection scenarios. run() builds the authoritative
+    # FAULT_SCENARIOS list and derives the real count from it; this constant is
+    # kept equal to len(FAULT_SCENARIOS) and asserted at startup.
+    NUM_FAULT_TYPES = 16
 
     def __init__(self, trials: int = 5000):
         self.trials = trials
@@ -101,18 +114,33 @@ class Experiment5:
         self.metrics.add_counter("fault_pid_cgroup_reuse")
         self.metrics.add_counter("fault_finalization_failure")
         self.metrics.add_counter("fault_drain_failure")
-        # Error tracking: exceptions that would otherwise be swallowed
-        self.metrics.add_counter("fault_injection_error")
+        # Registered explicitly: a skipped trial never reaches
+        # MetricsCollector.record()'s assertion path (it returns early), so
+        # without this the counter would not exist at all whenever every
+        # token_replay trial is skipped - the property would silently
+        # disappear from the report instead of showing up as 0/0.
+        self.metrics.add_counter("fault_token_replay")
 
     def setup(self):
         if os.geteuid() != 0:
-            raise RuntimeError("Experiment 5 requires root")
-        self.proc_client.connect()
-        self.fs_client.connect()
+            raise infra("root", "Experiment 5 requires root")
+        try:
+            self.proc_client.connect()
+        except Exception as exc:
+            raise infra("shadowproc_connect",
+                        "cannot reach ShadowProc daemon", exc) from exc
+        try:
+            self.fs_client.connect()
+        except Exception as exc:
+            raise infra("shadowfs_connect",
+                        "cannot reach ShadowFS daemon", exc) from exc
         # Ensure FUSE directories exist
         ensure_fuse_dirs("exp5")
         if not is_fuse_mounted():
-            print(f"[exp5] WARNING: ShadowFS FUSE not mounted at {SHADOWFS_MNT}")
+            # A missing FUSE mount means every file-based fault would silently
+            # no-op; that is an infrastructure failure, not a warning.
+            raise infra("fuse_mount",
+                        f"ShadowFS FUSE not mounted at {SHADOWFS_MNT}")
         print(f"[exp5] Connected. Running {self.trials} trials per fault type.")
         print(f"[exp5] FUSE work dir: {self.work_dir}")
 
@@ -184,7 +212,13 @@ class Experiment5:
                 print(f"    [diag] clear_all_policies FAILED: {e}")
 
     def _teardown_cgroup_safe(self, cg_path: str, cg_id: str):
-        """Clean up a cgroup, ignoring errors."""
+        """Clean up a cgroup, ignoring errors, and release its budget slot.
+
+        _cgroups_created counts LIVE cgroups, so removing one frees a slot in
+        the BPF-map budget. Without this the per-trial PID/cgroup-reuse fault
+        would leak a cgroup every trial and break out early at the ceiling
+        (producing a truncated, non-round trial count).
+        """
         try:
             self.proc_client.kill_by_cgroup(cg_id)
         except Exception:
@@ -198,6 +232,8 @@ class Experiment5:
         except Exception:
             pass
         self.cgroup_mgr.remove(cg_path)
+        if self._cgroups_created > 0:
+            self._cgroups_created -= 1
 
     def _remaining_budget(self) -> int:
         """Get remaining cgroup budget."""
@@ -240,7 +276,7 @@ class Experiment5:
         (the enforcement layer must be unaffected by journal corruption).
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [1/16] Audit log corruption ({actual_trials} trials) ...", flush=True)
+        print(f"      Audit log corruption ({actual_trials} trials) ...", flush=True)
 
         # Find the ShadowFS journal directory
         staging = os.environ.get("SHADOWFS_STAGING", "/tmp/shadow-rq2-test/staging")
@@ -338,7 +374,7 @@ class Experiment5:
         non-covered effect classes.
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [2/16] Policy partial install ({actual_trials} trials) ...", flush=True)
+        print(f"      Policy partial install ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._get_persistent_cgroup("policy")
@@ -391,7 +427,7 @@ class Experiment5:
         import subprocess as _sp
 
         actual_trials = self._trials_for_heavy_test(self.trials)
-        print(f"  [3/16] Fork during freeze ({actual_trials} trials) ...", flush=True)
+        print(f"      Fork during freeze ({actual_trials} trials) ...", flush=True)
         STORM_SIZE = 10  # processes per trial
 
         for trial in range(actual_trials):
@@ -486,7 +522,41 @@ class Experiment5:
         This verifies tokens are truly single-use and cannot be replayed.
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [4/16] Token replay ({actual_trials} trials) ...", flush=True)
+        print(f"      Token replay ({actual_trials} trials) ...", flush=True)
+        completed = 0
+        skipped = 0
+
+        def _skip(trial, reason, result=None, extra=""):
+            """Record a skipped trial, keeping the full probe evidence.
+
+            A skip is not a pass: without the raw stdout/errno/returncode in
+            skip_reason the trial is indistinguishable from a harness bug,
+            which is exactly how the -512 zero-extended fmod_ret return went
+            unnoticed for a whole run.
+            """
+            nonlocal skipped
+            skipped += 1
+
+            def _txt(v):
+                # ProbeRunner uses text=True, so these are str; stay tolerant.
+                if isinstance(v, bytes):
+                    v = v.decode(errors="replace")
+                return (v or "").strip()[:200]
+
+            detail = reason
+            if result is not None:
+                detail += (f" | ret={result.ret} errno={result.errno}"
+                           f" rc={result.returncode} timed_out={result.timed_out}"
+                           f" was_fenced={getattr(result, 'was_fenced', False)}"
+                           f" stdout={_txt(result.stdout)!r}"
+                           f" stderr={_txt(result.stderr)!r}")
+            if extra:
+                detail += f" | {extra}"
+            self.metrics.record(
+                "fault_token_replay", False,
+                trial_info={"fault": "token_replay", "trial": trial,
+                            "skipped": True, "reason": detail})
+
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._get_persistent_cgroup("token")
@@ -511,14 +581,12 @@ class Experiment5:
                 if not frozen:
                     proc.kill()
                     proc.wait(timeout=2)
-                    self.metrics.record(
-                        "fault_token_replay", False,
-                        trial_info={"fault": "token_replay", "trial": trial,
-                                    "skipped": True, "reason": "not fenced"})
+                    _skip(trial, "not fenced: probe never entered the"
+                                 " SPECULATIVE fence (list_frozen empty)")
                     continue
 
                 # Grant a ONE-TIME restart token for this process
-                # syscall_nr=272 (unshare on x86_64), class=6 (SYSTEM), op=2 (NAMESPACE)
+                # syscall_nr=272 (unshare on x86_64), class=7 (SYSTEM), op=2 (NAMESPACE)
                 tid = proc.pid
                 try:
                     self.proc_client.request_ok({
@@ -528,13 +596,10 @@ class Experiment5:
                         "effect_class": 7,  # SYSTEM
                         "operation": 2,     # NAMESPACE
                     })
-                except Exception:
+                except Exception as ge:
                     proc.kill()
                     proc.wait(timeout=2)
-                    self.metrics.record(
-                        "fault_token_replay", False,
-                        trial_info={"fault": "token_replay", "trial": trial,
-                                    "skipped": True, "reason": "grant failed"})
+                    _skip(trial, "grant_restart_token rejected", extra=f"tid={tid} err={ge!r}")
                     continue
 
                 # Continue the process via daemon (clears stopped mark + SIGCONT).
@@ -550,12 +615,13 @@ class Experiment5:
                 # First use should succeed (token was valid)
                 first_ok = (result.ret >= 0 and result.errno == 0)
                 if not first_ok:
-                    # Token grant failed - infrastructure error, skip trial
-                    self.metrics.record(
-                        "fault_token_replay", False,
-                        trial_info={"fault": "token_replay", "trial": trial,
-                                    "skipped": True,
-                                    "reason": f"first_ok=False (ret={result.ret} errno={result.errno})"})
+                    # The token did not produce a successful first use. This is
+                    # an infrastructure precondition failure, not evidence about
+                    # replayability - but the raw probe output must survive in
+                    # skip_reason so the cause is diagnosable after the run.
+                    _skip(trial, "first_ok=False: restart token did not let the"
+                                 " fenced syscall through", result=result,
+                          extra=f"tid={tid} frozen={frozen}")
                     continue
 
                 # Now the token is CONSUMED. If the process tries another
@@ -590,6 +656,7 @@ class Experiment5:
                     f"token_replay trial={trial}: first_ok={first_ok} "
                     f"replay_detected={replay_detected}",
                     {"fault": "token_replay", "trial": trial})
+                completed += 1
 
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
@@ -599,7 +666,14 @@ class Experiment5:
                 raise
             finally:
                 self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
-        print(f"    completed {actual_trials} trials")
+        # Report what actually ran. Printing actual_trials unconditionally
+        # claimed "completed 1 trials" for a run whose only trial was skipped,
+        # hiding the fact that the single-use-token property got 0 observations.
+        print(f"    completed {completed}/{actual_trials} trials"
+              f" (skipped {skipped})")
+        if completed == 0:
+            print("    WARNING: token replay property has NO observations -"
+                  " every trial was skipped; see skip_reason in the JSON")
 
     # ─── Fault: WAL torn tail ────────────────────────────────────────────
 
@@ -698,7 +772,7 @@ class Experiment5:
         actual_trials = self._trials_for_test(self.trials)
         # Limit WAL restart trials (each restart is expensive)
         actual_trials = min(actual_trials, 5)
-        print(f"  [5/16] WAL torn tail ({actual_trials} trials) ...", flush=True)
+        print(f"      WAL torn tail ({actual_trials} trials) ...", flush=True)
 
         staging = os.environ.get("SHADOWFS_STAGING", "/tmp/shadow-rq2-test/staging")
         wal_dir = os.path.join(staging, "journal")
@@ -827,7 +901,7 @@ class Experiment5:
     def test_concurrent_race(self):
         """Concurrent finalization + release + ack -> no inconsistency."""
         actual_trials = self._trials_for_heavy_test(self.trials)
-        print(f"  [6/16] Concurrent race ({actual_trials} trials) ...", flush=True)
+        print(f"      Concurrent race ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._get_persistent_cgroup("race")
@@ -910,7 +984,7 @@ class Experiment5:
     def test_no_partial_publication(self):
         """File must not be partially visible outside the epoch."""
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [7/15] No partial publication ({actual_trials} trials) ...", flush=True)
+        print(f"      No partial publication ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             target = fuse_path(f"exp5/partial-{trial}.txt")
             # Ensure file doesn't exist in backing store
@@ -946,7 +1020,7 @@ class Experiment5:
     def test_no_premature_baseline_delete(self):
         """Baseline must not be deleted before finalization completes."""
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [8/15] No premature baseline deletion ({actual_trials} trials) ...", flush=True)
+        print(f"      No premature baseline deletion ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             baseline = harness_path(f"exp5/baseline-{trial}.txt")
             with open(baseline, "w") as f:
@@ -986,7 +1060,7 @@ class Experiment5:
         and would not be intercepted by BPF.
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [9/16] Ring buffer drop ({actual_trials} trials) ...", flush=True)
+        print(f"      Ring buffer drop ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._get_persistent_cgroup("ringbuf")
@@ -1030,7 +1104,7 @@ class Experiment5:
         effects even when internal path/context reconstruction might fail.
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [10/16] Path reconstruction failure ({actual_trials} trials) ...", flush=True)
+        print(f"      Path reconstruction failure ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._get_persistent_cgroup("pathrec")
@@ -1075,7 +1149,7 @@ class Experiment5:
         Uses sys_unshare (BPF-enforced) for testing.
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [11/16] PID/cgroup reuse ({actual_trials} trials) ...", flush=True)
+        print(f"      PID/cgroup reuse ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             # Create and destroy cgroup rapidly to test reuse
             cg_name = f"exp5-reuse-{trial % 10}"  # Reuse names
@@ -1105,19 +1179,19 @@ class Experiment5:
             except RuntimeError as e:
                 if "Argument list too long" in str(e) or "map" in str(e).lower():
                     print(f"    [BPF map full at trial {trial}: {e}]")
-                    self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
+                    self._teardown_cgroup_safe(cg_path, cg_id)
                     break
                 raise
             finally:
-                self._reset_persistent_cgroup_by_ids(cg_path, cg_id)
-        print(f"    completed")
-
-    # ─── Fault: Finalization failure ──────────────────────────────────────
+                # Reuse scenario: fully destroy the cgroup each trial so the
+                # NEXT trial recreates the same name (exercising identifier
+                # reuse) and the live-cgroup budget stays bounded.
+                self._teardown_cgroup_safe(cg_path, cg_id)
 
     def test_finalization_failure(self):
         """Finalization fails at various points -> no partial commit."""
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [12/12] Finalization failure ({actual_trials} trials) ...", flush=True)
+        print(f"      Finalization failure ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._get_persistent_cgroup("finalize")
@@ -1192,7 +1266,7 @@ class Experiment5:
         the cgroup processes between commit and ack_release.
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [13/14] Promotion mid-crash ({actual_trials} trials) ...", flush=True)
+        print(f"      Promotion mid-crash ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._get_persistent_cgroup("promo")
@@ -1265,7 +1339,7 @@ class Experiment5:
         effect appears exactly once in the backing store.
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [14/14] Effect duplication ({actual_trials} trials) ...", flush=True)
+        print(f"      Effect duplication ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._get_persistent_cgroup("dup")
@@ -1348,7 +1422,7 @@ class Experiment5:
         """After deny+rollback, the rejected output must NOT become the
         canonical (committed) state visible to external readers."""
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [15/15] Rejected transcript ({actual_trials} trials) ...", flush=True)
+        print(f"      Rejected transcript ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._get_persistent_cgroup("rej")
@@ -1428,7 +1502,7 @@ class Experiment5:
           - Verifying effects are denied in both cases
         """
         actual_trials = self._trials_for_test(self.trials)
-        print(f"  [16/16] Drain failure ({actual_trials} trials) ...", flush=True)
+        print(f"      Drain failure ({actual_trials} trials) ...", flush=True)
         for trial in range(actual_trials):
             try:
                 cg_path, cg_id = self._get_persistent_cgroup("drain")
@@ -1503,59 +1577,75 @@ class Experiment5:
 
     def run(self):
         self.setup()
+
+        # ── Unified fault-scenario list ──────────────────────────────────
+        # The authoritative set of fault injections, in execution order:
+        # lightweight faults first, daemon-stressing faults (fork storm,
+        # concurrent race) last. run() derives the count from this list, so the
+        # printed numbering and NUM_FAULT_TYPES can never drift out of sync.
+        fault_scenarios = [
+            ("Audit log corruption", self.test_audit_log_corruption),
+            ("Policy partial install", self.test_policy_partial_install),
+            ("Token replay", self.test_token_replay),
+            ("WAL torn tail", self.test_wal_torn_tail),
+            ("No partial publication", self.test_no_partial_publication),
+            ("No premature baseline delete",
+             self.test_no_premature_baseline_delete),
+            ("Ring buffer drop", self.test_ring_buffer_drop),
+            ("Path reconstruction failure",
+             self.test_path_reconstruction_failure),
+            ("PID/cgroup reuse", self.test_pid_cgroup_reuse),
+            ("Finalization failure", self.test_finalization_failure),
+            ("Promotion mid-crash", self.test_promotion_mid_crash),
+            ("Effect duplication", self.test_effect_duplication),
+            ("Rejected transcript not canonical",
+             self.test_rejected_transcript_not_canonical),
+            ("Drain failure", self.test_drain_failure),
+            # Heavy tests LAST (threads + probes per trial stress the daemon).
+            ("Fork during freeze", self.test_fork_during_freeze),
+            ("Concurrent race", self.test_concurrent_race),
+        ]
+        total = len(fault_scenarios)
+        if total != self.NUM_FAULT_TYPES:
+            raise infra(
+                "fault_list",
+                f"FAULT_SCENARIOS has {total} entries but NUM_FAULT_TYPES="
+                f"{self.NUM_FAULT_TYPES}; keep them in sync")
+
         print(f"\n{'='*70}")
         print(f"  EXPERIMENT 5: Fail-Closed & Concurrency")
+        print(f"  Fault scenarios: {total}")
         print(f"  Trials per fault: {self.trials}")
         print(f"{'='*70}\n")
 
         try:
-            # Phase 1: Lightweight tests first (before daemon gets stressed)
-            for test_fn in [
-                self.test_audit_log_corruption,
-                self.test_policy_partial_install,
-                self.test_wal_torn_tail,
-                self.test_no_partial_publication,
-                self.test_no_premature_baseline_delete,
-                self.test_ring_buffer_drop,
-                self.test_path_reconstruction_failure,
-                self.test_pid_cgroup_reuse,
-                self.test_finalization_failure,
-                self.test_promotion_mid_crash,
-                self.test_effect_duplication,
-                self.test_rejected_transcript_not_canonical,
-                self.test_drain_failure,
-            ]:
+            for idx, (label, test_fn) in enumerate(fault_scenarios, 1):
+                print(f"  [{idx}/{total}] {label}", flush=True)
                 try:
                     test_fn()
-                except Exception as e:
-                    import traceback
-                    print(f"    [exp5] ERROR: {test_fn.__name__} failed: {e}")
-                    traceback.print_exc()
+                except Exception as exc:
+                    # A lifecycle/fault-injection failure is NEVER swallowed:
+                    # record it as an INFRA_ERROR (invalidates the run) and
+                    # re-raise so the harness exits non-zero.
+                    self.metrics.record_infra_error(test_fn.__name__, exc)
+                    raise
                 self._tests_completed += 1
-
-            # Phase 2: Heavy tests LAST (may stress daemon)
-            self.test_fork_during_freeze()
-            self._tests_completed += 1
-            self.test_concurrent_race()
-            self._tests_completed += 1
-
         except KeyboardInterrupt:
             print("\n[exp5] Interrupted")
         finally:
             self.metrics.finish()
             self.teardown()
+            self.metrics.print_report()
 
-        self.metrics.print_report()
-
-        # Print binomial confidence intervals
-        print(f"\n  Binomial 95% Confidence Intervals:")
-        print(f"  {'Metric':<35} {'Failures':<12} {'Trials':<10} {'CI'}")
-        print(f"  {'-'*35} {'-'*12} {'-'*10} {'-'*25}")
-        for name, counter in self.metrics.counters.items():
-            if counter.total > 0:
-                lo, hi = counter.ci()
-                print(f"  {name:<35} {counter.count:<12} {counter.total:<10} "
-                      f"[{lo:.6f}, {hi:.6f}]")
+            # Print binomial confidence intervals
+            print(f"\n  Binomial 95% Confidence Intervals:")
+            print(f"  {'Metric':<35} {'Failures':<12} {'Trials':<10} {'CI'}")
+            print(f"  {'-'*35} {'-'*12} {'-'*10} {'-'*25}")
+            for name, counter in self.metrics.counters.items():
+                if counter.total > 0:
+                    lo, hi = counter.ci()
+                    print(f"  {name:<35} {counter.count:<12} "
+                          f"{counter.total:<10} [{lo:.6f}, {hi:.6f}]")
 
         return self.metrics
 
@@ -1573,8 +1663,21 @@ def main():
         sys.exit(1)
 
     exp = Experiment5(trials=args.trials)
-    metrics = exp.run()
-    metrics.save_report(args.output_dir)
+    exit_code = 0
+    try:
+        metrics = exp.run()
+        exit_code = metrics.exit_code
+    except Exception as exc:
+        # run() re-raises any fault-injection/lifecycle failure after recording
+        # it as an INFRA_ERROR; setup() may raise one before any trial ran.
+        # Either way the run is invalid: persist the report and exit non-zero.
+        print(f"[exp5] INFRASTRUCTURE ERROR: {exc}", file=sys.stderr)
+        if not exp.metrics.has_infra_errors:
+            exp.metrics.record_infra_error("run", exc)
+        exit_code = 2
+    finally:
+        exp.metrics.save_report(args.output_dir)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

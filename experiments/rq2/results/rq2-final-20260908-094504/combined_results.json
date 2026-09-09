@@ -1,0 +1,5010 @@
+{
+  "experiments": [
+    {
+      "experiment": "exp1_effect_coverage",
+      "duration_seconds": 8.98,
+      "start_time": 1788831915.6500976,
+      "end_time": 1788831924.6312003,
+      "metadata": {},
+      "attempted_trials": 245,
+      "completed_trials": 245,
+      "skipped_trials": 0,
+      "infra_error_trials": 0,
+      "infrastructure_errors": 0,
+      "property_checks": 248,
+      "violations": 1,
+      "has_infra_errors": false,
+      "exit_code": 1,
+      "counters": {
+        "escaped_before_auth": {
+          "count": 0,
+          "total": 38,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.09251276141587811
+          ],
+          "details": []
+        },
+        "incorrectly_allowed": {
+          "count": 0,
+          "total": 134,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.027153482879799518
+          ],
+          "details": []
+        },
+        "incorrectly_denied": {
+          "count": 1,
+          "total": 47,
+          "rate": 0.02127659574468085,
+          "ci_95": [
+            0.0005385317053423272,
+            0.11293771714639972
+          ],
+          "details": [
+            "ipc_pipe trial=0: denied despite allow policy (ret=-1 errno=1)"
+          ]
+        },
+        "duplicated_after_restart": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "missing_audit_events": {
+          "count": 0,
+          "total": 26,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.13227460449775436
+          ],
+          "details": []
+        },
+        "effect_not_observed": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        }
+      },
+      "empty_counters": [],
+      "infra_errors": [],
+      "trials": [
+        {
+          "trial_id": "fs_write-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_write trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_write-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "duplicated_after_restart",
+              "passed": true,
+              "detail": "fs_write trial=0: effect appeared 1 times"
+            },
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_write trial=0: committed but no effect data"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_write-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_write trial=0: file visible when denied"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_write-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_write trial=0: file visible when denied"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_write-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_write trial=0: file visible when denied"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_create-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_create trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_create-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_create trial=0: file not created after commit (ret=3 errno=0)"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_create-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_create trial=0: file visible when denied"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_create-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_create trial=0: file visible when denied"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_create-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_create trial=0: file visible when denied"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_delete-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_delete trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_delete-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_delete trial=0: op denied (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_delete-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_delete trial=0: op succeeded when denied (ret=-1 errno=2)"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_delete-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_delete trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_delete-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_delete trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_rename-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_rename trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_rename-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_rename trial=0: op denied (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_rename-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_rename trial=0: op succeeded when denied (ret=-1 errno=18)"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_rename-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_rename trial=0: op succeeded when denied (ret=-1 errno=18)"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_rename-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_rename trial=0: op succeeded when denied (ret=-1 errno=18)"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_link-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_link trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_link-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_link trial=0: op denied (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_link-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_link trial=0: op succeeded when denied (ret=-1 errno=2)"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_link-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_link trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_link-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_link trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_symlink-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_symlink trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_symlink-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_symlink trial=0: op succeeded when denied (ret=-1 errno=17)"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_symlink-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_symlink trial=0: op succeeded when denied (ret=-1 errno=17)"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_symlink-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_symlink trial=0: op succeeded when denied (ret=-1 errno=17)"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_truncate-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_truncate trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_truncate-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_truncate trial=0: op denied (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_truncate-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_truncate trial=0: op succeeded when denied (ret=-1 errno=2)"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_truncate-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_truncate trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_truncate-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_truncate trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_chmod-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_chmod trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_chmod-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_chmod trial=0: op denied (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_chmod-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_chmod trial=0: op succeeded when denied (ret=-1 errno=2)"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_chmod-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_chmod trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_chmod-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_chmod trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_chown-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_chown trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_chown-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_chown trial=0: op denied (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_chown-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_chown trial=0: op succeeded when denied (ret=-1 errno=2)"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_chown-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_chown trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_chown-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_chown trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_mkdir-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_mkdir trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_mkdir-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_mkdir trial=0: dir not created after commit (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_mkdir-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_mkdir trial=0: dir exists when it should not"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_mkdir-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_mkdir trial=0: dir exists when it should not"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_mkdir-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_mkdir trial=0: dir exists when it should not"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_rmdir-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_rmdir trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_rmdir-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_rmdir trial=0: op denied (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_rmdir-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_rmdir trial=0: op succeeded when denied (ret=-1 errno=2)"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_rmdir-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_rmdir trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_rmdir-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_rmdir trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "fs_read-fuse_fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "fs_read trial=0: FUSE effect visible without epoch"
+            }
+          ],
+          "scenario": "fuse_fence"
+        },
+        {
+          "trial_id": "fs_read-fuse_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "fs_read trial=0: op denied (ret=7 errno=0)"
+            }
+          ],
+          "scenario": "fuse_allow"
+        },
+        {
+          "trial_id": "fs_read-fuse_deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_read trial=0: op succeeded when denied (ret=-1 errno=2)"
+            }
+          ],
+          "scenario": "fuse_deny"
+        },
+        {
+          "trial_id": "fs_read-fuse_boundary-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_read trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_boundary"
+        },
+        {
+          "trial_id": "fs_read-fuse_fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "fs_read trial=0: op succeeded when denied (ret=-1 errno=5)"
+            }
+          ],
+          "scenario": "fuse_fail_closed"
+        },
+        {
+          "trial_id": "net_connect-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "net_connect trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "net_connect-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "net_connect trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "net_connect-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_connect trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "net_connect-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "net_connect trial=0: violation event recorded (probe_pid=2242089, pids=[2242089])",
+              "meta": {
+                "event": "CONNECT"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "CONNECT"
+          }
+        },
+        {
+          "trial_id": "net_connect-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_connect trial=0: allowed despite only SYSTEM/MOUNT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "net_connect-endpoint_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "net_connect trial=0: allowed endpoint denied (port=19999 ret=0 errno=0)"
+            },
+            {
+              "property": "effect_not_observed",
+              "passed": true,
+              "detail": "net_connect trial=0: effect not observed (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "endpoint_allow"
+        },
+        {
+          "trial_id": "net_connect-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_connect trial=0: allowed despite only sibling BIND being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "net_connect-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_connect trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "net_bind-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "net_bind trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "net_bind-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "net_bind trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "net_bind-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_bind trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "net_bind-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "net_bind trial=0: violation event recorded (probe_pid=2242117, pids=[2242117])",
+              "meta": {
+                "event": "BIND"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "BIND"
+          }
+        },
+        {
+          "trial_id": "net_bind-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_bind trial=0: allowed despite only SYSTEM/MOUNT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "net_bind-endpoint_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "net_bind trial=0: allowed endpoint denied (port=19998 ret=0 errno=0)"
+            },
+            {
+              "property": "effect_not_observed",
+              "passed": true,
+              "detail": "net_bind trial=0: effect not observed (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "endpoint_allow"
+        },
+        {
+          "trial_id": "net_bind-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_bind trial=0: allowed despite only sibling CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "net_bind-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_bind trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "net_send-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "net_send trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "net_send-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "net_send trial=0: denied despite allow policy (ret=16 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "net_send-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_send trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "net_send-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "net_send trial=0: violation event recorded (probe_pid=2242127, pids=[2242127])",
+              "meta": {
+                "event": "SEND"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "SEND"
+          }
+        },
+        {
+          "trial_id": "net_send-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_send trial=0: allowed despite only SYSTEM/MOUNT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "net_send-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_send trial=0: allowed despite only sibling CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "net_send-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "net_send trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "ipc_pipe-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "ipc_pipe trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "ipc_pipe-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": false,
+              "detail": "ipc_pipe trial=0: denied despite allow policy (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "ipc_pipe-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_pipe trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "ipc_pipe-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "ipc_pipe trial=0: violation event recorded (probe_pid=2242161, pids=[2242161])",
+              "meta": {
+                "event": "PIPE_WRITE"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "PIPE_WRITE"
+          }
+        },
+        {
+          "trial_id": "ipc_pipe-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_pipe trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "ipc_pipe-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_pipe trial=0: allowed despite only sibling SHM being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "ipc_pipe-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_pipe trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "ipc_unix-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "ipc_unix trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "ipc_unix-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "ipc_unix trial=0: denied despite allow policy (ret=9 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "ipc_unix-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_unix trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "ipc_unix-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "ipc_unix trial=0: violation event recorded (probe_pid=2242178, pids=[2242178])",
+              "meta": {
+                "event": "SEND"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "SEND"
+          }
+        },
+        {
+          "trial_id": "ipc_unix-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_unix trial=0: allowed despite only SYSTEM/MOUNT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "ipc_unix-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_unix trial=0: allowed despite only sibling CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "ipc_unix-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_unix trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "ipc_shm-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "ipc_shm trial=0: denied despite allow policy (ret=32814 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "ipc_msg-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "ipc_msg trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "ipc_msg-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "ipc_msg trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "ipc_msg-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_msg trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "ipc_msg-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "ipc_msg trial=0: violation event recorded (probe_pid=2242191, pids=[2242191])",
+              "meta": {
+                "event": "MSG"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "MSG"
+          }
+        },
+        {
+          "trial_id": "ipc_msg-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_msg trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "ipc_msg-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_msg trial=0: allowed despite only sibling SHM being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "ipc_msg-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_msg trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "ipc_sem-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "ipc_sem trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "ipc_sem-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "ipc_sem trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "ipc_sem-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_sem trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "ipc_sem-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "ipc_sem trial=0: violation event recorded (probe_pid=2242197, pids=[2242197])",
+              "meta": {
+                "event": "SEM"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "SEM"
+          }
+        },
+        {
+          "trial_id": "ipc_sem-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_sem trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "ipc_sem-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_sem trial=0: allowed despite only sibling SHM being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "ipc_sem-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_sem trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "ipc_mq-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "ipc_mq trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "ipc_mq-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "ipc_mq trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "ipc_mq-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_mq trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "ipc_mq-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "ipc_mq trial=0: violation event recorded (probe_pid=2242203, pids=[2242203])",
+              "meta": {
+                "event": "MQ"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "MQ"
+          }
+        },
+        {
+          "trial_id": "ipc_mq-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_mq trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "ipc_mq-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_mq trial=0: allowed despite only sibling SHM being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "ipc_mq-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "ipc_mq trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "ipc_mmap-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "ipc_mmap trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sig_kill-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sig_kill trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sig_ptrace-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sig_ptrace trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "priv_setuid-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "priv_setuid trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "priv_setuid-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "priv_setuid trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "priv_setuid-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setuid trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "priv_setuid-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "priv_setuid trial=0: violation event recorded (probe_pid=2242217, pids=[2242217])",
+              "meta": {
+                "event": "SETUID"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "SETUID"
+          }
+        },
+        {
+          "trial_id": "priv_setuid-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setuid trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "priv_setuid-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setuid trial=0: allowed despite only sibling SETGID being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "priv_setuid-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setuid trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "priv_setgid-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "priv_setgid trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "priv_setgid-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "priv_setgid trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "priv_setgid-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setgid trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "priv_setgid-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "priv_setgid trial=0: violation event recorded (probe_pid=2242223, pids=[2242223])",
+              "meta": {
+                "event": "SETGID"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "SETGID"
+          }
+        },
+        {
+          "trial_id": "priv_setgid-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setgid trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "priv_setgid-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setgid trial=0: allowed despite only sibling SETUID being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "priv_setgid-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setgid trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "priv_setgroups-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "priv_setgroups trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "priv_setgroups-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "priv_setgroups trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "priv_setgroups-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setgroups trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "priv_setgroups-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "priv_setgroups trial=0: violation event recorded (probe_pid=2242229, pids=[2242229])",
+              "meta": {
+                "event": "SETGROUPS"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "SETGROUPS"
+          }
+        },
+        {
+          "trial_id": "priv_setgroups-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setgroups trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "priv_setgroups-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_setgroups trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "priv_capset-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "priv_capset trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "priv_capset-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "priv_capset trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "priv_capset-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_capset trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "priv_capset-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "priv_capset trial=0: violation event recorded (probe_pid=2242245, pids=[2242245])",
+              "meta": {
+                "event": "CAPSET"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "CAPSET"
+          }
+        },
+        {
+          "trial_id": "priv_capset-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_capset trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "priv_capset-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "priv_capset trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "priv_exec-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "priv_exec trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "out_write-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "out_write trial=0: denied despite allow policy (ret=-999 errno=-999)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "out_sendfile-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "out_sendfile trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "out_sendfile-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "out_sendfile trial=0: denied despite allow policy (ret=13 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "out_sendfile-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "out_sendfile trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "out_sendfile-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "out_sendfile trial=0: violation event recorded (probe_pid=2242255, pids=[2242255])",
+              "meta": {
+                "event": "SENDFILE"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "SENDFILE"
+          }
+        },
+        {
+          "trial_id": "out_sendfile-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "out_sendfile trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "out_sendfile-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "out_sendfile trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "out_splice-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "out_splice trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "out_splice-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "out_splice trial=0: denied despite allow policy (ret=11 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "out_splice-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "out_splice trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "out_splice-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "out_splice trial=0: violation event recorded (probe_pid=2242260, pids=[2242260, 2242260])",
+              "meta": {
+                "event": "SPLICE"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "SPLICE"
+          }
+        },
+        {
+          "trial_id": "out_splice-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "out_splice trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "out_splice-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "out_splice trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "out_io_uring-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "out_io_uring trial=0: denied despite allow policy (ret=3 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_mount-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_mount trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_mount-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_mount trial=0: denied despite allow policy (ret=0 errno=17)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_mount-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_mount trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_mount-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_mount trial=0: violation event recorded (probe_pid=2242273, pids=[2242273])",
+              "meta": {
+                "event": "MOUNT"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "MOUNT"
+          }
+        },
+        {
+          "trial_id": "sys_mount-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_mount trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_mount-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_mount trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_umount-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_umount trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_umount-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_umount trial=0: denied despite allow policy (ret=-1 errno=2)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_umount-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_umount trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_umount-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_umount trial=0: violation event recorded (probe_pid=2242279, pids=[2242279])",
+              "meta": {
+                "event": "UMOUNT"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "UMOUNT"
+          }
+        },
+        {
+          "trial_id": "sys_umount-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_umount trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_umount-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_umount trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_unshare-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_unshare trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_unshare-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_unshare trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_unshare-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_unshare trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_unshare-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_unshare trial=0: violation event recorded (probe_pid=2242290, pids=[2242290])",
+              "meta": {
+                "event": "UNSHARE"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "UNSHARE"
+          }
+        },
+        {
+          "trial_id": "sys_unshare-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_unshare trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_unshare-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_unshare trial=0: allowed despite only sibling MOUNT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "sys_unshare-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_unshare trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_setns-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_setns trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_setns-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_setns trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_setns-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_setns trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_setns-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_setns trial=0: violation event recorded (probe_pid=2242296, pids=[2242296])",
+              "meta": {
+                "event": "SETNS"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "SETNS"
+          }
+        },
+        {
+          "trial_id": "sys_setns-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_setns trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_setns-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_setns trial=0: allowed despite only sibling MOUNT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "sys_setns-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_setns trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_keyctl-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_keyctl trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_keyctl-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_keyctl trial=0: denied despite allow policy (ret=-1 errno=128)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_keyctl-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_keyctl trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_keyctl-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_keyctl trial=0: violation event recorded (probe_pid=2242302, pids=[2242302])",
+              "meta": {
+                "event": "KEYCTL"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "KEYCTL"
+          }
+        },
+        {
+          "trial_id": "sys_keyctl-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_keyctl trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_keyctl-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_keyctl trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "sys_keyctl-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_keyctl trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_add_key-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_add_key trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_add_key-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_add_key trial=0: denied despite allow policy (ret=-1 errno=128)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_add_key-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_add_key trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_add_key-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_add_key trial=0: violation event recorded (probe_pid=2242336, pids=[2242336])",
+              "meta": {
+                "event": "ADD_KEY"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "ADD_KEY"
+          }
+        },
+        {
+          "trial_id": "sys_add_key-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_add_key trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_add_key-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_add_key trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "sys_add_key-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_add_key trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_request_key-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_request_key trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_request_key-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_request_key trial=0: denied despite allow policy (ret=-1 errno=128)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_request_key-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_request_key trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_request_key-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_request_key trial=0: violation event recorded (probe_pid=2242342, pids=[2242342])",
+              "meta": {
+                "event": "REQUEST_KEY"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "REQUEST_KEY"
+          }
+        },
+        {
+          "trial_id": "sys_request_key-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_request_key trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_request_key-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_request_key trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "sys_request_key-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_request_key trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_bpf-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_bpf trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_bpf-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_bpf trial=0: denied despite allow policy (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_bpf-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_bpf trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_bpf-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_bpf trial=0: violation event recorded (probe_pid=2242349, pids=[2242349])",
+              "meta": {
+                "event": "BPF"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "BPF"
+          }
+        },
+        {
+          "trial_id": "sys_bpf-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_bpf trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_bpf-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_bpf trial=0: allowed despite only sibling MOUNT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "sys_bpf-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_bpf trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_perf-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_perf trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_perf-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_perf trial=0: denied despite allow policy (ret=3 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_perf-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_perf trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_perf-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_perf trial=0: violation event recorded (probe_pid=2242355, pids=[2242355])",
+              "meta": {
+                "event": "PERF_EVENT_OPEN"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "PERF_EVENT_OPEN"
+          }
+        },
+        {
+          "trial_id": "sys_perf-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_perf trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_perf-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_perf trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "sys_perf-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_perf trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_tty_ioctl-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_tty_ioctl trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_tty_ioctl-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_tty_ioctl trial=0: denied despite allow policy (ret=-1 errno=25)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_tty_ioctl-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_tty_ioctl trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_tty_ioctl-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_tty_ioctl trial=0: violation event recorded (probe_pid=2242380, pids=[2242380])",
+              "meta": {
+                "event": "TTY_IOCTL"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "TTY_IOCTL"
+          }
+        },
+        {
+          "trial_id": "sys_tty_ioctl-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_tty_ioctl trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_tty_ioctl-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_tty_ioctl trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "sys_tty_ioctl-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_tty_ioctl trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_process_vm-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_process_vm trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_process_vm-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_process_vm trial=0: denied despite allow policy (ret=4 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_process_vm-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_process_vm trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_process_vm-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_process_vm trial=0: violation event recorded (probe_pid=2242387, pids=[2242387])",
+              "meta": {
+                "event": "PROCESS_VM_READV"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "PROCESS_VM_READV"
+          }
+        },
+        {
+          "trial_id": "sys_process_vm-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_process_vm trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_process_vm-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_process_vm trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "sys_process_vm-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_process_vm trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sys_process_vm_writev-fence-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "escaped_before_auth",
+              "passed": true,
+              "detail": "sys_process_vm_writev trial=0: probe exited without fence"
+            }
+          ],
+          "scenario": "fence"
+        },
+        {
+          "trial_id": "sys_process_vm_writev-allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sys_process_vm_writev trial=0: denied despite allow policy (ret=64 errno=0)"
+            }
+          ],
+          "scenario": "allow"
+        },
+        {
+          "trial_id": "sys_process_vm_writev-deny-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_process_vm_writev trial=0: succeeded despite deny (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "deny"
+        },
+        {
+          "trial_id": "sys_process_vm_writev-audit-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "missing_audit_events",
+              "passed": true,
+              "detail": "sys_process_vm_writev trial=0: violation event recorded (probe_pid=2242396, pids=[2242396])",
+              "meta": {
+                "event": "PROCESS_VM_WRITEV"
+              }
+            }
+          ],
+          "scenario": "audit",
+          "meta": {
+            "event": "PROCESS_VM_WRITEV"
+          }
+        },
+        {
+          "trial_id": "sys_process_vm_writev-cross_class_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_process_vm_writev trial=0: allowed despite only NETWORK/CONNECT being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "cross_class_isolation"
+        },
+        {
+          "trial_id": "sys_process_vm_writev-sibling_isolation-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_process_vm_writev trial=0: allowed despite only sibling BPF being permitted (ret=-1 errno=1)"
+            }
+          ],
+          "scenario": "sibling_isolation"
+        },
+        {
+          "trial_id": "sys_process_vm_writev-fail_closed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_allowed",
+              "passed": true,
+              "detail": "sys_process_vm_writev trial=0: allowed with no policy (fail-closed violation) ret=-1 errno=1"
+            }
+          ],
+          "scenario": "fail_closed"
+        },
+        {
+          "trial_id": "sig_kill-signal_endpoint_allow-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "incorrectly_denied",
+              "passed": true,
+              "detail": "sig_kill trial=0: allowed target denied (ret=0 errno=0)"
+            }
+          ],
+          "scenario": "signal_endpoint_allow"
+        }
+      ],
+      "trials_truncated": false,
+      "total_trials": 245,
+      "wall_time_seconds": 9.0
+    },
+    {
+      "experiment": "exp2_audit_consistency",
+      "duration_seconds": 11.15,
+      "start_time": 1788831924.6957014,
+      "end_time": 1788831935.8425775,
+      "metadata": {
+        "orch_sock": "/tmp/shadow-orch.sock",
+        "shadowfs_mount": "/tmp/shadow-rq2-test/mnt",
+        "backing_store": "/tmp/shadow-rq2-test/orig",
+        "repeats": 1,
+        "run_id": "31924695"
+      },
+      "attempted_trials": 6,
+      "completed_trials": 6,
+      "skipped_trials": 0,
+      "infra_error_trials": 0,
+      "infrastructure_errors": 0,
+      "property_checks": 10,
+      "violations": 0,
+      "has_infra_errors": false,
+      "exit_code": 0,
+      "counters": {
+        "allowed_write_committed": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "disallowed_write_rejected": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "backing_store_unchanged": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "history_passed_audit": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "future_connect_denied": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "receiver_saw_no_connection": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "dual_path_rollback_complete": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        }
+      },
+      "empty_counters": [],
+      "infra_errors": [],
+      "trials": [
+        {
+          "trial_id": "hist-write-allowed-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "allowed_write_committed",
+              "passed": true,
+              "detail": "resolved=allow committed=True violations=0"
+            }
+          ],
+          "scenario": "allow_history"
+        },
+        {
+          "trial_id": "hist-write-rejected-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "disallowed_write_rejected",
+              "passed": true,
+              "detail": "resolved=deny audit_rejected=True violations=2"
+            },
+            {
+              "property": "backing_store_unchanged",
+              "passed": true,
+              "detail": "backing exists=False"
+            }
+          ],
+          "scenario": "reject_history"
+        },
+        {
+          "trial_id": "allow-hist-deny-future-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "history_passed_audit",
+              "passed": true,
+              "detail": "resolved=allow violations=0 backing=True"
+            },
+            {
+              "property": "future_connect_denied",
+              "passed": true,
+              "detail": "output='bash: connect: \u4e0d\u5141\u8bb8\u7684\u64cd\u4f5c\\nbash: \u884c 1: /dev/tcp/127.0.0.1/46405: \u4e0d\u5141\u8bb8\u7684\u64cd\u4f5c\\nCONNECT_DENIED'"
+            },
+            {
+              "property": "receiver_saw_no_connection",
+              "passed": true,
+              "detail": "connections=0 bytes=0"
+            }
+          ],
+          "scenario": "allow_history_deny_future"
+        },
+        {
+          "trial_id": "future-connect-denied-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "future_connect_denied",
+              "passed": true,
+              "detail": "output='bash: connect: \u4e0d\u5141\u8bb8\u7684\u64cd\u4f5c\\nbash: \u884c 1: /dev/tcp/127.0.0.1/38651: \u4e0d\u5141\u8bb8\u7684\u64cd\u4f5c\\nCONNECT_DENIED'"
+            },
+            {
+              "property": "receiver_saw_no_connection",
+              "passed": true,
+              "detail": "connections=0"
+            }
+          ],
+          "scenario": "deny_future_connect"
+        },
+        {
+          "trial_id": "dual-path-rename-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "dual_path_rollback_complete",
+              "passed": true,
+              "detail": "src_restored=True dst_removed=True"
+            }
+          ],
+          "scenario": "dual_path_rename"
+        },
+        {
+          "trial_id": "dual-path-hardlink-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "dual_path_rollback_complete",
+              "passed": true,
+              "detail": "nlink 1->1 dst_removed=True"
+            }
+          ],
+          "scenario": "dual_path_hardlink"
+        }
+      ],
+      "trials_truncated": false,
+      "total_trials": 6,
+      "wall_time_seconds": 11.2
+    },
+    {
+      "experiment": "exp3_rollback_correctness",
+      "duration_seconds": 30.03,
+      "start_time": 1788831935.9067533,
+      "end_time": 1788831965.9417531,
+      "metadata": {
+        "orch_sock": "/tmp/shadow-orch.sock",
+        "shadowfs_mount": "/tmp/shadow-rq2-test/mnt",
+        "backing_store": "/tmp/shadow-rq2-test/orig",
+        "repeats": 1,
+        "run_id": "31935906"
+      },
+      "attempted_trials": 12,
+      "completed_trials": 12,
+      "skipped_trials": 0,
+      "infra_error_trials": 0,
+      "infrastructure_errors": 0,
+      "property_checks": 19,
+      "violations": 0,
+      "has_infra_errors": false,
+      "exit_code": 0,
+      "counters": {
+        "rollback_content_mismatch": {
+          "count": 0,
+          "total": 3,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7075982261787133
+          ],
+          "details": []
+        },
+        "rollback_metadata_mismatch": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "rollback_direntry_mismatch": {
+          "count": 0,
+          "total": 0,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            1.0
+          ],
+          "details": []
+        },
+        "child_process_survived": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "provisional_output_not_removed": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "commit_not_exactly_once": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "rollback_state_leak": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "env_cwd_not_restored": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "whiteout_not_cleaned": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "memory_state_leaked": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "baseline_sees_original": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "baseline_sees_original_mode": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "epoch_child_joined": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "baseline_serves_next_command": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "baseline_sees_source": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "baseline_sees_file": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        }
+      },
+      "empty_counters": [
+        "rollback_direntry_mismatch"
+      ],
+      "infra_errors": [],
+      "trials": [
+        {
+          "trial_id": "file-content-rollback-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "rollback_content_mismatch",
+              "passed": true,
+              "detail": "backing=b'ORIGINAL_CONTENT\\n' expected=b'ORIGINAL_CONTENT\\n'"
+            },
+            {
+              "property": "baseline_sees_original",
+              "passed": true,
+              "detail": "next-command cat='ORIGINAL_CONTENT'"
+            }
+          ],
+          "scenario": "file_content_rollback"
+        },
+        {
+          "trial_id": "permission-rollback-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "rollback_metadata_mismatch",
+              "passed": true,
+              "detail": "mode 0o644->0o644"
+            },
+            {
+              "property": "baseline_sees_original_mode",
+              "passed": true,
+              "detail": "next-command stat='644'"
+            }
+          ],
+          "scenario": "permission_rollback"
+        },
+        {
+          "trial_id": "child-process-termination-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "epoch_child_joined",
+              "passed": true,
+              "detail": "candidate=2242940 child=2242943 tree=[2242943]"
+            },
+            {
+              "property": "child_process_survived",
+              "passed": true,
+              "detail": "child_dead=True candidate_dead=True survivors=[]"
+            },
+            {
+              "property": "baseline_serves_next_command",
+              "passed": true,
+              "detail": "output='BASELINE_OK'"
+            }
+          ],
+          "scenario": "child_process_termination"
+        },
+        {
+          "trial_id": "rename-rollback-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "rollback_state_leak",
+              "passed": true,
+              "detail": "src_restored=True dst_removed=True"
+            },
+            {
+              "property": "baseline_sees_source",
+              "passed": true,
+              "detail": "next-command='SRC_EXISTS'"
+            }
+          ],
+          "scenario": "rename_rollback"
+        },
+        {
+          "trial_id": "whiteout-cleanup-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "whiteout_not_cleaned",
+              "passed": true,
+              "detail": "backing exists=True"
+            },
+            {
+              "property": "baseline_sees_file",
+              "passed": true,
+              "detail": "next-command='EXISTS'"
+            }
+          ],
+          "scenario": "whiteout_cleanup"
+        },
+        {
+          "trial_id": "commit-exactly-once-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "commit_not_exactly_once",
+              "passed": true,
+              "detail": "effect appeared 1 times"
+            }
+          ],
+          "scenario": "commit_once"
+        },
+        {
+          "trial_id": "hardlink-rollback-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "rollback_state_leak",
+              "passed": true,
+              "detail": "nlink 1->1 dst_removed=True"
+            }
+          ],
+          "scenario": "hardlink_rollback"
+        },
+        {
+          "trial_id": "env-cwd-restoration-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "env_cwd_not_restored",
+              "passed": true,
+              "detail": "cwd '/home/xht/\u684c\u9762/penumbra-work/RQ2/speculative_shadow/experiments/rq2'->'/home/xht/\u684c\u9762/penumbra-work/RQ2/speculative_shadow/experiments/rq2' leak='unset'"
+            }
+          ],
+          "scenario": "env_cwd_restoration"
+        },
+        {
+          "trial_id": "file-offset-restoration-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "rollback_content_mismatch",
+              "passed": true,
+              "detail": "external read 20B expected 20B"
+            },
+            {
+              "property": "baseline_sees_original",
+              "passed": true,
+              "detail": "next-command='AAAAABBBBBCCCCCDDDDD'"
+            }
+          ],
+          "scenario": "file_offset"
+        },
+        {
+          "trial_id": "provisional-output-removal-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "provisional_output_not_removed",
+              "passed": true,
+              "detail": "output_leaked=False file_leaked=False"
+            }
+          ],
+          "scenario": "provisional_output"
+        },
+        {
+          "trial_id": "memory-state-rollback-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "memory_state_leaked",
+              "passed": true,
+              "detail": "child_dead=True content_ok=True after=b'ORIGINAL_MMAP_CONTENT'"
+            }
+          ],
+          "scenario": "memory_state"
+        },
+        {
+          "trial_id": "allow-matches-native-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "allow_matches_native",
+              "passed": true,
+              "detail": "shadow_size=21 native_size=21"
+            }
+          ],
+          "scenario": "allow_matches_native"
+        }
+      ],
+      "trials_truncated": false,
+      "total_trials": 12,
+      "wall_time_seconds": 30.1
+    },
+    {
+      "experiment": "exp4_dependency_propagation",
+      "duration_seconds": 41.54,
+      "start_time": 1788831966.0091124,
+      "end_time": 1788832007.553896,
+      "metadata": {
+        "orch_sock": "/tmp/shadow-orch.sock",
+        "shadowfs_mount": "/tmp/shadow-rq2-test/mnt",
+        "backing_store": "/tmp/shadow-rq2-test/orig",
+        "repeats": 1,
+        "run_id": "31966009"
+      },
+      "attempted_trials": 10,
+      "completed_trials": 10,
+      "skipped_trials": 0,
+      "infra_error_trials": 0,
+      "infrastructure_errors": 0,
+      "property_checks": 67,
+      "violations": 0,
+      "has_infra_errors": false,
+      "exit_code": 0,
+      "counters": {
+        "rollback_set_mismatch": {
+          "count": 0,
+          "total": 7,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.4096163972250032
+          ],
+          "details": []
+        },
+        "downstream_not_rolled_back": {
+          "count": 0,
+          "total": 22,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.15437251281557435
+          ],
+          "details": []
+        },
+        "unrelated_branch_affected": {
+          "count": 0,
+          "total": 29,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.11944486906950263
+          ],
+          "details": []
+        },
+        "scc_partial_finalization": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "premature_downstream_release": {
+          "count": 0,
+          "total": 2,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.8418861169915808
+          ],
+          "details": []
+        },
+        "dependency_edge_missing": {
+          "count": 0,
+          "total": 4,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.6023646356164742
+          ],
+          "details": []
+        },
+        "absence_rollback_restores": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        }
+      },
+      "empty_counters": [],
+      "infra_errors": [],
+      "trials": [
+        {
+          "trial_id": "chain-topology-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "chain trial=0: B not in cascade of A",
+              "meta": {
+                "topology": "chain",
+                "trial": 0,
+                "node": "B",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "chain trial=0: C not in cascade of A",
+              "meta": {
+                "topology": "chain",
+                "trial": 0,
+                "node": "C",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "chain trial=0: C not in cascade of B",
+              "meta": {
+                "topology": "chain",
+                "trial": 0,
+                "node": "C",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "chain trial=0: unrelated A in cascade of B",
+              "meta": {
+                "topology": "chain",
+                "trial": 0,
+                "node": "A",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "chain trial=0: unrelated A in cascade of C",
+              "meta": {
+                "topology": "chain",
+                "trial": 0,
+                "node": "A",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "chain trial=0: unrelated B in cascade of C",
+              "meta": {
+                "topology": "chain",
+                "trial": 0,
+                "node": "B",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "rollback_set_mismatch",
+              "passed": true,
+              "detail": "chain trial=0 mismatch=False",
+              "meta": {
+                "topology": "chain",
+                "trial": 0
+              }
+            }
+          ],
+          "scenario": "topology_chain"
+        },
+        {
+          "trial_id": "fanout-topology-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "fanout trial=0: B not in cascade of A",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "B",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "fanout trial=0: C not in cascade of A",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "C",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "fanout trial=0: D not in cascade of A",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "D",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "fanout trial=0: unrelated A in cascade of B",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "A",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "fanout trial=0: unrelated C in cascade of B",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "C",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "fanout trial=0: unrelated D in cascade of B",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "D",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "fanout trial=0: unrelated A in cascade of C",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "A",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "fanout trial=0: unrelated B in cascade of C",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "B",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "fanout trial=0: unrelated D in cascade of C",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "D",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "fanout trial=0: unrelated A in cascade of D",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "A",
+                "reject": "D"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "fanout trial=0: unrelated B in cascade of D",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "B",
+                "reject": "D"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "fanout trial=0: unrelated C in cascade of D",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0,
+                "node": "C",
+                "reject": "D"
+              }
+            },
+            {
+              "property": "rollback_set_mismatch",
+              "passed": true,
+              "detail": "fanout trial=0 mismatch=False",
+              "meta": {
+                "topology": "fanout",
+                "trial": 0
+              }
+            }
+          ],
+          "scenario": "topology_fanout"
+        },
+        {
+          "trial_id": "diamond-topology-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "diamond trial=0: B not in cascade of A",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "B",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "diamond trial=0: C not in cascade of A",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "C",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "diamond trial=0: D not in cascade of A",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "D",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "diamond trial=0: D not in cascade of B",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "D",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "diamond trial=0: unrelated A in cascade of B",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "A",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "diamond trial=0: unrelated C in cascade of B",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "C",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "diamond trial=0: D not in cascade of C",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "D",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "diamond trial=0: unrelated A in cascade of C",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "A",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "diamond trial=0: unrelated B in cascade of C",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "B",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "diamond trial=0: unrelated A in cascade of D",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "A",
+                "reject": "D"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "diamond trial=0: unrelated B in cascade of D",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "B",
+                "reject": "D"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "diamond trial=0: unrelated C in cascade of D",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0,
+                "node": "C",
+                "reject": "D"
+              }
+            },
+            {
+              "property": "rollback_set_mismatch",
+              "passed": true,
+              "detail": "diamond trial=0 mismatch=False",
+              "meta": {
+                "topology": "diamond",
+                "trial": 0
+              }
+            }
+          ],
+          "scenario": "topology_diamond"
+        },
+        {
+          "trial_id": "independent-topology-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "independent trial=0: B not in cascade of A",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "B",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "independent trial=0: unrelated C in cascade of A",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "C",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "independent trial=0: unrelated D in cascade of A",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "D",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "independent trial=0: unrelated A in cascade of B",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "A",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "independent trial=0: unrelated C in cascade of B",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "C",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "independent trial=0: unrelated D in cascade of B",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "D",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "independent trial=0: D not in cascade of C",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "D",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "independent trial=0: unrelated A in cascade of C",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "A",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "independent trial=0: unrelated B in cascade of C",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "B",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "independent trial=0: unrelated A in cascade of D",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "A",
+                "reject": "D"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "independent trial=0: unrelated B in cascade of D",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "B",
+                "reject": "D"
+              }
+            },
+            {
+              "property": "unrelated_branch_affected",
+              "passed": true,
+              "detail": "independent trial=0: unrelated C in cascade of D",
+              "meta": {
+                "topology": "independent",
+                "trial": 0,
+                "node": "C",
+                "reject": "D"
+              }
+            },
+            {
+              "property": "rollback_set_mismatch",
+              "passed": true,
+              "detail": "independent trial=0 mismatch=False",
+              "meta": {
+                "topology": "independent",
+                "trial": 0
+              }
+            }
+          ],
+          "scenario": "topology_independent"
+        },
+        {
+          "trial_id": "scc-topology-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "scc trial=0: A not in cascade of A",
+              "meta": {
+                "topology": "scc",
+                "trial": 0,
+                "node": "A",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "scc trial=0: B not in cascade of A",
+              "meta": {
+                "topology": "scc",
+                "trial": 0,
+                "node": "B",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "scc trial=0: C not in cascade of A",
+              "meta": {
+                "topology": "scc",
+                "trial": 0,
+                "node": "C",
+                "reject": "A"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "scc trial=0: A not in cascade of B",
+              "meta": {
+                "topology": "scc",
+                "trial": 0,
+                "node": "A",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "scc trial=0: B not in cascade of B",
+              "meta": {
+                "topology": "scc",
+                "trial": 0,
+                "node": "B",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "scc trial=0: C not in cascade of B",
+              "meta": {
+                "topology": "scc",
+                "trial": 0,
+                "node": "C",
+                "reject": "B"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "scc trial=0: A not in cascade of C",
+              "meta": {
+                "topology": "scc",
+                "trial": 0,
+                "node": "A",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "scc trial=0: B not in cascade of C",
+              "meta": {
+                "topology": "scc",
+                "trial": 0,
+                "node": "B",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "downstream_not_rolled_back",
+              "passed": true,
+              "detail": "scc trial=0: C not in cascade of C",
+              "meta": {
+                "topology": "scc",
+                "trial": 0,
+                "node": "C",
+                "reject": "C"
+              }
+            },
+            {
+              "property": "rollback_set_mismatch",
+              "passed": true,
+              "detail": "scc trial=0 mismatch=False",
+              "meta": {
+                "topology": "scc",
+                "trial": 0
+              }
+            },
+            {
+              "property": "scc_partial_finalization",
+              "passed": true,
+              "detail": "scc trial=0 partial=False",
+              "meta": {
+                "topology": "scc",
+                "trial": 0
+              }
+            }
+          ],
+          "scenario": "topology_scc"
+        },
+        {
+          "trial_id": "dir-enumeration-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "dependency_edge_missing",
+              "passed": true,
+              "detail": "observed=['C', 'P'] expected=['C', 'P']"
+            },
+            {
+              "property": "rollback_set_mismatch",
+              "passed": true,
+              "detail": "observed=['C', 'P']"
+            }
+          ],
+          "scenario": "dep_directory_enumeration"
+        },
+        {
+          "trial_id": "absence-lookup-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "dependency_edge_missing",
+              "passed": true,
+              "detail": "observed=['C', 'P']"
+            },
+            {
+              "property": "absence_rollback_restores",
+              "passed": true,
+              "detail": "backing exists=True"
+            }
+          ],
+          "scenario": "dep_absence_negative_lookup"
+        },
+        {
+          "trial_id": "overwrite-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "dependency_edge_missing",
+              "passed": true,
+              "detail": "observed=['C', 'P']"
+            },
+            {
+              "property": "rollback_set_mismatch",
+              "passed": true,
+              "detail": "observed=['C', 'P']"
+            }
+          ],
+          "scenario": "dep_overwrite"
+        },
+        {
+          "trial_id": "predecessor-finalization-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "dependency_edge_missing",
+              "passed": true,
+              "detail": "observed=['A', 'B']"
+            },
+            {
+              "property": "premature_downstream_release",
+              "passed": true,
+              "detail": "B published independently=False"
+            }
+          ],
+          "scenario": "dep_predecessor_finalization"
+        },
+        {
+          "trial_id": "scc-group-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "scc_partial_finalization",
+              "passed": true,
+              "detail": "partial=False"
+            },
+            {
+              "property": "premature_downstream_release",
+              "passed": true,
+              "detail": "published after group deny=[]"
+            }
+          ],
+          "scenario": "dep_scc_group"
+        }
+      ],
+      "trials_truncated": false,
+      "total_trials": 10,
+      "wall_time_seconds": 41.6
+    },
+    {
+      "experiment": "exp5_failclosed_concurrency",
+      "duration_seconds": 3.79,
+      "start_time": 1788832014.6577551,
+      "end_time": 1788832018.4500475,
+      "metadata": {},
+      "attempted_trials": 16,
+      "completed_trials": 16,
+      "skipped_trials": 0,
+      "infra_error_trials": 0,
+      "infrastructure_errors": 0,
+      "property_checks": 20,
+      "violations": 0,
+      "has_infra_errors": false,
+      "exit_code": 0,
+      "counters": {
+        "unauthorized_effect_leaked": {
+          "count": 0,
+          "total": 3,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7075982261787133
+          ],
+          "details": []
+        },
+        "partial_file_published": {
+          "count": 0,
+          "total": 3,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.7075982261787133
+          ],
+          "details": []
+        },
+        "baseline_premature_delete": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "effect_duplicated": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "rejected_transcript_canonical": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_audit_corruption": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_policy_partial": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_fork_during_freeze": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_wal_torn_tail": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_concurrent_race": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_ring_buffer_drop": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_path_reconstruction": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_pid_cgroup_reuse": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_finalization_failure": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_drain_failure": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        },
+        "fault_token_replay": {
+          "count": 0,
+          "total": 1,
+          "rate": 0.0,
+          "ci_95": [
+            0.0,
+            0.9749999999999999
+          ],
+          "details": []
+        }
+      },
+      "empty_counters": [],
+      "infra_errors": [],
+      "trials": [
+        {
+          "trial_id": "audit_corruption-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "unauthorized_effect_leaked",
+              "passed": true,
+              "detail": "audit_corruption trial=0 type=0 (ret=-1 errno=1)",
+              "meta": {
+                "corruption_type": 0
+              }
+            },
+            {
+              "property": "fault_audit_corruption",
+              "passed": true
+            }
+          ],
+          "meta": {
+            "corruption_type": 0
+          }
+        },
+        {
+          "trial_id": "partial_policy-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "unauthorized_effect_leaked",
+              "passed": true,
+              "detail": "partial_policy trial=0: unshare succeeded despite only NETWORK allowed (ret=-1 errno=1)"
+            },
+            {
+              "property": "fault_policy_partial",
+              "passed": true
+            }
+          ]
+        },
+        {
+          "trial_id": "token_replay-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "fault_token_replay",
+              "passed": true,
+              "detail": "token_replay trial=0: first_ok=True replay_detected=False"
+            }
+          ]
+        },
+        {
+          "trial_id": "wal_torn-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "fault_wal_torn_tail",
+              "passed": true,
+              "detail": "wal_torn trial=0: partial file (18B)"
+            },
+            {
+              "property": "partial_file_published",
+              "passed": true,
+              "detail": "wal_torn trial=0: partial content after recovery"
+            }
+          ]
+        },
+        {
+          "trial_id": "partial_pub-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "partial_file_published",
+              "passed": true,
+              "detail": "partial_pub trial=0: file exists outside epoch"
+            }
+          ]
+        },
+        {
+          "trial_id": "baseline_delete-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "baseline_premature_delete",
+              "passed": true,
+              "detail": "baseline trial=0: baseline deleted prematurely"
+            }
+          ]
+        },
+        {
+          "trial_id": "ring_buffer_drop-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "fault_ring_buffer_drop",
+              "passed": true,
+              "detail": "ring_buffer_drop trial=0: effect leaked (ret=-1 errno=1)"
+            }
+          ]
+        },
+        {
+          "trial_id": "path_reconstruction-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "fault_path_reconstruction",
+              "passed": true,
+              "detail": "path_reconstruction trial=0: effect leaked (ret=-1 errno=1)"
+            }
+          ]
+        },
+        {
+          "trial_id": "pid_cgroup_reuse-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "fault_pid_cgroup_reuse",
+              "passed": true,
+              "detail": "pid_cgroup_reuse trial=0: effect leaked (ret=-1 errno=1)"
+            }
+          ]
+        },
+        {
+          "trial_id": "finalization_failure-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "fault_finalization_failure",
+              "passed": true,
+              "detail": "finalization trial=0: partial content"
+            }
+          ]
+        },
+        {
+          "trial_id": "promotion_crash-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "partial_file_published",
+              "passed": true,
+              "detail": "promotion trial=0: partial file (18B)"
+            }
+          ]
+        },
+        {
+          "trial_id": "effect_dup-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "effect_duplicated",
+              "passed": true,
+              "detail": "dup trial=0: effect appeared 1 times"
+            }
+          ]
+        },
+        {
+          "trial_id": "rejected_transcript-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "rejected_transcript_canonical",
+              "passed": true,
+              "detail": "rej trial=0: rejected content became canonical"
+            }
+          ]
+        },
+        {
+          "trial_id": "drain_failure-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "fault_drain_failure",
+              "passed": true,
+              "detail": "drain_failure trial=0: effect leaked (case=no_policy)",
+              "meta": {
+                "case": "no_policy"
+              }
+            },
+            {
+              "property": "unauthorized_effect_leaked",
+              "passed": true,
+              "detail": "drain_failure trial=0: unauthorized effect"
+            }
+          ],
+          "meta": {
+            "case": "no_policy"
+          }
+        },
+        {
+          "trial_id": "fork_freeze-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "fault_fork_during_freeze",
+              "passed": true,
+              "detail": "fork_freeze trial=0: 10 procs, leaked=False"
+            }
+          ]
+        },
+        {
+          "trial_id": "concurrent_race-0",
+          "status": "completed",
+          "assertions": [
+            {
+              "property": "fault_concurrent_race",
+              "passed": true,
+              "detail": "race trial=0: post-race probe denied (errors=0, ret=-1 errno=1)"
+            }
+          ]
+        }
+      ],
+      "trials_truncated": false,
+      "total_trials": 16,
+      "wall_time_seconds": 3.8
+    }
+  ],
+  "total_violations": 1,
+  "total_trials": 364,
+  "total_infra_errors": 0,
+  "has_error": false,
+  "has_warning": true,
+  "has_infra_errors": false,
+  "exit_code": 1,
+  "experiments_present": [
+    "exp1_effect_coverage",
+    "exp2_audit_consistency",
+    "exp3_rollback_correctness",
+    "exp4_dependency_propagation",
+    "exp5_failclosed_concurrency"
+  ],
+  "experiments_missing": [],
+  "timestamp": 1788832018.4683595
+}

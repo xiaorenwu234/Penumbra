@@ -296,20 +296,27 @@ int tp_sched_fork(struct trace_event_raw_sched_process_fork *ctx) {
     evt->event_type = PROC_EVENT_FORK;
     evt->source = EFFECT_SOURCE_PROC;
     evt->arg1 = BPF_CORE_READ(ctx, child_pid);
-    __u32 data_loc = BPF_CORE_READ(ctx, __data_loc_child_comm);
-    const char *child_comm = get_data_loc_str(ctx, data_loc);
-    bpf_probe_read_kernel_str(&evt->path, sizeof(evt->path), child_comm);
+    /* On 6.x kernels sched_process_fork.child_comm is a fixed char[16]; older
+     * kernels exposed it as a __data_loc dynamic string. Read the field that
+     * actually exists on the target kernel -- a CO-RE relocation against
+     * __data_loc_child_comm cannot be resolved on 6.x and makes the whole
+     * object fail to load (-EINVAL). */
+    BPF_CORE_READ_STR_INTO(&evt->path, ctx, child_comm);
     submit_event(evt);
     return 0;
 }
 
 SEC("tp/sched/sched_process_exit")
-int tp_sched_exit(struct trace_event_raw_sched_process_exit *ctx) {
+int tp_sched_exit(struct trace_event_raw_sched_process_template *ctx) {
     struct observ_event *evt = reserve_event();
     if (!evt) return 0;
     evt->event_type = PROC_EVENT_EXIT;
     evt->source = EFFECT_SOURCE_PROC;
-    evt->arg1 = BPF_CORE_READ(ctx, group_dead) ? 1 : 0;
+    /* 6.x kernels dropped the dedicated trace_event_raw_sched_process_exit
+     * struct and its group_dead field; sched_process_exit now shares
+     * trace_event_raw_sched_process_template (comm/pid/prio, no group_dead).
+     * Nothing downstream reads group_dead, so record the exiting pid. */
+    evt->arg1 = (__u32)BPF_CORE_READ(ctx, pid);
     submit_event(evt);
     return 0;
 }

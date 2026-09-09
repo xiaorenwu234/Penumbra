@@ -111,8 +111,10 @@ impl SocketServer {
         let listener = UnixListener::bind(sock_path)
             .with_context(|| format!("Failed to bind socket: {:?}", sock_path))?;
 
-        // Use non-blocking mode so the accept loop can check the
-        // running flag periodically and shut down gracefully.
+        // Non-blocking, so accept_loop can re-check the running flag and shut
+        // down on its own. The loop waits with poll(2) instead of retrying
+        // accept() in a tight spin -- see accept_loop, where the reason is
+        // spelled out together with the CPU figure the spin produced.
         listener.set_nonblocking(true)?;
 
         // Lock the socket down to owner rw only (0600). This is the ONLY control
@@ -127,7 +129,7 @@ impl SocketServer {
         let sock_path_buf = sock_path.to_path_buf();
         let running_clone = running.clone();
 
-        eprintln!("[socket] Listening on {:?} (non-blocking)", sock_path);
+        eprintln!("[socket] Listening on {:?} (non-blocking, poll-driven accept)", sock_path);
 
         let handle = thread::spawn(move || {
             Self::accept_loop(listener, process_manager, bpf_manager, running_clone);
@@ -146,7 +148,47 @@ impl SocketServer {
         bpf_manager: Arc<BpfManager>,
         running: Arc<AtomicBool>,
     ) {
+        // Wait with poll(2) on the listening fd; do not spin on accept().
+        //
+        // A non-blocking listener makes accept() return WouldBlock the instant no
+        // client is pending, and the WouldBlock arm below just `continue`s, so
+        // the loop used to run as fast as the core could go: ShadowProc held one
+        // core at 100% for its entire lifetime, at every workload level. On the
+        // RQ3 scaling run that measured as a flat shadowproc cpu_pct of ~101% in
+        // every configuration -- 96% of the total coordination tax the results
+        // table reports, which is more than enough to bury the scaling signal of
+        // the other two daemons.
+        //
+        // poll keeps both properties the non-blocking socket was bought for: the
+        // running flag is still re-checked every ACCEPT_POLL_MS, and a pending
+        // connection still wakes the wait immediately, so nothing is added to the
+        // orchestrator's connect latency.
+        use std::os::unix::io::AsRawFd;
+        const ACCEPT_POLL_MS: i32 = 200;
+        let listen_fd = listener.as_raw_fd();
+
         while running.load(Ordering::Relaxed) {
+            let mut pfd = libc::pollfd {
+                fd: listen_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            match unsafe { libc::poll(&mut pfd, 1, ACCEPT_POLL_MS) } {
+                0 => continue,      // idle tick: re-check the running flag
+                n if n > 0 => {}    // readable: fall through to accept()
+                _ => {
+                    let e = std::io::Error::last_os_error();
+                    if e.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    eprintln!("[socket] poll error: {}", e);
+                    // Bounded sleep, not another spin: a descriptor that has
+                    // started failing must not be retried at full speed.
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+            }
+
             match listener.accept() {
                 Ok((stream, _addr)) => {
                     // Peer authentication: only admit a client running as the
@@ -165,7 +207,9 @@ impl SocketServer {
                         }
                     });
                 }
-                // Timeout is expected — just loop back and check running flag
+                // Reachable only in a narrow race now that poll gates the accept
+                // (readiness reported for a connection that turned out to be
+                // unusable). Looping back re-enters poll, so it cannot spin.
                 Err(ref e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -544,8 +588,30 @@ impl SocketServer {
                         pids: None,
                     };
                 };
+                // Optional fine-grained policy (P0-5), same contract as
+                // continue_by_cgroup: a malformed policy aborts the release
+                // instead of silently resuming under allow-all. Absent policy
+                // keeps the legacy ENFORCED + allow-all resume.
+                let policy = match &req.policy {
+                    Some(v) => match ProcessManager::parse_proc_policy(v) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            return Response {
+                                status: "error".into(),
+                                message: Some(format!("invalid policy: {}", e)),
+                                frozen: None,
+                                pids: None,
+                            };
+                        }
+                    },
+                    None => None,
+                };
                 let mut pm = process_manager.lock().unwrap();
-                match pm.continue_process(pid) {
+                let resumed = match policy.as_ref() {
+                    Some(p) => pm.continue_pid_with_policy(pid, p),
+                    None => pm.continue_process(pid),
+                };
+                match resumed {
                     Ok(()) => Response {
                         status: "ok".into(),
                         message: None,

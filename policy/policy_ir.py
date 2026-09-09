@@ -244,6 +244,114 @@ def normalize_fs_prefix(pattern: str) -> str:
     return p
 
 
+# ─── CRI path convention (superblock-relative canonical paths) ───────────
+#
+# ShadowObserve derives an event's canonical path in BPF with cri_build_path()
+# (ShadowObserve/bpf/cri.bpf.h): it walks d_parent until d_parent == self and
+# treats THAT dentry as the root. For any file that is not on the root
+# filesystem the walk stops at the *superblock* root -- i.e. at the mount point
+# -- so the recorded path is relative to the mount: a write to
+# /tmp/shadow-rq2-test/mnt/exp2/a.txt on the ShadowFS FUSE mount is recorded as
+# "/exp2/a.txt". The in-kernel enforcer matches whitelist prefixes against the
+# very same string (cri_check_whitelist), so observation and enforcement agree
+# with each other -- but a policy written in host-absolute paths matches
+# NEITHER, which silently turned an explicit `deny WRITE <fuse file>` into a
+# rule that could never fire.
+#
+# Every path leaving the IR for ShadowObserve (audit rules, BPF whitelist
+# prefixes) is therefore projected into that convention here, using the live
+# mount table. The projection inverts cri_build_path(): strip the mount point,
+# and for a bind mount re-attach the sub-tree root mountinfo reports (field 4),
+# because the dentry walk yields the SOURCE path of a bind mount.
+#
+# KNOWN LIMITATION (mount-blind CRI): the kernel-side identifier carries no
+# mount/superblock dimension, so after projection two different filesystems
+# that both contain /exp2/a.txt are indistinguishable. A path-scoped ALLOW is
+# thus wider than the host path suggests (and a path-scoped DENY too, which is
+# the fail-closed direction). Fixing that properly means teaching
+# cri_build_path() to cross mount boundaries, which the inode_* LSM hooks
+# cannot do: they receive a dentry, not a struct path, so the vfsmount is
+# unavailable. ShadowProc's projection (to_proc_policy) carries no paths at all
+# and is unaffected.
+
+#: (mount_point, sb_root) pair as reported by mountinfo fields 5 and 4.
+MountEntry = Tuple[str, str]
+
+
+def _unescape_mountinfo(field: str) -> str:
+    """Decode the octal escapes mountinfo uses for space, tab, NL and backslash."""
+    if "\\" not in field:
+        return field
+    out: List[str] = []
+    i = 0
+    while i < len(field):
+        if field[i] == "\\" and field[i + 1:i + 4].isdigit():
+            out.append(chr(int(field[i + 1:i + 4], 8)))
+            i += 4
+        else:
+            out.append(field[i])
+            i += 1
+    return "".join(out)
+
+
+def load_mount_table(proc_path: str = "/proc/self/mountinfo") -> List[MountEntry]:
+    """Read the mount table as (mount_point, sb_root) pairs, longest first.
+
+    Not cached: the ShadowFS FUSE mount appears (and disappears) while the
+    orchestrator runs, and a stale table would leave a path unprojected, i.e.
+    silently unmatchable -- the exact failure this projection exists to prevent.
+
+    Raises ValueError when the table cannot be read, so the caller fails closed
+    instead of compiling a policy whose path rules can never match.
+    """
+    try:
+        with open(proc_path, "r") as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        raise ValueError(f"cannot read mount table {proc_path}: {e}")
+
+    entries: List[MountEntry] = []
+    for line in lines:
+        # 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,relatime
+        fields = line.split(" ")
+        if "-" not in fields:
+            continue
+        sep = fields.index("-")
+        if sep < 5:                       # truncated/garbage record
+            continue
+        sb_root = _unescape_mountinfo(fields[3])
+        mount_point = _unescape_mountinfo(fields[4])
+        if not mount_point.startswith("/") or not sb_root.startswith("/"):
+            continue
+        entries.append((mount_point, sb_root))
+    entries.sort(key=lambda e: len(e[0]), reverse=True)
+    return entries
+
+
+def to_cri_path(path: str, mount_table: List[MountEntry]) -> str:
+    """Project a host-absolute policy path into the CRI (canonical path) form.
+
+    Paths on the root filesystem are already in that form and pass through
+    unchanged; an empty pattern (match-any) is preserved.
+    """
+    if not path:
+        return path
+    for mount_point, sb_root in mount_table:   # longest mount point first
+        if mount_point == "/":
+            continue                        # root filesystem: identity
+        if path == mount_point:
+            remainder = ""
+        elif path.startswith(mount_point + "/"):
+            remainder = path[len(mount_point):]
+        else:
+            continue
+        # A bind mount exposes a sub-tree of its source filesystem, and the
+        # dentry walk reports source-side paths, so re-attach that sub-tree.
+        prefix = "" if sb_root == "/" else sb_root.rstrip("/")
+        return prefix + remainder or "/"
+    return path
+
+
 # ─── PolicyIR ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -293,7 +401,9 @@ class PolicyIR:
             rules.append(rule)
         return cls(rules=rules, cgroup_inode=cgroup_inode)
 
-    def to_audit_rules(self) -> List[Dict]:
+    def to_audit_rules(self,
+                       mount_table: Optional[List[MountEntry]] = None
+                       ) -> List[Dict]:
         """Emit rules in the format expected by ShadowObserve's audit engine.
 
         ShadowObserve's sealed-log schema is path/event based and cannot verify
@@ -302,22 +412,35 @@ class PolicyIR:
         ShadowProc's release-time proc_policy maps. This keeps endpoint policies
         submittable without pretending the sealed log audited fields it does not
         contain.
+
+        Path patterns are projected into the CRI convention the sealed log
+        actually carries (see to_cri_path); pass an explicit ``mount_table`` to
+        make the projection independent of the host's live mount table.
         """
+        table = load_mount_table() if mount_table is None else mount_table
         out: List[Dict] = []
         for r in self.rules:
             out.append({
                 "event_type": r["event_type"],  # -1 for wildcard
                 "action": r["action"],
-                "path_pattern": r["path_pattern"],
+                "path_pattern": to_cri_path(r["path_pattern"], table),
             })
         return out
 
-    def to_bpf_whitelist(self) -> List[Dict]:
+    def to_bpf_whitelist(self,
+                         mount_table: Optional[List[MountEntry]] = None
+                         ) -> List[Dict]:
         """Emit whitelist entries for the ShadowObserve BPF enforcer.
 
         Only ``allow`` rules are emitted (deny = absence from whitelist).
         Wildcard event_type (-1) is translated to 0xFFFF (BPF wildcard).
+
+        Prefixes are projected with the SAME mount table as to_audit_rules(), so
+        the runtime enforcer matches the identical string the audit matched --
+        the observe==enforce invariant is a property of one projection, not of
+        two independently written ones.
         """
+        table = load_mount_table() if mount_table is None else mount_table
         wl: List[Dict] = []
         for r in self.rules:
             if r["action"] != "allow":
@@ -327,7 +450,7 @@ class PolicyIR:
                 etype = 0xFFFF
             wl.append({
                 "event_type": etype,
-                "path_prefix": r["path_pattern"],
+                "path_prefix": to_cri_path(r["path_pattern"], table),
             })
         return wl
 

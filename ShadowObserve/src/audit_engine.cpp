@@ -80,7 +80,12 @@ static std::string extract_string(const std::string &s, size_t &pos) {
     return val;
 }
 
-static bool parse_json_line(const std::string &line, ObservEvent &evt) {
+/* Parse one JSONL record. `type_out`, when non-NULL, receives the value of the
+ * record's top-level "type" key (empty when absent): the observer brackets each
+ * epoch log with metadata records -- {"type":"header",...} and
+ * {"type":"end",...} -- which describe the log itself and are NOT events. */
+static bool parse_json_line(const std::string &line, ObservEvent &evt,
+                            std::string *type_out = nullptr) {
     std::memset(&evt, 0, sizeof(evt));
     size_t pos = 0;
     skip_whitespace(line, pos);
@@ -146,6 +151,12 @@ static bool parse_json_line(const std::string &line, ObservEvent &evt) {
             else if (val == "EXEC_PRIV") evt.event_type = PROC_EVENT_EXEC_PRIV;
         }
         else if (key == "comm")     std::strncpy(evt.comm, val.c_str(), sizeof(evt.comm) - 1);
+        else if (key == "type") {
+            /* Braces are load-bearing: without them the following `else if`
+             * branches would bind to this inner condition and path/new_path
+             * would never be parsed. */
+            if (type_out) *type_out = val;
+        }
         else if (key == "path")     std::strncpy(evt.path, val.c_str(), sizeof(evt.path) - 1);
         else if (key == "new_path") std::strncpy(evt.new_path, val.c_str(), sizeof(evt.new_path) - 1);
     }
@@ -249,8 +260,9 @@ AuditReport AuditEngine::audit(const std::string &log_file_path) const {
 
         ObservEvent evt;
         bool parsed = false;
+        std::string rec_type;
         try {
-            parsed = parse_json_line(line, evt);
+            parsed = parse_json_line(line, evt, &rec_type);
         } catch (const std::exception &) {
             // A malformed numeric field (stoull/stoul) throws: count as a
             // parse failure rather than letting it abort the audit.
@@ -265,6 +277,17 @@ AuditReport AuditEngine::audit(const std::string &log_file_path) const {
             fprintf(stderr, "[AuditEngine] parse error: %s\n", line.c_str());
             continue;
         }
+
+        // The observer's log brackets (header / end markers) carry no effect:
+        // they describe the log, not an operation the epoch performed. Auditing
+        // them as events made every epoch look like it contained an UNKNOWN
+        // effect with an empty path, which a non-wildcard policy then reported
+        // as a default-deny violation -- rejecting epochs that did nothing
+        // wrong. Skip them without counting them as events. Any OTHER "type"
+        // value is not a known bracket, so it stays on the fail-closed path
+        // below (an event of unknown type that the policy must account for).
+        if (rec_type == "header" || rec_type == "end")
+            continue;
 
         report.total_events++;
 

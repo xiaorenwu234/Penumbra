@@ -62,6 +62,7 @@
 #define EVENT_NETWORK_CONNECT  ENCODE_EVENT(EFFECT_CLASS_NETWORK, EFFECT_OP_CONNECT)     // 258
 #define EVENT_NETWORK_BIND     ENCODE_EVENT(EFFECT_CLASS_NETWORK, EFFECT_OP_BIND)        // 514
 #define EVENT_NETWORK_SEND     ENCODE_EVENT(EFFECT_CLASS_NETWORK, EFFECT_OP_SEND)        // 770
+#define EVENT_IPC_PIPE_WRITE   ENCODE_EVENT(EFFECT_CLASS_IPC, EFFECT_OP_PIPE_WRITE)      // 259
 #define EVENT_IPC_SHM          ENCODE_EVENT(EFFECT_CLASS_IPC, EFFECT_OP_SYSV_SHM)        // 771
 #define EVENT_IPC_MSG          ENCODE_EVENT(EFFECT_CLASS_IPC, EFFECT_OP_SYSV_MSG)        // 1027
 #define EVENT_IPC_SEM          ENCODE_EVENT(EFFECT_CLASS_IPC, EFFECT_OP_SYSV_SEM)        // 1283
@@ -1165,36 +1166,68 @@ int BPF_PROG(shadow_ptrace, struct task_struct *child, unsigned int mode)
 }
 
 // ═══════════════════════════════════════════════════════════════
-// fmod_ret on ksys_write - intercept write to stdout/stderr/pipe
+// fmod_ret on the syscall wrappers - intercept write/sendfile/splice/
+// io_uring/mount/unshare/keyctl/bpf/perf/ioctl/shmdt/mq_* BEFORE the body.
 // fmod_ret runs BEFORE the function body; returning non-zero
 // overrides the function return value (function does NOT execute)
+//
+// THESE MUST BE DECLARED `long`, NOT `int` - this is an ABI requirement,
+// not a style choice. Every hook here returns a NEGATIVE errno
+// (-ERESTARTSYS for DECISION_FENCE, -EPERM for DECISION_DENY) into a
+// syscall wrapper whose C return type is `long`, and the fmod_ret
+// trampoline stores the program's full 64-bit r0 in that return slot.
+// With an `int` declaration clang materialises the constant as a 64-bit
+// load-immediate of the ZERO-EXTENDED value, so -512 is delivered as
+// +0x00000000fffffe00 (+4294966784). Both consequences are silent:
+//   * the restart check in do_signal() compares regs->ax against
+//     -ERESTARTSYS as a long, never matches, so the fenced syscall is
+//     NEVER re-executed: the "reversible" fence is irreversible and a
+//     restart token or ENFORCED policy installed after the fence can never
+//     take effect (there is no second pass through the hook);
+//   * userspace gets a huge POSITIVE value that glibc does not classify as
+//     an error, so errno stays 0 - a denied write() even reports having
+//     written 4294967295 bytes.
+// With `long`, clang emits the sign-extended ALU64 move (r0 = -0x200)
+// instead, which is what the kernel's restart machinery expects.
+// The lsm/* hooks keep `int` on purpose: their stubs are declared `int`,
+// so the value is truncated back on the way out and survives intact.
 // ═══════════════════════════════════════════════════════════════
 
-SEC("fmod_ret/__x64_sys_write")
-int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
+// ─── write()/writev() fd classification ─────────────────────────────────
+// Which policy key governs a write depends on WHAT the fd refers to, so the
+// fd has to be classified BEFORE check_policy() is consulted. Hoisting
+// check_policy() above the classification as an "allow" fast path silently
+// broke IPC/PIPE_WRITE: the hook queried OUTPUT/WRITE_OUT for every write, so
+// an allow compiled from the published schema for (IPC, PIPE_WRITE) could
+// never match the key the kernel actually looked up. The write then hit the
+// absent-entry default-deny and returned EPERM despite being allowed, and
+// emit_policy_violation() labelled the effect OUTPUT instead of IPC.
+//
+// The per-branch OUTCOMES below are unchanged from the previous code; only
+// the event key (hence the policy lookup and the audit label) differs.
+#define WRITE_FD_PASS     0  // not an effect this hook governs -> let it run
+#define WRITE_FD_PIPE     1  // FIFO   -> IPC/PIPE_WRITE
+#define WRITE_FD_SOCKET   2  // socket -> OUTPUT/WRITE_OUT, a coarse backstop:
+                             //           lsm/socket_sendmsg already owns
+                             //           NETWORK/SEND with endpoint detail
+#define WRITE_FD_UNKNOWN  3  // fd cannot be bounded/inspected -> FAIL CLOSED
+                             //           as OUTPUT/WRITE_OUT
+
+static __always_inline int classify_write_fd(unsigned long fd)
 {
-    int d = check_policy(1, EVENT_OUTPUT_WRITE);
-    if (d == DECISION_ALLOW)
-        return 0;
-
-    // Get fd from first argument (rdi on x86_64)
-    unsigned long fd = PT_REGS_PARM1_CORE_SYSCALL(regs);
-
     // NOTE: stdout/stderr (fd 1/2) are NO LONGER intercepted.
     // They are redirected to a buffer file at launch time by cgroup_exec.
-    // Only intercept writes to pipes/FIFOs/sockets (IPC detection).
     if (fd <= 2)
-        return 0;
+        return WRITE_FD_PASS;
 
-    // Check if fd is a pipe/FIFO/socket
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct files_struct *files = BPF_CORE_READ(task, files);
     if (!files)
-        return 0;
+        return WRITE_FD_PASS;
 
     struct fdtable *fdt = BPF_CORE_READ(files, fdt);
     if (!fdt)
-        return 0;
+        return WRITE_FD_PASS;
 
     // Reject fds beyond the process's actual fd-table capacity: indexing
     // fd_array[fd] past max_fds would read past the array and could
@@ -1202,123 +1235,87 @@ int BPF_PROG(shadow_sys_write, struct pt_regs *regs)
     // An fd we cannot inspect is treated as a possible pipe/socket carrying
     // data out, so we FAIL CLOSED rather than pass.
     unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
-    if (fd >= max_fds) {
-        if (d == DECISION_FENCE) {
-            do_intercept(1, EVENT_OUTPUT_WRITE);
-            return -ERESTARTSYS;
-        }
-        emit_policy_violation(1, EVENT_OUTPUT_WRITE);
-        return -EPERM;
-    }
+    if (fd >= max_fds)
+        return WRITE_FD_UNKNOWN;
 
     struct file **fd_array = BPF_CORE_READ(fdt, fd);
     if (!fd_array)
-        return 0;
+        return WRITE_FD_PASS;
 
     // Above this constant bound the verifier cannot prove fd_array[fd] is in
     // range, so the fd type is un-inspectable. FAIL CLOSED.
-    if (fd > 1023) {
-        if (d == DECISION_FENCE) {
-            do_intercept(1, EVENT_OUTPUT_WRITE);
-            return -ERESTARTSYS;
-        }
-        emit_policy_violation(1, EVENT_OUTPUT_WRITE);
-        return -EPERM;
-    }
+    if (fd > 1023)
+        return WRITE_FD_UNKNOWN;
 
     struct file *f = NULL;
     bpf_probe_read_kernel(&f, sizeof(f), &fd_array[fd]);
     if (!f)
-        return 0;
+        return WRITE_FD_PASS;
 
     struct inode *inode = BPF_CORE_READ(f, f_inode);
     if (!inode)
-        return 0;
+        return WRITE_FD_PASS;
 
     unsigned short mode = BPF_CORE_READ(inode, i_mode);
-    if ((mode & S_IFMT) == S_IFIFO || (mode & S_IFMT) == S_IFSOCK) {
-        if (d == DECISION_FENCE) {
-            do_intercept(1, EVENT_OUTPUT_WRITE);
-            return -ERESTARTSYS;
-        }
-        emit_policy_violation(1, EVENT_OUTPUT_WRITE);
-        return -EPERM;
-    }
+    if ((mode & S_IFMT) == S_IFIFO)
+        return WRITE_FD_PIPE;    // data crosses a process boundary: IPC
+    if ((mode & S_IFMT) == S_IFSOCK)
+        return WRITE_FD_SOCKET;
 
+    // Regular file / device / FUSE-backed: filesystem effects belong to
+    // ShadowFS, this hook has no business gating them.
+    return WRITE_FD_PASS;
+}
+
+// Classification -> governing effect event. 0 means "not ours".
+static __always_inline __u32 write_fd_event(int kind)
+{
+    if (kind == WRITE_FD_PIPE)
+        return EVENT_IPC_PIPE_WRITE;
+    if (kind == WRITE_FD_SOCKET || kind == WRITE_FD_UNKNOWN)
+        return EVENT_OUTPUT_WRITE;
     return 0;
 }
 
-// Also intercept writev for completeness
-SEC("fmod_ret/__x64_sys_writev")
-int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
+SEC("fmod_ret/__x64_sys_write")
+long BPF_PROG(shadow_sys_write, struct pt_regs *regs)
 {
-    int d = check_policy(20, EVENT_OUTPUT_WRITE);
+    // Get fd from first argument (rdi on x86_64) and classify it FIRST, so
+    // the policy lookup uses the key that matches the actual effect.
+    __u32 event = write_fd_event(
+        classify_write_fd(PT_REGS_PARM1_CORE_SYSCALL(regs)));
+    if (!event)
+        return 0;
+
+    int d = check_policy(1, event);
     if (d == DECISION_ALLOW)
         return 0;
-
-    unsigned long fd = PT_REGS_PARM1_CORE_SYSCALL(regs);
-
-    // NOTE: stdout/stderr (fd 1/2) are NO LONGER intercepted.
-    if (fd <= 2)
-        return 0;
-
-    // Check pipe/socket (same logic as write)
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    struct files_struct *files = BPF_CORE_READ(task, files);
-    if (!files)
-        return 0;
-
-    struct fdtable *fdt = BPF_CORE_READ(files, fdt);
-    if (!fdt)
-        return 0;
-
-    // Reject fds beyond the process's actual fd-table capacity.
-    // Un-inspectable fd => FAIL CLOSED.
-    unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
-    if (fd >= max_fds) {
-        if (d == DECISION_FENCE) {
-            do_intercept(20, EVENT_OUTPUT_WRITE);
-            return -ERESTARTSYS;
-        }
-        emit_policy_violation(20, EVENT_OUTPUT_WRITE);
-        return -EPERM;
+    if (d == DECISION_FENCE) {
+        do_intercept(1, event);
+        return -ERESTARTSYS;
     }
+    emit_policy_violation(1, event);
+    return -EPERM;
+}
 
-    struct file **fd_array = BPF_CORE_READ(fdt, fd);
-    if (!fd_array)
+// Also intercept writev for completeness (same classification as write)
+SEC("fmod_ret/__x64_sys_writev")
+long BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
+{
+    __u32 event = write_fd_event(
+        classify_write_fd(PT_REGS_PARM1_CORE_SYSCALL(regs)));
+    if (!event)
         return 0;
 
-    // Above this constant bound the verifier cannot prove fd_array[fd] is in
-    // range. FAIL CLOSED.
-    if (fd > 1023) {
-        if (d == DECISION_FENCE) {
-            do_intercept(20, EVENT_OUTPUT_WRITE);
-            return -ERESTARTSYS;
-        }
-        emit_policy_violation(20, EVENT_OUTPUT_WRITE);
-        return -EPERM;
+    int d = check_policy(20, event);
+    if (d == DECISION_ALLOW)
+        return 0;
+    if (d == DECISION_FENCE) {
+        do_intercept(20, event);
+        return -ERESTARTSYS;
     }
-
-    struct file *f = NULL;
-    bpf_probe_read_kernel(&f, sizeof(f), &fd_array[fd]);
-    if (!f)
-        return 0;
-
-    struct inode *inode = BPF_CORE_READ(f, f_inode);
-    if (!inode)
-        return 0;
-
-    unsigned short mode = BPF_CORE_READ(inode, i_mode);
-    if ((mode & S_IFMT) == S_IFIFO || (mode & S_IFMT) == S_IFSOCK) {
-        if (d == DECISION_FENCE) {
-            do_intercept(20, EVENT_OUTPUT_WRITE);
-            return -ERESTARTSYS;
-        }
-        emit_policy_violation(20, EVENT_OUTPUT_WRITE);
-        return -EPERM;
-    }
-
-    return 0;
+    emit_policy_violation(20, event);
+    return -EPERM;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1336,7 +1333,7 @@ int BPF_PROG(shadow_sys_writev, struct pt_regs *regs)
 // ═══════════════════════════════════════════════════════════════
 
 SEC("fmod_ret/__x64_sys_sendfile64")
-int BPF_PROG(shadow_sys_sendfile, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_sendfile, struct pt_regs *regs)
 {
     int d = check_policy(40, EVENT_OUTPUT_SENDFILE);
     if (d == DECISION_ALLOW)
@@ -1350,7 +1347,7 @@ int BPF_PROG(shadow_sys_sendfile, struct pt_regs *regs)
 }
 
 SEC("fmod_ret/__x64_sys_splice")
-int BPF_PROG(shadow_sys_splice, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_splice, struct pt_regs *regs)
 {
     int d = check_policy(275, EVENT_OUTPUT_SPLICE);
     if (d == DECISION_ALLOW)
@@ -1364,7 +1361,7 @@ int BPF_PROG(shadow_sys_splice, struct pt_regs *regs)
 }
 
 SEC("fmod_ret/__x64_sys_vmsplice")
-int BPF_PROG(shadow_sys_vmsplice, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_vmsplice, struct pt_regs *regs)
 {
     int d = check_policy(278, EVENT_OUTPUT_SPLICE);
     if (d == DECISION_ALLOW)
@@ -1378,7 +1375,7 @@ int BPF_PROG(shadow_sys_vmsplice, struct pt_regs *regs)
 }
 
 SEC("fmod_ret/__x64_sys_tee")
-int BPF_PROG(shadow_sys_tee, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_tee, struct pt_regs *regs)
 {
     int d = check_policy(276, EVENT_OUTPUT_SPLICE);
     if (d == DECISION_ALLOW)
@@ -1396,7 +1393,7 @@ int BPF_PROG(shadow_sys_tee, struct pt_regs *regs)
 // setup/enter/register so a monitored process is frozen at its first io_uring
 // use (issue #5). Fine-grained SQE inspection is deferred.
 SEC("fmod_ret/__x64_sys_io_uring_setup")
-int BPF_PROG(shadow_sys_io_uring_setup, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_io_uring_setup, struct pt_regs *regs)
 {
     int d = check_policy(425, EVENT_OUTPUT_IO_URING);
     if (d == DECISION_ALLOW)
@@ -1410,7 +1407,7 @@ int BPF_PROG(shadow_sys_io_uring_setup, struct pt_regs *regs)
 }
 
 SEC("fmod_ret/__x64_sys_io_uring_enter")
-int BPF_PROG(shadow_sys_io_uring_enter, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_io_uring_enter, struct pt_regs *regs)
 {
     int d = check_policy(426, EVENT_OUTPUT_IO_URING);
     if (d == DECISION_ALLOW)
@@ -1424,7 +1421,7 @@ int BPF_PROG(shadow_sys_io_uring_enter, struct pt_regs *regs)
 }
 
 SEC("fmod_ret/__x64_sys_io_uring_register")
-int BPF_PROG(shadow_sys_io_uring_register, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_io_uring_register, struct pt_regs *regs)
 {
     int d = check_policy(427, EVENT_OUTPUT_IO_URING);
     if (d == DECISION_ALLOW)
@@ -1460,74 +1457,74 @@ static __always_inline int system_guard(__u32 syscall_nr, __u32 event_type)
 }
 
 SEC("fmod_ret/__x64_sys_mount")
-int BPF_PROG(shadow_sys_mount, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_mount, struct pt_regs *regs)
 {
     return system_guard(165, EVENT_SYSTEM_MOUNT);
 }
 
 /* umount2(2) 的内核实现是 SYSCALL_DEFINE2(umount, ...)，符号名无 "2" 后缀 */
 SEC("fmod_ret/__x64_sys_umount")
-int BPF_PROG(shadow_sys_umount2, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_umount2, struct pt_regs *regs)
 {
     return system_guard(166, EVENT_SYSTEM_MOUNT);
 }
 
 SEC("fmod_ret/__x64_sys_unshare")
-int BPF_PROG(shadow_sys_unshare, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_unshare, struct pt_regs *regs)
 {
     return system_guard(272, EVENT_SYSTEM_NAMESPACE);
 }
 
 SEC("fmod_ret/__x64_sys_setns")
-int BPF_PROG(shadow_sys_setns, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_setns, struct pt_regs *regs)
 {
     return system_guard(308, EVENT_SYSTEM_NAMESPACE);
 }
 
 SEC("fmod_ret/__x64_sys_keyctl")
-int BPF_PROG(shadow_sys_keyctl, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_keyctl, struct pt_regs *regs)
 {
     return system_guard(250, EVENT_SYSTEM_KEYRING);
 }
 
 SEC("fmod_ret/__x64_sys_add_key")
-int BPF_PROG(shadow_sys_add_key, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_add_key, struct pt_regs *regs)
 {
     return system_guard(248, EVENT_SYSTEM_KEYRING);
 }
 
 SEC("fmod_ret/__x64_sys_request_key")
-int BPF_PROG(shadow_sys_request_key, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_request_key, struct pt_regs *regs)
 {
     return system_guard(249, EVENT_SYSTEM_KEYRING);
 }
 
 SEC("fmod_ret/__x64_sys_bpf")
-int BPF_PROG(shadow_sys_bpf, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_bpf, struct pt_regs *regs)
 {
     return system_guard(321, EVENT_SYSTEM_BPF);
 }
 
 SEC("fmod_ret/__x64_sys_perf_event_open")
-int BPF_PROG(shadow_sys_perf_event_open, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_perf_event_open, struct pt_regs *regs)
 {
     return system_guard(298, EVENT_SYSTEM_PERF);
 }
 
 SEC("fmod_ret/__x64_sys_process_vm_readv")
-int BPF_PROG(shadow_sys_process_vm_readv, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_process_vm_readv, struct pt_regs *regs)
 {
     return system_guard(310, EVENT_SYSTEM_PROCESS_VM);
 }
 
 SEC("fmod_ret/__x64_sys_process_vm_writev")
-int BPF_PROG(shadow_sys_process_vm_writev, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_process_vm_writev, struct pt_regs *regs)
 {
     return system_guard(311, EVENT_SYSTEM_PROCESS_VM);
 }
 
 SEC("fmod_ret/__x64_sys_ioctl")
-int BPF_PROG(shadow_sys_ioctl, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_ioctl, struct pt_regs *regs)
 {
     int d = check_policy(16, EVENT_SYSTEM_TTY_IOCTL);
     if (d == DECISION_ALLOW)
@@ -1584,7 +1581,7 @@ block:
 // ═══════════════════════════════════════════════════════════════
 
 SEC("fmod_ret/__x64_sys_shmdt")
-int BPF_PROG(shadow_sys_shmdt, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_shmdt, struct pt_regs *regs)
 {
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_SHM;  // detach: target unknown -> wildcard only
@@ -1600,7 +1597,7 @@ int BPF_PROG(shadow_sys_shmdt, struct pt_regs *regs)
 }
 
 SEC("fmod_ret/__x64_sys_mq_open")
-int BPF_PROG(shadow_sys_mq_open, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_mq_open, struct pt_regs *regs)
 {
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MQ;  // queue name not parsed -> wildcard only
@@ -1616,7 +1613,7 @@ int BPF_PROG(shadow_sys_mq_open, struct pt_regs *regs)
 }
 
 SEC("fmod_ret/__x64_sys_mq_timedsend")
-int BPF_PROG(shadow_sys_mq_timedsend, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_mq_timedsend, struct pt_regs *regs)
 {
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MQ;
@@ -1632,7 +1629,7 @@ int BPF_PROG(shadow_sys_mq_timedsend, struct pt_regs *regs)
 }
 
 SEC("fmod_ret/__x64_sys_mq_timedreceive")
-int BPF_PROG(shadow_sys_mq_timedreceive, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_mq_timedreceive, struct pt_regs *regs)
 {
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MQ;
@@ -1648,7 +1645,7 @@ int BPF_PROG(shadow_sys_mq_timedreceive, struct pt_regs *regs)
 }
 
 SEC("fmod_ret/__x64_sys_mq_notify")
-int BPF_PROG(shadow_sys_mq_notify, struct pt_regs *regs)
+long BPF_PROG(shadow_sys_mq_notify, struct pt_regs *regs)
 {
     struct effect_detail det = {};
     det.ipc_type = IPC_TYPE_MQ;

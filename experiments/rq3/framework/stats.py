@@ -93,12 +93,52 @@ def percentile(sorted_data: List[float], p: float) -> float:
     return sorted_data[lo] * (1 - frac) + sorted_data[hi] * frac
 
 
+# Bootstrap cost controls. The work is n_bootstrap x len(data), and the sample
+# lists in the scaling experiments grow with the swept axis (32 agents x 20
+# invocations x 3 repeats = 1920 samples for one series), so an unbounded
+# n_bootstrap turns reporting into the slowest part of the run.
+#
+# Reducing n_bootstrap as n grows is not a shortcut, it is the correct scaling:
+# the Monte Carlo error of a bootstrap quantile goes as 1/sqrt(B) divided by the
+# density of the bootstrap distribution, and that density grows as sqrt(n)
+# because the median's sampling distribution tightens. So holding B x n constant
+# holds the ABSOLUTE Monte Carlo error of the reported interval constant.
+#
+# The budget is set so that every series with n <= 1000 still draws the full
+# n_bootstrap -- that covers all previously published RQ3 results, whose largest
+# series is exactly 1000, so this changes nothing about their confidence
+# intervals beyond the resampling primitive below.
+BOOTSTRAP_WORK_BUDGET = 10_000_000
+MIN_BOOTSTRAP = 1000
+
+
+def _bootstrap_resamples(n: int, requested: int) -> int:
+    """How many resamples to actually draw for a series of length `n`.
+
+    The cap only ever LOWERS a request, and only down to MIN_BOOTSTRAP: a caller
+    that explicitly asks for fewer resamples than that (a quick mode, a smoke
+    test) gets exactly what it asked for, because the floor exists to stop the
+    cap collapsing to a useless count on a huge series, not to overrule someone
+    who already chose a cheap one. A request of zero or less draws nothing, and
+    bootstrap_ci then reports a (0.0, 0.0) interval the same way it does for
+    empty data.
+    """
+    if requested <= MIN_BOOTSTRAP:
+        return max(requested, 0)
+    return max(MIN_BOOTSTRAP,
+               min(requested, BOOTSTRAP_WORK_BUDGET // max(n, 1)))
+
+
 def bootstrap_ci(data: List[float], n_bootstrap: int = 10000,
                  confidence: float = 0.95, seed: int = 42) -> Tuple[float, float]:
     """Compute bootstrap confidence interval for the median.
 
     Uses resampling with replacement to estimate the sampling distribution
     of the median, then returns the (alpha/2, 1-alpha/2) percentiles.
+
+    The number of resamples actually drawn is capped by _bootstrap_resamples;
+    see the comment there for why that keeps the interval's precision rather
+    than trading it away.
     """
     if not data:
         return (0.0, 0.0)
@@ -108,9 +148,17 @@ def bootstrap_ci(data: List[float], n_bootstrap: int = 10000,
 
     rng = random.Random(seed)
     n = len(data)
+    draws = _bootstrap_resamples(n, n_bootstrap)
     medians = []
-    for _ in range(n_bootstrap):
-        sample = [data[rng.randint(0, n - 1)] for _ in range(n)]
+    for _ in range(draws):
+        # rng.choices is the C-level primitive for exactly this: it draws n
+        # independent uniform indices and indexes in one pass. The equivalent
+        # list comprehension over rng.randint measured 3.5x slower at n=1920,
+        # which is the difference between a report that takes seconds and one
+        # that takes minutes. Same distribution, same seed, different stream --
+        # so a re-run moves a CI endpoint by Monte Carlo noise, not by a change
+        # in what is being estimated.
+        sample = rng.choices(data, k=n)
         sample.sort()
         medians.append(percentile(sample, 50))
     medians.sort()

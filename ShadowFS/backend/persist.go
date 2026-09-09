@@ -27,18 +27,27 @@ const legacyWALFileName = ".shadow_wal"
 // PersistState is the top-level v2 checkpoint structure: the complete
 // version graph, not just a dirty-path set.
 type PersistState struct {
-	FormatVersion int                      `json:"format_version"`
-	Seq           int64                    `json:"seq"`
-	NextVersion   uint64                   `json:"next_version"`
-	ImplicitCtr   int64                    `json:"implicit_ctr,omitempty"`
-	NextGroupID   int                      `json:"next_group_id,omitempty"`
-	Epochs        map[string]*PersistEpoch `json:"epochs"`
-	Versions      []PersistVersion         `json:"versions"`
-	VisibleHead   map[string]uint64        `json:"visible_head"`
-	Dependents    map[string][]string      `json:"dependents"`
-	DependsOn     map[string][]string      `json:"depends_on"`
-	ActiveEpochs  map[string]string        `json:"active_epochs"` // cgroupID -> epochID
-	ActiveGroups  map[int]*PersistGroup    `json:"active_groups,omitempty"`
+	FormatVersion int    `json:"format_version"`
+	Seq           int64  `json:"seq"`
+	NextVersion   uint64 `json:"next_version"`
+	ImplicitCtr   int64  `json:"implicit_ctr,omitempty"`
+	NextGroupID   int    `json:"next_group_id,omitempty"`
+	// GraphGen is the whole-graph mutation counter. It no longer gates anything
+	// (BeginFinalize revalidates a group by its SCC member set instead), but it
+	// is exported as a scalability metric, and a counter that silently restarts
+	// from 0 after every recovery makes that metric discontinuous across a
+	// crash. Persisting it is also what keeps it comparable with the
+	// per-group graph_gen values stored in ActiveGroups below, which WERE
+	// always persisted -- the asymmetry used to leave a restored group naming a
+	// generation the backend could never reach again.
+	GraphGen     int64                    `json:"graph_gen,omitempty"`
+	Epochs       map[string]*PersistEpoch `json:"epochs"`
+	Versions     []PersistVersion         `json:"versions"`
+	VisibleHead  map[string]uint64        `json:"visible_head"`
+	Dependents   map[string][]string      `json:"dependents"`
+	DependsOn    map[string][]string      `json:"depends_on"`
+	ActiveEpochs map[string]string        `json:"active_epochs"` // cgroupID -> epochID
+	ActiveGroups map[int]*PersistGroup    `json:"active_groups,omitempty"`
 }
 
 // PersistEpoch is the per-epoch state serialized to disk. The epoch's
@@ -67,40 +76,40 @@ type PersistGroup struct {
 // PersistVersion is the flat serialized form of a FileVersion. Shared by the
 // checkpoint (Versions slice) and WAL mutation records.
 type PersistVersion struct {
-	ID            uint64 `json:"id"`
-	Owner         string `json:"owner"`
-	LogicalPath   string `json:"path"`
-	StagePath     string `json:"stage_path,omitempty"`
-	Parent        uint64 `json:"parent,omitempty"`
-	Seq           int64  `json:"seq"`
-	Op            int    `json:"op"`
-	State         int    `json:"state,omitempty"`
-	Mode          uint32 `json:"mode,omitempty"`
-	Rdev          uint64 `json:"rdev,omitempty"`
-	RenameFrom    string `json:"rename_from,omitempty"`
-	LinkTarget    string `json:"link_target,omitempty"`
-	Dir           bool   `json:"dir,omitempty"`
-	SourceVersion uint64 `json:"source_version,omitempty"` // Fix 4
-	RenameSnapshot bool  `json:"rename_snapshot,omitempty"` // Fix 4: snapshot mode
+	ID             uint64 `json:"id"`
+	Owner          string `json:"owner"`
+	LogicalPath    string `json:"path"`
+	StagePath      string `json:"stage_path,omitempty"`
+	Parent         uint64 `json:"parent,omitempty"`
+	Seq            int64  `json:"seq"`
+	Op             int    `json:"op"`
+	State          int    `json:"state,omitempty"`
+	Mode           uint32 `json:"mode,omitempty"`
+	Rdev           uint64 `json:"rdev,omitempty"`
+	RenameFrom     string `json:"rename_from,omitempty"`
+	LinkTarget     string `json:"link_target,omitempty"`
+	Dir            bool   `json:"dir,omitempty"`
+	SourceVersion  uint64 `json:"source_version,omitempty"`  // Fix 4
+	RenameSnapshot bool   `json:"rename_snapshot,omitempty"` // Fix 4: snapshot mode
 }
 
 // marshalVersion converts a FileVersion to its serializable form.
 func marshalVersion(v *FileVersion) PersistVersion {
 	return PersistVersion{
-		ID:            uint64(v.ID),
-		Owner:         string(v.Owner),
-		LogicalPath:   v.LogicalPath,
-		StagePath:     v.StagePath,
-		Parent:        uint64(v.Parent),
-		Seq:           v.Seq,
-		Op:            int(v.Operation),
-		State:         int(v.State),
-		Mode:          v.Mode,
-		Rdev:          v.Rdev,
-		RenameFrom:    v.RenameFrom,
-		LinkTarget:    v.LinkTarget,
-		Dir:           v.Dir,
-		SourceVersion: uint64(v.SourceVersion),
+		ID:             uint64(v.ID),
+		Owner:          string(v.Owner),
+		LogicalPath:    v.LogicalPath,
+		StagePath:      v.StagePath,
+		Parent:         uint64(v.Parent),
+		Seq:            v.Seq,
+		Op:             int(v.Operation),
+		State:          int(v.State),
+		Mode:           v.Mode,
+		Rdev:           v.Rdev,
+		RenameFrom:     v.RenameFrom,
+		LinkTarget:     v.LinkTarget,
+		Dir:            v.Dir,
+		SourceVersion:  uint64(v.SourceVersion),
 		RenameSnapshot: v.RenameSnapshot,
 	}
 }
@@ -108,20 +117,20 @@ func marshalVersion(v *FileVersion) PersistVersion {
 // unmarshalVersion converts a PersistVersion back to a FileVersion.
 func unmarshalVersion(p *PersistVersion) *FileVersion {
 	return &FileVersion{
-		ID:            VersionID(p.ID),
-		Owner:         EpochID(p.Owner),
-		LogicalPath:   p.LogicalPath,
-		StagePath:     p.StagePath,
-		Parent:        VersionID(p.Parent),
-		Seq:           p.Seq,
-		Operation:     VersionOp(p.Op),
-		State:         VersionState(p.State),
-		Mode:          p.Mode,
-		Rdev:          p.Rdev,
-		RenameFrom:    p.RenameFrom,
-		LinkTarget:    p.LinkTarget,
-		Dir:           p.Dir,
-		SourceVersion: VersionID(p.SourceVersion),
+		ID:             VersionID(p.ID),
+		Owner:          EpochID(p.Owner),
+		LogicalPath:    p.LogicalPath,
+		StagePath:      p.StagePath,
+		Parent:         VersionID(p.Parent),
+		Seq:            p.Seq,
+		Operation:      VersionOp(p.Op),
+		State:          VersionState(p.State),
+		Mode:           p.Mode,
+		Rdev:           p.Rdev,
+		RenameFrom:     p.RenameFrom,
+		LinkTarget:     p.LinkTarget,
+		Dir:            p.Dir,
+		SourceVersion:  VersionID(p.SourceVersion),
 		RenameSnapshot: p.RenameSnapshot,
 	}
 }
@@ -135,6 +144,7 @@ func (b *Backend) snapshot() *PersistState {
 		NextVersion:   b.nextVersion,
 		ImplicitCtr:   b.implicitCtr,
 		NextGroupID:   b.nextGroupID,
+		GraphGen:      b.graphGen,
 		Epochs:        make(map[string]*PersistEpoch, len(b.epochs)),
 		Versions:      make([]PersistVersion, 0, len(b.versionByID)),
 		VisibleHead:   make(map[string]uint64, len(b.visibleHead)),
@@ -216,6 +226,7 @@ func (b *Backend) loadState(state *PersistState) error {
 	b.nextVersion = state.NextVersion
 	b.implicitCtr = state.ImplicitCtr
 	b.nextGroupID = state.NextGroupID
+	b.graphGen = state.GraphGen
 
 	b.epochs = make(map[EpochID]*EpochState, len(state.Epochs))
 	for id, pe := range state.Epochs {

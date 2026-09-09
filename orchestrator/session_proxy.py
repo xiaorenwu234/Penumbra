@@ -917,6 +917,35 @@ class SessionProxy:
         text = data[:idx + 1].decode("utf-8", errors="replace")
         return text.splitlines()
 
+    @staticmethod
+    def _extract_rc(out_lines, rc_marker):
+        """Remove the rc marker from `out_lines` (in place) and return the exit
+        status it carried.
+
+        The marker is normally a line of its own, but a command whose last
+        output line has NO trailing newline (`printf 'X'`, or `cat` on such a
+        file) gets the marker glued onto that line. Searching for the marker
+        instead of matching the line prefix keeps BOTH halves correct: with a
+        prefix-only test the marker text leaked into the returned output and rc
+        silently stayed 0, which is exactly the "failed tool run
+        indistinguishable from a fast success" this protocol exists to prevent.
+        """
+        rc = 0
+        for i, ln in enumerate(out_lines):
+            pos = ln.find(rc_marker)
+            if pos < 0:
+                continue
+            try:
+                rc = int(ln[pos + len(rc_marker):] or "0")
+            except ValueError:
+                rc = 0
+            if pos == 0:
+                del out_lines[i]            # marker alone: drop the line
+            else:
+                out_lines[i] = ln[:pos]     # glued: keep the real output
+            break
+        return rc
+
     def run(self, sid, command, timeout=10.0):
         """Feed one command to the current live shell; return (stdout, rc).
 
@@ -952,15 +981,7 @@ class SessionProxy:
             if sentinel in lines:
                 idx = lines.index(sentinel)
                 out_lines = lines[:idx]
-                rc = 0
-                for i, ln in enumerate(out_lines):
-                    if ln.startswith(rc_marker):
-                        try:
-                            rc = int(ln[len(rc_marker):] or "0")
-                        except ValueError:
-                            rc = 0
-                        del out_lines[i]
-                        break
+                rc = self._extract_rc(out_lines, rc_marker)
                 out = "\n".join(out_lines)
                 # Same path in and out of an epoch: record the output tagged with
                 # the epoch that produced it (None outside an epoch) and hand it
@@ -1991,7 +2012,7 @@ class SessionProxy:
             self._log(f"session {sess.id}: WARNING — could not thaw after failed "
                       f"begin_epoch: {e} (session may be stuck frozen)")
 
-    def commit(self, sid):
+    def commit(self, sid, proc_policy=None):
         """Accept the candidate as canonical; discard the frozen baseline.
 
         This is the single-caller convenience path (used by the demo/tests). The
@@ -2000,7 +2021,7 @@ class SessionProxy:
         finalize_commit() (destructive). Keep the two in lock-step here.
         """
         self.quiesce_for_commit(sid)
-        self.finalize_commit(sid)
+        self.finalize_commit(sid, proc_policy=proc_policy)
 
     def quiesce_for_commit(self, sid):
         """REVERSIBLE commit phase 1: bring the candidate to a stopped
@@ -2021,12 +2042,20 @@ class SessionProxy:
         # vfork-D 死锁提前恢复围栏冻结的子进程（reject 路径则绝不）。
         return self._quiesce_epoch(sess, release_fence_vfork=True)
 
-    def finalize_commit(self, sid):
+    def finalize_commit(self, sid, proc_policy=None):
         """DESTRUCTIVE commit phase 2: discard the frozen baseline, keep the
         candidate as canonical, and release the buffered speculative transcript.
 
         MUST only be called after the file layer (ShadowFS) has finalized: this
         discards the baseline (commit_pid) and can no longer be rolled back.
+
+        proc_policy: the fine-grained policy the orchestrator audited and
+        authorized for this epoch. It is forwarded to ShadowProc so the
+        candidate is resumed UNDER IT (MODE_ENFORCED + these class/endpoint
+        entries). Passing None keeps ShadowProc's legacy resume, which
+        transitions the cgroup to ENFORCED + allow-all -- i.e. every effect the
+        policy did not authorize (a fenced NETWORK/CONNECT, say) escapes on
+        resume. Callers that have an authorized policy MUST pass it.
         """
         sess = self.sessions[sid]
         if sess.epoch is None:
@@ -2047,8 +2076,10 @@ class SessionProxy:
         self._reap(baseline)
         _tstep("commit.reap_baseline", _t0)
         # The candidate is still frozen at its boundary — resume it as canonical.
+        # client.call drops None fields, so an absent proc_policy reproduces the
+        # legacy policy-less continue_pid request exactly.
         _t1 = time.perf_counter()
-        self.client.call("continue_pid", pid=candidate)
+        self.client.call("continue_pid", pid=candidate, policy=proc_policy)
         _tstep("commit.continue_rpc", _t1)
         sess.live_pid = candidate            # unchanged: candidate stays live
         sess.epoch = None

@@ -166,6 +166,48 @@ impl ProcessManager {
         Ok(())
     }
 
+    /// Resume ONE frozen process under an explicit fine-grained policy.
+    ///
+    /// Per-pid counterpart of `continue_by_cgroup_with_policy`, for the
+    /// SessionProxy commit path (a session epoch releases exactly its own
+    /// candidate, not the whole cgroup: the pristine baseline must stay
+    /// stopped until it is discarded). Like the cgroup variant it installs the
+    /// policy BEFORE the SIGCONT, so the auto-restarted syscall is judged
+    /// against the authorized policy instead of racing an install that happens
+    /// after the process is already running.
+    ///
+    /// This exists because `continue_process` transitions the cgroup to
+    /// ENFORCED + allow-all, which silently discards the policy the
+    /// orchestrator audited and authorized for this epoch: a session epoch
+    /// resolved with e.g. "filesystem ops only" would then let the candidate's
+    /// fenced NETWORK/CONNECT out on resume. Fail-closed: if the cgroup cannot
+    /// be resolved or the policy cannot be installed, nothing is resumed.
+    pub fn continue_pid_with_policy(&mut self, pid: u32, policy: &ProcPolicy) -> Result<()> {
+        let pid = self.resolve_pid(pid);
+        let frozen = self
+            .frozen
+            .get(&pid)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Process {} is not in frozen list", pid))?;
+
+        let cg_id = self
+            .bpf_manager
+            .cgroup_id_from_path(&frozen.cgroup_path)
+            .with_context(|| {
+                format!(
+                    "continue_pid_with_policy: cannot resolve cgroup id for {}",
+                    frozen.cgroup_path
+                )
+            })?;
+        self.bpf_manager
+            .enforce_policy(cg_id, policy)
+            .context("continue_pid_with_policy: policy installation failed; not releasing")?;
+
+        // Already ENFORCED with the caller's policy installed -> SIGCONT without
+        // touching the class policy again.
+        self.sigcont_enforced(pid)
+    }
+
     /// Resume a frozen process with a ONE-SHOT restart token (SPECULATIVE
     /// phase authorization): the token authorizes exactly ONE pending syscall
     /// pass. After the token is consumed, the next intercepted syscall is

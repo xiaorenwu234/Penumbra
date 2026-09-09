@@ -17,13 +17,19 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 
 using namespace ghostbpf_observ;
 
 static std::string write_log(const std::string &body) {
-    std::string path = "/tmp/shadowobserve_dualpath_test.jsonl";
+    /* Honour $TMPDIR and fall back to the CWD: /tmp is root-only (0700) on some
+     * hosts, which made this test unrunnable as a normal user. */
+    const char *tmp = getenv("TMPDIR");
+    std::string dir = (tmp && *tmp) ? tmp : ".";
+    if (!dir.empty() && dir.back() != '/') dir += '/';
+    std::string path = dir + "shadowobserve_dualpath_test.jsonl";
     std::ofstream f(path, std::ios::trunc);
     f << body;
     f.close();

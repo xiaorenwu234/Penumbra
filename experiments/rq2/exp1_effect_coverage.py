@@ -18,6 +18,18 @@ Key metrics (reported as absolute counts):
   - Duplicated effects after syscall restart
   - Missing or incorrectly classified audit events
 
+LIMITATION -- policy granularity is (class, operation), not per-effect:
+  ShadowProc's class_policy map is keyed by (effect_class, operation) and has
+  no finer granularity. Several distinct effects therefore share ONE policy
+  key, which means they are not independently grantable: allowing any member
+  of a group allows all of them, and denying one denies the whole group. The
+  groups are computed from EFFECT_MATRIX by shared_policy_key_groups() and
+  printed with every report, so the per-effect claims below are really per-KEY
+  claims for those effects. This is a property of the enforcement design, not
+  a defect found by this experiment; it bounds how strongly "effect-level
+  isolation" can be claimed for the grouped effects. Note that operation-level
+  isolation (scenario 5) is unaffected: it compares DIFFERENT (class, op) keys.
+
 Usage:
     SHADOW_RUN_RQ2_EXPERIMENTS=1 python3 exp1_effect_coverage.py [--repeats N]
 """
@@ -30,9 +42,15 @@ import sys
 import tempfile
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# experiments/rq2/ (framework.*) and speculative_shadow/ (policy.*) must both be
+# importable regardless of the CWD the harness is launched from.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJ = os.path.dirname(os.path.dirname(_HERE))  # .../speculative_shadow
+for _p in (_HERE, _PROJ):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
+from framework.errors import InfrastructureError, infra
 from framework.client import ShadowProcClient, ShadowFSClient, ShadowObserveClient
 from framework.cgroup import CgroupManager
 from framework.oracle import EffectOracle
@@ -156,7 +174,21 @@ EFFECT_MATRIX = [
     ("sys_process_vm_writev", "PROCESS_VM_WRITEV", "SYSTEM", "PROCESS_VM", None, None),
 ]
 
-# Sibling operations for operation-level isolation tests
+# Sibling operations for operation-level isolation tests.
+#
+# BOTH the key and the value must name a (class, op) that some row of
+# EFFECT_MATRIX actually uses. test_scenario_sibling_isolation() resolves the
+# value back to an event name through EFFECT_MATRIX and RETURNS SILENTLY when
+# it cannot -- before record() -- so a stale entry does not fail loudly, it
+# makes the whole scenario disappear from the denominator. Three such entries
+# existed (FILESYSTEM/MKNOD, PRIVILEGE/EXEC, SYSTEM/UMOUNT) and cost scenario 5
+# its sys_mount/sys_umount coverage. unknown_sibling_ops() below now reports any
+# recurrence in every run.
+#
+# Note SYSTEM/MOUNT cannot use UMOUNT as its sibling: mount and umount SHARE the
+# (SYSTEM, MOUNT) policy key (see shared_policy_key_groups()), so there is no
+# distinct UMOUNT operation to allow instead. NAMESPACE is a real, different key
+# and is already the sibling of choice in the other direction.
 SIBLING_OPS = {
     ("NETWORK", "CONNECT"): ("NETWORK", "BIND"),
     ("NETWORK", "BIND"): ("NETWORK", "CONNECT"),
@@ -170,8 +202,7 @@ SIBLING_OPS = {
     ("IPC", "PIPE_WRITE"): ("IPC", "SYSV_SHM"),
     ("SIGNAL", "KILL"): ("SIGNAL", "PTRACE"),
     ("SIGNAL", "PTRACE"): ("SIGNAL", "KILL"),
-    ("SYSTEM", "MOUNT"): ("SYSTEM", "UMOUNT"),
-    ("SYSTEM", "UMOUNT"): ("SYSTEM", "MOUNT"),
+    ("SYSTEM", "MOUNT"): ("SYSTEM", "NAMESPACE"),
     ("SYSTEM", "NAMESPACE"): ("SYSTEM", "MOUNT"),
     ("SYSTEM", "KEYRING"): ("SYSTEM", "BPF"),
     ("SYSTEM", "BPF"): ("SYSTEM", "MOUNT"),
@@ -181,12 +212,77 @@ SIBLING_OPS = {
     ("FILESYSTEM", "WRITE"): ("FILESYSTEM", "CREATE"),
     ("FILESYSTEM", "CREATE"): ("FILESYSTEM", "WRITE"),
     ("FILESYSTEM", "READ"): ("FILESYSTEM", "WRITE"),
-    ("FILESYSTEM", "MKNOD"): ("FILESYSTEM", "CREATE"),
     ("PRIVILEGE", "SETUID"): ("PRIVILEGE", "SETGID"),
     ("PRIVILEGE", "SETGID"): ("PRIVILEGE", "SETUID"),
-    ("PRIVILEGE", "EXEC"): ("PRIVILEGE", "SETUID"),
+    ("PRIVILEGE", "EXEC_PRIV"): ("PRIVILEGE", "SETUID"),
     ("OUTPUT", "WRITE_OUT"): ("OUTPUT", "SENDFILE"),
 }
+
+
+def shared_policy_key_groups():
+    """Group EFFECT_MATRIX by the (class, op) key the kernel actually looks up.
+
+    Returns [((class, op), [probe, ...]), ...] for every key with 2+ effects,
+    sorted by key so the report is reproducible run to run. Computed from
+    EFFECT_MATRIX rather than hardcoded: if the schema or the matrix changes,
+    the reported limitation follows automatically instead of going stale.
+    """
+    groups = {}
+    for probe, _event, cls, op, _endpoint, _bucket in EFFECT_MATRIX:
+        groups.setdefault((cls, op), []).append(probe)
+    return sorted((k, v) for k, v in groups.items() if len(v) > 1)
+
+
+def unknown_sibling_ops():
+    """SIBLING_OPS entries whose KEY or VALUE names no (class, op) in the matrix.
+
+    A stale VALUE is the dangerous side: test_scenario_sibling_isolation()
+    resolves the value back to an event name through EFFECT_MATRIX and returns
+    SILENTLY when it cannot -- before record() -- so the scenario vanishes from
+    the denominator instead of failing. That is exactly how sys_mount and
+    sys_umount lost their operation-level isolation coverage to a nonexistent
+    (SYSTEM, UMOUNT) op. A stale KEY is only dead weight, since no effect ever
+    looks it up. Both sides are reported, tagged by which one is stale.
+    """
+    known = {(cls, op) for _p, _e, cls, op, _x, _y in EFFECT_MATRIX}
+    stale = []
+    for k, v in SIBLING_OPS.items():
+        if k not in known:
+            stale.append(("key", f"{k[0]}/{k[1]}"))
+        if v not in known:
+            stale.append(("value", f"{k[0]}/{k[1]} -> {v[0]}/{v[1]}"))
+    return sorted(stale)
+
+
+def sibling_coverage():
+    """How many effects scenario 5 ACTUALLY runs, following run()'s dispatch.
+
+    run() calls test_scenario_sibling_isolation() only on the BPF-enforced
+    branch: effects in SKIP_ALL_SCENARIOS, FUSE_ENFORCED_EFFECTS and
+    BPF_EXEMPT_EFFECTS never reach it, however valid their SIBLING_OPS entry
+    looks. Counting those as "runs" would overstate the denominator -- the same
+    reporting fault this experiment has been removing elsewhere -- so they are
+    reported separately as not_dispatched. Probe availability (a missing binary)
+    is a runtime condition and is not modelled here.
+
+    Returns {"runs", "no_entry", "stale_value", "not_dispatched"} -> [probe].
+    """
+    known = {(cls, op) for _p, _e, cls, op, _x, _y in EFFECT_MATRIX}
+    out = {"runs": [], "no_entry": [], "stale_value": [],
+           "not_dispatched": []}
+    for probe, _e, cls, op, _x, _y in EFFECT_MATRIX:
+        if (probe in SKIP_ALL_SCENARIOS or probe in FUSE_ENFORCED_EFFECTS
+                or probe in BPF_EXEMPT_EFFECTS):
+            out["not_dispatched"].append(probe)
+            continue
+        sib = SIBLING_OPS.get((cls, op))
+        if sib is None:
+            out["no_entry"].append(probe)
+        elif sib not in known:
+            out["stale_value"].append(probe)
+        else:
+            out["runs"].append(probe)
+    return out
 
 
 class Experiment1:
@@ -208,51 +304,73 @@ class Experiment1:
         self.metrics.add_counter("incorrectly_denied")
         self.metrics.add_counter("duplicated_after_restart")
         self.metrics.add_counter("missing_audit_events")
-        self.metrics.add_counter("audit_tests_skipped")
+        # NOTE: "audit_tests_skipped" is deliberately NOT registered as a
+        # counter. Both of its record() call sites pass skipped=True, and
+        # MetricsCollector.record() returns before reaching _add_assertion()
+        # for skipped trials, so the counter could never leave 0/0 - it showed
+        # up in the violation-rate table as a permanently dead row. The skip
+        # information is already carried by the trial record (status=skipped +
+        # skip_reason); the tally below is reported separately.
+        self.audit_checks_skipped = 0
         self.metrics.add_counter("effect_not_observed")
 
     def setup(self):
-        """Connect to daemons and verify prerequisites."""
+        """Connect to daemons and verify prerequisites.
+
+        Every prerequisite is FATAL: a missing daemon, audit engine or FUSE
+        mount means the effect-coverage claims cannot be established, so we
+        raise InfrastructureError instead of degrading to a warning.
+        """
         if os.geteuid() != 0:
-            raise RuntimeError("Experiment 1 requires root privileges")
+            raise infra("root", "Experiment 1 requires root privileges")
 
         # ── Schema validation: EFFECT_MATRIX must align with policy schema ──
-        schema_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "policy", "effect_schema.json")
+        schema_path = os.path.join(_PROJ, "policy", "effect_schema.json")
         if os.path.exists(schema_path):
             with open(schema_path) as f:
                 schema = json.load(f)
             legacy_map = schema.get("legacy_event_map", {})
             for probe_name, event_name, cls_name, op_name, _, _ in EFFECT_MATRIX:
                 if event_name not in legacy_map:
-                    raise RuntimeError(
-                        f"EFFECT_MATRIX drift: probe '{probe_name}' uses "
-                        f"event_name '{event_name}' which is NOT in "
-                        f"effect_schema.json legacy_event_map")
+                    raise infra(
+                        "schema_drift",
+                        f"EFFECT_MATRIX probe '{probe_name}' uses event_name "
+                        f"'{event_name}' NOT in effect_schema.json "
+                        f"legacy_event_map")
                 entry = legacy_map[event_name]
                 if entry["class"] != cls_name:
-                    raise RuntimeError(
-                        f"EFFECT_MATRIX drift: probe '{probe_name}' class "
+                    raise infra(
+                        "schema_drift",
+                        f"EFFECT_MATRIX probe '{probe_name}' class "
                         f"'{cls_name}' != schema class '{entry['class']}'")
             print(f"[exp1] Schema validation: {len(EFFECT_MATRIX)} effects "
                   f"all present in legacy_event_map")
 
-        self.proc_client.connect()
-        self.fs_client.connect()
-        # Try to connect to ShadowObserve for audit event verification
+        try:
+            self.proc_client.connect()
+        except Exception as exc:
+            raise infra("shadowproc_connect",
+                        "cannot reach ShadowProc daemon", exc) from exc
+        try:
+            self.fs_client.connect()
+        except Exception as exc:
+            raise infra("shadowfs_connect",
+                        "cannot reach ShadowFS daemon", exc) from exc
+        # ShadowObserve is REQUIRED: exp1 verifies real audit events, so an
+        # unavailable audit engine invalidates the coverage claims.
         try:
             self.observe_client = ShadowObserveClient()
             self.observe_client.connect()
-        except (FileNotFoundError, ConnectionError):
-            print("[exp1] WARNING: ShadowObserve not available, "
-                  "audit event tests will be limited")
+        except Exception as exc:
+            raise infra("shadowobserve_connect",
+                        "cannot reach ShadowObserve daemon (audit verification "
+                        "is mandatory for exp1)", exc) from exc
         # Ensure FUSE mount directories exist for fs probes
         ensure_fuse_dirs("exp1")
         if not is_fuse_mounted():
-            print(f"[exp1] WARNING: ShadowFS FUSE not mounted at {SHADOWFS_MNT}")
-            print("[exp1] Filesystem probes will use FUSE path anyway")
-        print(f"[exp1] Connected to ShadowProc and ShadowFS")
+            raise infra("fuse_mount",
+                        f"ShadowFS FUSE not mounted at {SHADOWFS_MNT}")
+        print(f"[exp1] Connected to ShadowProc, ShadowFS and ShadowObserve")
         print(f"[exp1] FUSE mount: {SHADOWFS_MNT}")
         print(f"[exp1] Testing {len(EFFECT_MATRIX)} effects x 7 scenarios "
               f"x {self.repeats} repeats")
@@ -577,6 +695,7 @@ class Experiment1:
             resp = self.proc_client.request({
                 "action": "drain_violations"})
             if resp.get("status") != "ok":
+                self.audit_checks_skipped += 1
                 self.metrics.record(
                     "audit_tests_skipped", False,
                     trial_info={"probe": probe_name, "scenario": "audit",
@@ -605,6 +724,7 @@ class Experiment1:
 
         except Exception as e:
             # Cannot verify audit - skip (do NOT count as violation)
+            self.audit_checks_skipped += 1
             self.metrics.record(
                 "audit_tests_skipped", False,
                 trial_info={"probe": probe_name, "scenario": "audit",
@@ -1633,22 +1753,59 @@ class Experiment1:
 
         except KeyboardInterrupt:
             print("\n[exp1] Interrupted by user")
+        except Exception as exc:
+            # A lifecycle/probe failure is NEVER swallowed: record it as an
+            # INFRA_ERROR (invalidates the run) and re-raise so main() exits
+            # non-zero.
+            self.metrics.record_infra_error("run", exc)
+            raise
         finally:
             self.metrics.finish()
             self.teardown()
 
-        # Report
-        fuse_count = len(FUSE_ENFORCED_EFFECTS)
-        print(f"\n  Enforcement layers tested:")
-        print(f"    - FUSE layer ({fuse_count} fs effects): 5 scenarios "
-              f"(fence/allow/deny/boundary/fail-closed)")
-        print(f"    - BPF layer: 7 scenarios (fence/allow/deny/endpoint/"
-              f"sibling/fail-closed/unsafe)")
-        print(f"    - BPF-exempt non-FUSE ({exempt_count} effects): "
-              f"allow only (same-epoch exemptions by design)")
-        print(f"  Note: {len(SKIP_ALL_SCENARIOS)} effects skipped (semantic issues):")
-        print(f"    - ipc_shm: multi-syscall (shmget/shmat) interaction")
-        self.metrics.print_report()
+            # Report
+            fuse_count = len(FUSE_ENFORCED_EFFECTS)
+            print(f"\n  Enforcement layers tested:")
+            print(f"    - FUSE layer ({fuse_count} fs effects): 5 scenarios "
+                  f"(fence/allow/deny/boundary/fail-closed)")
+            print(f"    - BPF layer: 7 scenarios (fence/allow/deny/endpoint/"
+                  f"sibling/fail-closed/unsafe)")
+            print(f"    - BPF-exempt non-FUSE ({exempt_count} effects): "
+                  f"allow only (same-epoch exemptions by design)")
+            print(f"  Note: {len(SKIP_ALL_SCENARIOS)} effects skipped "
+                  f"(semantic issues):")
+            print(f"    - ipc_shm: multi-syscall (shmget/shmat) interaction")
+            print(f"  Audit-event checks skipped (not a violation rate): "
+                  f"{self.audit_checks_skipped}")
+
+            # Documented limitation: policy granularity is (class, op), so
+            # these effects share one key and are not independently grantable.
+            shared = shared_policy_key_groups()
+            n_effects = sum(len(v) for _k, v in shared)
+            print(f"  Policy granularity (documented limitation, NOT a "
+                  f"violation rate):")
+            print(f"    {len(shared)} policy keys are shared by {n_effects} "
+                  f"effects; class_policy has no finer grain than "
+                  f"(class, op), so allowing one member allows the whole "
+                  f"group:")
+            for (cls, op), probes in shared:
+                print(f"      {cls}/{op:<14s}: {', '.join(probes)}")
+            print(f"    Per-effect claims are therefore per-KEY for the "
+                  f"effects above.")
+            stale = unknown_sibling_ops()
+            if stale:
+                print(f"    WARNING: {len(stale)} stale SIBLING_OPS entries "
+                      f"(a stale VALUE silently skips scenario 5 instead of "
+                      f"failing): {stale}")
+            cov = sibling_coverage()
+            print(f"    Scenario 5 (operation-level isolation) coverage: "
+                  f"{len(cov['runs'])} BPF-enforced effects run; "
+                  f"{len(cov['no_entry'])} have no sibling entry; "
+                  f"{len(cov['stale_value'])} skipped on a stale sibling "
+                  f"value; {len(cov['not_dispatched'])} not dispatched to "
+                  f"this scenario (FUSE-layer / BPF-exempt / semantic skip).")
+            self.metrics.print_report()
+
         return self.metrics
 
 
@@ -1666,8 +1823,21 @@ def main():
         sys.exit(1)
 
     exp = Experiment1(repeats=args.repeats)
-    metrics = exp.run()
-    metrics.save_report(args.output_dir)
+    exit_code = 0
+    try:
+        metrics = exp.run()
+        exit_code = metrics.exit_code
+    except Exception as exc:
+        # run() re-raises any lifecycle/probe failure after recording it as an
+        # INFRA_ERROR; setup() may raise one before any trial ran. Either way
+        # the run is invalid: persist the report and exit non-zero.
+        print(f"[exp1] INFRASTRUCTURE ERROR: {exc}", file=sys.stderr)
+        if not exp.metrics.has_infra_errors:
+            exp.metrics.record_infra_error("run", exc)
+        exit_code = 2
+    finally:
+        exp.metrics.save_report(args.output_dir)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,36 @@
+========================================================================
+  EXPERIMENT: exp2_audit_consistency
+  Duration: 11.2s
+  Trials: 6 completed / 6 attempted (0 skipped, 0 infra_error)
+  Property checks: 10
+========================================================================
+
+  Property                       Violations        Rate                95% CI
+  ---------------------------  ------------  ----------  --------------------
+  allowed_write_committed               0/1    0.000000  [0.000000, 0.975000]
+  disallowed_write_rejected             1/1    1.000000  [0.025000, 1.000000]
+  backing_store_unchanged               1/1    1.000000  [0.025000, 1.000000]
+  history_passed_audit                  1/1    1.000000  [0.025000, 1.000000]
+  future_connect_denied                 2/2    1.000000  [0.158114, 1.000000]
+  receiver_saw_no_connection            0/2    0.000000  [0.000000, 0.841886]
+  dual_path_rollback_complete           0/2    0.000000  [0.000000, 0.841886]
+
+========================================================================
+
+  5 violations across 10 property checks in 6 completed trials
+
+  VIOLATIONS DETECTED: 5
+
+  disallowed_write_rejected (1 violations):
+    - resolved=allow audit_rejected=None violations=0
+
+  backing_store_unchanged (1 violations):
+    - backing exists=True
+
+  history_passed_audit (1 violations):
+    - resolved=deny violations=2 backing=False
+
+  future_connect_denied (2 violations):
+    - output=''
+    - output=''
+========================================================================

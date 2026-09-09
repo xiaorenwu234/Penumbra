@@ -1,0 +1,32 @@
+========================================================================
+  EXPERIMENT: exp5_failclosed_concurrency
+  Duration: 3.8s
+  Trials: 16 completed / 16 attempted (0 skipped, 0 infra_error)
+  Property checks: 20
+========================================================================
+
+  Property                         Violations        Rate                95% CI
+  -----------------------------  ------------  ----------  --------------------
+  unauthorized_effect_leaked              0/3    0.000000  [0.000000, 0.707598]
+  partial_file_published                  0/3    0.000000  [0.000000, 0.707598]
+  baseline_premature_delete               0/1    0.000000  [0.000000, 0.975000]
+  effect_duplicated                       0/1    0.000000  [0.000000, 0.975000]
+  rejected_transcript_canonical           0/1    0.000000  [0.000000, 0.975000]
+  fault_audit_corruption                  0/1    0.000000  [0.000000, 0.975000]
+  fault_policy_partial                    0/1    0.000000  [0.000000, 0.975000]
+  fault_fork_during_freeze                0/1    0.000000  [0.000000, 0.975000]
+  fault_wal_torn_tail                     0/1    0.000000  [0.000000, 0.975000]
+  fault_concurrent_race                   0/1    0.000000  [0.000000, 0.975000]
+  fault_ring_buffer_drop                  0/1    0.000000  [0.000000, 0.975000]
+  fault_path_reconstruction               0/1    0.000000  [0.000000, 0.975000]
+  fault_pid_cgroup_reuse                  0/1    0.000000  [0.000000, 0.975000]
+  fault_finalization_failure              0/1    0.000000  [0.000000, 0.975000]
+  fault_drain_failure                     0/1    0.000000  [0.000000, 0.975000]
+  fault_token_replay                      0/1    0.000000  [0.000000, 0.975000]
+
+========================================================================
+
+  0 violations across 20 property checks in 16 completed trials
+
+  RESULT: ALL SAFETY PROPERTIES HELD
+========================================================================

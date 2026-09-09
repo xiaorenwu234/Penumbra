@@ -2,677 +2,611 @@
 """
 Experiment 2: Historical Audit and Future Execution Consistency
 
-Verifies that the two policy projections (retrospective audit and prospective
-enforcement) do not produce semantic gaps:
+This experiment measures the SYSTEM, not a model of it. Every lifecycle step
+goes through the real ShadowOrchestrator session API (framework.orch.OrchClient):
 
-  - File operations already in ShadowFS (retrospective audit targets)
-  - Network/IPC operations at the fence (prospective enforcement targets)
-  - Combined policies: allow historical + deny future, and vice versa
-  - Policy fingerprint integrity (mismatch/missing/modified -> no release)
-  - rename/hard link must check both source AND destination
+    session_open -> session_begin_epoch -> session_run -> session_resolve_epoch
 
-Key invariants:
-  - Historical violation -> entire epoch rollback
-  - Future violation -> EPERM on syscall restart
-  - Policy fingerprint mismatch -> effect NOT released
-  - Dual-path operations (rename, link) check both endpoints
+so the full pipeline actually runs:
+
+    freeze -> drain -> seal -> batch audit -> promote/rollback -> release
+
+`session_resolve_epoch(decision="allow", allowed_ops=...)` compiles ONE PolicyIR
+that the orchestrator uses BOTH to audit the sealed ShadowObserve trace
+(retrospective) AND to install the prospective ShadowProc policy. The experiment
+never builds an ``audit_trail`` by hand and never calls ShadowFS commit/rollback
+directly -- it only reads the orchestrator's reply and checks external state.
+
+Outcome classification (framework.errors): a lifecycle failure (orchestrator
+unreachable, epoch open, seal/audit fail-closed, observer not wired, fence never
+happened) is an INFRA_ERROR and makes the run exit non-zero. It is never a pass.
+
+Design notes that follow from the observer/audit implementation:
+  * ShadowObserve records FILESYSTEM and process-LIFECYCLE events (FORK=101,
+    EXIT=102). Lifecycle events sit outside the (class<<8|op) space, so ONLY a
+    wildcard allow rule covers them.
+  * Network operations are NOT recorded by the observer; they are enforced
+    prospectively by ShadowProc. So "allow the file history, deny the future
+    connect" is expressible from one policy only if the audited trace carries no
+    lifecycle events -- hence the fork-free tool command below (bash builtins +
+    ``/dev/tcp``), which produces FILESYSTEM events only.
 
 Usage:
-    SHADOW_RUN_RQ2_EXPERIMENTS=1 python3 exp2_audit_consistency.py
+    SHADOW_RUN_RQ2_EXPERIMENTS=1 python3 exp2_audit_consistency.py --repeats 10
 """
 
 import argparse
-import errno
-import hashlib
-import json
 import os
+import socket
 import sys
 import tempfile
+import threading
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJ = os.path.dirname(os.path.dirname(_HERE))  # .../speculative_shadow
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)          # framework.*
+if _PROJ not in sys.path:
+    sys.path.insert(0, _PROJ)          # policy.*
 
-from framework.client import ShadowProcClient, ShadowFSClient, ShadowObserveClient
-from framework.cgroup import CgroupManager
-from framework.oracle import EffectOracle, FileSnapshot
+from framework.errors import InfrastructureError, infra
 from framework.metrics import MetricsCollector
-from framework.runner import ProbeRunner
-from framework.paths import fuse_path, orig_path, harness_path, ensure_fuse_dirs, is_fuse_mounted, SHADOWFS_MNT
-
-from policy.policy_ir import PolicyIR, CLASS_IDS, OP_IDS
+from framework.orch import OrchClient, orch_sock_path
+from framework.client import ShadowObserveClient
+from framework.paths import (
+    fuse_path, harness_path, ensure_fuse_dirs, is_fuse_mounted,
+    SHADOWFS_MNT, SHADOWFS_ORIG,
+)
 
 RUN_EXPERIMENTS = os.environ.get("SHADOW_RUN_RQ2_EXPERIMENTS") == "1"
 
+# FILESYSTEM operations (policy/effect_schema.json legacy_event_map). Note the
+# read op is named "OPEN" in the schema (OPEN -> FILESYSTEM/READ); "READ" is
+# NOT a valid policy event_type and fails compilation. A fork-free command only
+# produces these, so allowing all of them (path "/") passes the audit while
+# still leaving NETWORK default-denied prospectively.
+FS_OPS = ("OPEN", "WRITE", "CREATE", "DELETE", "RENAME", "LINK", "SYMLINK",
+          "TRUNCATE", "CHMOD", "CHOWN", "MKDIR", "RMDIR")
+
+
+def allow_all_fs():
+    """allowed_ops that permit every filesystem op at any path (no network)."""
+    return [{"event_type": op, "action": "allow", "path_pattern": "/"}
+            for op in FS_OPS]
+
+
+def wildcard_allow():
+    """allowed_ops that permit everything (covers FORK/EXIT lifecycle events)."""
+    return [{"event_type": "*", "action": "allow", "path_pattern": "/"}]
+
+
+class TcpReceiver:
+    """External ground-truth receiver: did the denied connect ever arrive?
+
+    Listens on an ephemeral 127.0.0.1 port BEFORE the session attempts its
+    connect, so an allowed connect would be observed here. A denied (EPERM)
+    connect never reaches it.
+    """
+
+    def __init__(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(8)
+        self.port = self._sock.getsockname()[1]
+        self.connections = 0
+        self.bytes_received = 0
+        self._stop = False
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self):
+        self._sock.settimeout(0.2)
+        while not self._stop:
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            self.connections += 1
+            conn.settimeout(0.2)
+            try:
+                while True:
+                    data = conn.recv(4096)
+                    if not data:
+                        break
+                    self.bytes_received += len(data)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    def stop(self):
+        self._stop = True
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
 
 class Experiment2:
-    """Audit consistency experiment."""
+    """Audit-consistency experiment driven entirely by the session API."""
 
     def __init__(self, repeats: int = 10):
         self.repeats = repeats
-        # Unique run ID to avoid epoch ID collisions with WAL-replayed state
         self.run_id = str(int(time.time() * 1000))[-8:]
-        self.proc_client = ShadowProcClient()
-        self.fs_client = ShadowFSClient()
-        self.observe_client = None
-        self.cgroup_mgr = CgroupManager(prefix="shadow-exp2")
-        self.oracle = EffectOracle(tempfile.mkdtemp(prefix="shadow-exp2-oracle-"))
-        self.runner = ProbeRunner()
+        self.orch = OrchClient()
         self.metrics = MetricsCollector("exp2_audit_consistency")
-        # Use backing store for harness file operations
-        self.work_dir = harness_path("exp2")
+        self._open_sessions = []
+        self._agent_seq = 0
 
-        # Metric counters
-        self.metrics.add_counter("historical_violation_not_rolled_back")
-        self.metrics.add_counter("future_violation_not_denied")
-        self.metrics.add_counter("fingerprint_mismatch_released")
-        self.metrics.add_counter("dual_path_single_check")
-        self.metrics.add_counter("semantic_gap_detected")
+    # ── setup / teardown ────────────────────────────────────────────────
 
     def setup(self):
         if os.geteuid() != 0:
-            raise RuntimeError("Experiment 2 requires root privileges")
-        self.proc_client.connect()
-        self.fs_client.connect()
+            raise InfrastructureError(
+                "privileges", "Experiment 2 requires root privileges")
+        # The orchestrator is the system under test: if it is not reachable the
+        # experiment cannot run at all (never a silent pass).
+        self.orch.require_listening()
+        # ShadowObserve must be reachable, otherwise the retrospective audit has
+        # nothing to seal and every audit-gated trial would be meaningless.
         try:
-            self.observe_client = ShadowObserveClient()
-            self.observe_client.connect()
-        except (FileNotFoundError, ConnectionError):
-            print("[exp2] WARNING: ShadowObserve not available, "
-                  "audit tests will use ShadowFS only")
-        # Ensure FUSE directories exist
-        ensure_fuse_dirs("exp2")
+            observe = ShadowObserveClient()
+            observe.connect()
+            observe.close()
+        except (FileNotFoundError, ConnectionError, OSError) as exc:
+            raise InfrastructureError(
+                "shadowobserve_socket",
+                "ShadowObserve is not reachable; retrospective audit cannot run",
+                exc)
         if not is_fuse_mounted():
-            print(f"[exp2] WARNING: ShadowFS FUSE not mounted at {SHADOWFS_MNT}")
-        print(f"[exp2] Connected to daemons")
-        print(f"[exp2] FUSE work dir: {self.work_dir}")
+            raise InfrastructureError(
+                "fuse_mount",
+                f"ShadowFS FUSE is not mounted at {SHADOWFS_MNT}; file "
+                f"operations would bypass ShadowFS")
+        ensure_fuse_dirs("exp2")
+        self.metrics.metadata.update({
+            "orch_sock": orch_sock_path(),
+            "shadowfs_mount": SHADOWFS_MNT,
+            "backing_store": SHADOWFS_ORIG,
+            "repeats": self.repeats,
+            "run_id": self.run_id,
+        })
+        print(f"[exp2] orchestrator={orch_sock_path()} mount={SHADOWFS_MNT}")
 
     def teardown(self):
-        self.runner.cleanup()
-        self.cgroup_mgr.cleanup_all()
-        self.proc_client.close()
-        self.fs_client.close()
-        if self.observe_client:
-            self.observe_client.close()
-
-    def _policy_hash(self, policy: dict) -> str:
-        """Compute a stable hash of a proc_policy."""
-        canonical = json.dumps(policy, sort_keys=True)
-        return hashlib.sha256(canonical.encode()).hexdigest()
-
-    def _orchestrator_decide(self, cg_id: str, epoch_id: str,
-                             audit_events: list, policy_ops: list) -> str:
-        """Orchestrator two-phase decision: audit → evaluate → act.
-
-        Phase 1 (retrospective audit):
-          Check each historical operation in audit_events against policy.
-          An operation violates if its event_type has action='deny' in policy.
-
-        Phase 2 (decision):
-          If ANY violation → rollback entire epoch.
-          If ALL comply → commit epoch.
-
-        Returns: 'commit' or 'rollback'
-        """
-        # Build deny set from policy
-        deny_set = set()
-        for op in policy_ops:
-            if op.get("action") == "deny":
-                deny_set.add(op["event_type"])
-
-        # Phase 1: Evaluate audit trail
-        has_violation = False
-        for event in audit_events:
-            event_type = event.get("event_type", "")
-            if event_type in deny_set:
-                has_violation = True
-                break
-
-        # Phase 2: Act on decision
-        if has_violation:
+        for sid in list(self._open_sessions):
             try:
-                self.fs_client.rollback(cg_id, epoch_id)
-            except Exception:
-                pass
-            return "rollback"
-        else:
-            try:
-                self.fs_client.commit(cg_id, epoch_id)
-            except Exception:
-                pass
-            return "commit"
+                self.orch.session_close(sid)
+            except Exception as exc:  # noqa: BLE001 - teardown is best effort
+                print(f"[exp2] WARNING: session_close({sid}) failed: {exc}")
+        self._open_sessions.clear()
 
-    # ─── Test: Historical file ops allowed + future network denied ───────
+    # ── session helpers ─────────────────────────────────────────────────
+
+    def _next_agent(self, tag: str) -> str:
+        self._agent_seq += 1
+        return f"exp2-{tag}-{self.run_id}-{self._agent_seq}"
+
+    def _open_session(self, tag: str):
+        """Open a persistent session and remember it for teardown."""
+        agent = self._next_agent(tag)
+        resp = self.orch.session_open(agent_id=agent,
+                                      cgroup_name=f"exp2-{tag}-{self.run_id}-"
+                                                  f"{self._agent_seq}")
+        sid = resp.get("session_id")
+        cg = resp.get("cgroup_id")
+        if not sid or not cg:
+            raise InfrastructureError(
+                "session_open", f"session_open returned no id: {resp}")
+        self._open_sessions.append(sid)
+        return sid, cg, agent
+
+    def _begin_epoch(self, sid: str, agent: str):
+        try:
+            return self.orch.session_begin_epoch(sid, agent)
+        except InfrastructureError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise infra("begin_epoch", str(exc), exc)
+
+    def _close_session(self, sid: str):
+        try:
+            self.orch.session_close(sid)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[exp2] WARNING: session_close({sid}) failed: {exc}")
+        finally:
+            if sid in self._open_sessions:
+                self._open_sessions.remove(sid)
+
+    def _resolve(self, sid: str, agent: str, decision: str,
+                 allowed_ops=None):
+        """Raw resolve reply (never raises on status!=ok): the audit-gated tests
+        must inspect ``status``/``resolved``/``audit`` to classify the outcome
+        instead of letting a fail-closed error look like a system rejection."""
+        return self.orch.request(
+            "session_resolve_epoch", timeout=180.0,
+            session_id=sid, agent_id=agent, decision=decision,
+            allowed_ops=allowed_ops)
+
+    @staticmethod
+    def _audit_performed(reply: dict) -> bool:
+        audit = reply.get("audit") or {}
+        return bool(audit.get("audited"))
+
+    def _wait_fenced(self, cgroup_id: str, timeout: float = 10.0):
+        """Poll ShadowProc (via the orchestrator) until a process is fenced."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            frozen = self.orch.list_frozen(cgroup_id)
+            if frozen:
+                return frozen
+            time.sleep(0.05)
+        return []
+
+    @staticmethod
+    def _backing(rel: str) -> str:
+        return harness_path(rel)
+
+    # ── Test 1: allowed historical write is audited and committed ────────
+
+    def test_historical_write_allowed(self):
+        """A write the policy allows must pass the sealed-trace audit and be
+        promoted to the backing store on commit."""
+        for i in range(self.repeats):
+            rel = f"exp2/allow-{self.run_id}-{i}.txt"
+            target = fuse_path(rel)
+            backing = self._backing(rel)
+            if os.path.exists(backing):
+                os.unlink(backing)
+            sid = cg = None
+            with self.metrics.open_trial(
+                    f"hist-write-allowed-{i}", scenario="allow_history") as t:
+                try:
+                    sid, cg, agent = self._open_session("allow")
+                    self._begin_epoch(sid, agent)
+                    # Fork-free write through FUSE (bash builtin + redirect).
+                    self.orch.session_run(
+                        sid, f"printf 'EXP2DATA' > {target}", timeout=30.0)
+                    reply = self._resolve(sid, agent, "allow", wildcard_allow())
+
+                    if reply.get("status") != "ok":
+                        t.infra_error(reply.get("message", reply),
+                                      stage="resolve_fail_closed")
+                        continue
+                    if not self._audit_performed(reply):
+                        t.infra_error(
+                            "orchestrator did not audit a sealed trace "
+                            "(ShadowObserve not wired into the session path)",
+                            stage="audit_not_performed")
+                        continue
+                    resolved = reply.get("resolved", "allow")
+                    violations = (reply.get("audit") or {}).get("violations") or []
+                    committed = os.path.exists(backing)
+                    t.check("allowed_write_committed",
+                            resolved == "allow" and committed and not violations,
+                            f"resolved={resolved} committed={committed} "
+                            f"violations={len(violations)}")
+                finally:
+                    if sid:
+                        self._close_session(sid)
+
+    # ── Test 2 (problem 3): disallowed historical write is rejected ──────
+
+    def test_historical_write_rejected(self):
+        """A write the policy does NOT allow must be caught by the sealed-trace
+        audit, and the orchestrator must reject (roll back) the epoch on its own
+        so the backing store is unchanged."""
+        for i in range(self.repeats):
+            rel = f"exp2/reject-{self.run_id}-{i}.txt"
+            target = fuse_path(rel)
+            backing = self._backing(rel)
+            if os.path.exists(backing):
+                os.unlink(backing)
+            # Wildcard allow covers incidental/lifecycle events; the explicit
+            # WRITE deny on the target makes "the policy does not allow this
+            # write" true and produces exactly one audited violation.
+            ops = wildcard_allow() + [
+                {"event_type": "WRITE", "action": "deny", "path_pattern": target}]
+            sid = None
+            with self.metrics.open_trial(
+                    f"hist-write-rejected-{i}", scenario="reject_history") as t:
+                try:
+                    sid, cg, agent = self._open_session("reject")
+                    self._begin_epoch(sid, agent)
+                    self.orch.session_run(
+                        sid, f"printf 'EXP2DATA' > {target}", timeout=30.0)
+                    reply = self._resolve(sid, agent, "allow", ops)
+
+                    if reply.get("status") != "ok":
+                        # Fail-closed (could not seal/parse the trace) is an
+                        # infrastructure problem, not a clean policy catch.
+                        t.infra_error(reply.get("message", reply),
+                                      stage="resolve_fail_closed")
+                        continue
+                    if not self._audit_performed(reply):
+                        t.infra_error(
+                            "orchestrator did not audit a sealed trace "
+                            "(ShadowObserve not wired into the session path)",
+                            stage="audit_not_performed")
+                        continue
+                    rejected = (reply.get("resolved") == "deny"
+                                or reply.get("audit_rejected") is True)
+                    violations = (reply.get("audit") or {}).get("violations") or []
+                    unchanged = not os.path.exists(backing)
+                    # Property: the system itself refused the disallowed write.
+                    t.check("disallowed_write_rejected", rejected and bool(violations),
+                            f"resolved={reply.get('resolved')} "
+                            f"audit_rejected={reply.get('audit_rejected')} "
+                            f"violations={len(violations)}")
+                    t.check("backing_store_unchanged", unchanged,
+                            f"backing exists={os.path.exists(backing)}")
+                finally:
+                    if sid:
+                        self._close_session(sid)
+
+    # ── Test 3 (problem 4): allow file history + deny future connect ─────
 
     def test_allow_history_deny_future(self):
-        """Policy allows past file writes but denies future network connects.
-
-        The file write goes through FUSE (real ShadowFS speculative version).
-        The network connect (at fence) should get EPERM on restart.
-        """
-        for trial in range(self.repeats):
-            cg_path = self.cgroup_mgr.create(f"exp2-ad-{trial}-{int(time.time()*1000)}")
-            cg_id = self.cgroup_mgr.get_cgroup_id(cg_path)
-            self.proc_client.add_cgroup(cg_path)
-
-            try:
-                # Phase 1: Begin a ShadowFS epoch for historical file ops
-                epoch_id = f"exp2-ad-{self.run_id}-{trial}"
-                epoch_ok = True
+        """One tool command: write a local file, then connect a network
+        endpoint. The connect is fenced; we resolve with a policy that allows the
+        file write but NOT the endpoint. The historical write must pass the
+        audit, the restarted connect must be denied, and the external receiver
+        must see nothing -- all from the SAME policy."""
+        for i in range(self.repeats):
+            rel = f"exp2/future-{self.run_id}-{i}.txt"
+            target = fuse_path(rel)
+            backing = self._backing(rel)
+            if os.path.exists(backing):
+                os.unlink(backing)
+            receiver = TcpReceiver()
+            receiver.start()
+            sid = None
+            with self.metrics.open_trial(
+                    f"allow-hist-deny-future-{i}",
+                    scenario="allow_history_deny_future") as t:
                 try:
-                    self.fs_client.begin_epoch(cg_id, epoch_id)
-                except Exception as e:
-                    epoch_ok = False
-                    print(f"    [exp2] WARNING: begin_epoch failed trial={trial}: {e}")
+                    sid, cg, agent = self._open_session("future")
+                    self._begin_epoch(sid, agent)
 
-                # Set ENFORCED so FUSE attributes the write to this epoch
-                self.proc_client.set_epoch_mode(cg_id, 2)
+                    # Single fork-free tool command: file write, then connect.
+                    # The connect blocks (fenced) so session_run must run in a
+                    # worker thread while the main thread resolves the epoch.
+                    cmd = (f"printf 'EXP2DATA' > {target}; "
+                           f"exec 3<>/dev/tcp/127.0.0.1/{receiver.port} "
+                           f"&& echo CONNECT_OK || echo CONNECT_DENIED")
+                    box = {}
 
-                # Create historical file THROUGH FUSE (real speculative version)
-                fuse_target = fuse_path(f"exp2/hist-{trial}.txt")
-                self.runner.run_probe("fs_write", cg_path, args=[fuse_target])
+                    def worker():
+                        try:
+                            box["reply"] = self.orch.session_run(
+                                sid, cmd, timeout=60.0)
+                        except Exception as exc:  # noqa: BLE001
+                            box["error"] = exc
 
-                # Phase 2: Install policy that allows FILESYSTEM/WRITE
-                # but denies NETWORK/CONNECT
-                allow_fs = {"event_type": "WRITE", "action": "allow",
-                            "path_pattern": "/"}
-                deny_net = {"event_type": "CONNECT", "action": "deny",
-                            "path_pattern": "/"}
-                policy = PolicyIR.from_allowed_ops([allow_fs, deny_net]).to_proc_policy()
-                self.proc_client.install_proc_policy(cg_id, policy)
+                    th = threading.Thread(target=worker, daemon=True)
+                    th.start()
 
-                # Phase 3: Spawn network probe - should be denied
-                result = self.runner.run_probe("net_connect", cg_path,
-                                               args=["9999"])
+                    frozen = self._wait_fenced(cg, timeout=10.0)
+                    if not frozen:
+                        th.join(timeout=5.0)
+                        t.infra_error(
+                            "network connect was never fenced; cannot exercise "
+                            "the prospective-deny restart path",
+                            stage="fence_not_observed")
+                        continue
 
-                # Future violation must be denied
-                not_denied = (result.ret >= 0 and result.errno == 0)
-                self.metrics.record(
-                    "future_violation_not_denied", not_denied,
-                    f"trial={trial}: CONNECT allowed despite deny policy",
-                    {"scenario": "allow_hist_deny_future", "trial": trial})
+                    # Same policy: allow all filesystem ops (audit passes),
+                    # allow NO network op (connect denied on restart).
+                    reply = self._resolve(sid, agent, "allow", allow_all_fs())
+                    th.join(timeout=60.0)
 
-                # Phase 4: Orchestrator decides based on audit trail
-                # Build audit trail: the historical operation was WRITE (allowed)
-                audit_trail = [{"event_type": "WRITE", "action": "allow"}]
-                policy_ops = [allow_fs, deny_net]
-                decision = self._orchestrator_decide(
-                    cg_id, epoch_id, audit_trail, policy_ops)
+                    if reply.get("status") != "ok":
+                        t.infra_error(reply.get("message", reply),
+                                      stage="resolve_fail_closed")
+                        continue
+                    if not self._audit_performed(reply):
+                        t.infra_error(
+                            "orchestrator did not audit a sealed trace "
+                            "(ShadowObserve not wired into the session path)",
+                            stage="audit_not_performed")
+                        continue
+                    if "error" in box:
+                        t.infra_error(box["error"], stage="session_run")
+                        continue
 
-                # Orchestrator should commit (WRITE is allowed by policy)
-                check_path = harness_path(f"exp2/hist-{trial}.txt")
-                if decision != "commit":
-                    self.metrics.record(
-                        "semantic_gap_detected", True,
-                        f"trial={trial}: orchestrator decided '{decision}' "
-                        f"but should be 'commit' (WRITE allowed)",
-                        {"scenario": "allow_hist_deny_future", "trial": trial})
-                elif not os.path.exists(check_path):
-                    self.metrics.record(
-                        "semantic_gap_detected", True,
-                        f"trial={trial}: commit decided but file missing",
-                        {"scenario": "allow_hist_deny_future", "trial": trial})
-                else:
-                    self.metrics.record(
-                        "semantic_gap_detected", False,
-                        trial_info={"scenario": "allow_hist_deny_future",
-                                    "trial": trial})
+                    output = (box.get("reply") or {}).get("output", "")
+                    violations = (reply.get("audit") or {}).get("violations") or []
+                    history_ok = (reply.get("resolved") == "allow"
+                                  and not violations
+                                  and os.path.exists(backing))
+                    connect_denied = ("CONNECT_DENIED" in output
+                                      and "CONNECT_OK" not in output)
+                    receiver_clean = receiver.connections == 0
 
-            finally:
+                    t.check("history_passed_audit", history_ok,
+                            f"resolved={reply.get('resolved')} "
+                            f"violations={len(violations)} "
+                            f"backing={os.path.exists(backing)}")
+                    t.check("future_connect_denied", connect_denied,
+                            f"output={output.strip()[:120]!r}")
+                    t.check("receiver_saw_no_connection", receiver_clean,
+                            f"connections={receiver.connections} "
+                            f"bytes={receiver.bytes_received}")
+                finally:
+                    receiver.stop()
+                    if sid:
+                        self._close_session(sid)
+
+    # ── Test 4: pure future-connect denial on restart ───────────────────
+
+    def test_future_connect_denied_restart(self):
+        """A fenced connect, resolved with a policy that omits NETWORK, must
+        return EPERM on restart and never reach the receiver."""
+        for i in range(self.repeats):
+            receiver = TcpReceiver()
+            receiver.start()
+            sid = None
+            with self.metrics.open_trial(
+                    f"future-connect-denied-{i}",
+                    scenario="deny_future_connect") as t:
                 try:
-                    self.proc_client.kill_by_cgroup(cg_id)
-                    self.proc_client.clear_all_policies(cg_id)
-                    self.proc_client.remove_cgroup(cg_path)
-                except Exception:
-                    pass
-                self.cgroup_mgr.remove(cg_path)
+                    sid, cg, agent = self._open_session("denyconnect")
+                    self._begin_epoch(sid, agent)
+                    cmd = (f"exec 3<>/dev/tcp/127.0.0.1/{receiver.port} "
+                           f"&& echo CONNECT_OK || echo CONNECT_DENIED")
+                    box = {}
 
-    # ─── Test: Historical violation -> whole epoch rollback ──────────────
+                    def worker():
+                        try:
+                            box["reply"] = self.orch.session_run(
+                                sid, cmd, timeout=60.0)
+                        except Exception as exc:  # noqa: BLE001
+                            box["error"] = exc
 
-    def test_historical_violation_rollback(self):
-        """If a historical file operation violates policy, the entire epoch
-        must be rolled back - including any allowed future operations."""
-        for trial in range(self.repeats):
-            cg_path = self.cgroup_mgr.create(f"exp2-hv-{trial}-{int(time.time()*1000)}")
-            cg_id = self.cgroup_mgr.get_cgroup_id(cg_path)
-            self.proc_client.add_cgroup(cg_path)
+                    th = threading.Thread(target=worker, daemon=True)
+                    th.start()
+                    frozen = self._wait_fenced(cg, timeout=10.0)
+                    if not frozen:
+                        th.join(timeout=5.0)
+                        t.infra_error(
+                            "network connect was never fenced",
+                            stage="fence_not_observed")
+                        continue
+                    # Allow only filesystem ops -> NETWORK stays default-deny.
+                    reply = self._resolve(sid, agent, "allow", allow_all_fs())
+                    th.join(timeout=60.0)
+                    if reply.get("status") != "ok":
+                        t.infra_error(reply.get("message", reply),
+                                      stage="resolve_fail_closed")
+                        continue
+                    if "error" in box:
+                        t.infra_error(box["error"], stage="session_run")
+                        continue
+                    output = (box.get("reply") or {}).get("output", "")
+                    t.check("future_connect_denied",
+                            "CONNECT_DENIED" in output
+                            and "CONNECT_OK" not in output,
+                            f"output={output.strip()[:120]!r}")
+                    t.check("receiver_saw_no_connection",
+                            receiver.connections == 0,
+                            f"connections={receiver.connections}")
+                finally:
+                    receiver.stop()
+                    if sid:
+                        self._close_session(sid)
 
-            try:
-                # Begin ShadowFS epoch
-                epoch_id = f"exp2-hv-{self.run_id}-{trial}"
-                epoch_ok = True
+    # ── Test 5: dual-path rename fully undone by rollback ───────────────
+
+    def test_dual_path_rename_rollback(self):
+        """rename touches BOTH source and destination. Rolling the epoch back
+        (decision=deny) must restore the source and remove the destination,
+        proving ShadowFS recorded both paths."""
+        for i in range(self.repeats):
+            src_rel = f"exp2/rename-src-{self.run_id}-{i}.txt"
+            dst_rel = f"exp2/rename-dst-{self.run_id}-{i}.txt"
+            src_backing, dst_backing = self._backing(src_rel), self._backing(dst_rel)
+            os.makedirs(os.path.dirname(src_backing), exist_ok=True)
+            with open(src_backing, "w") as f:
+                f.write("rename test data")
+            if os.path.exists(dst_backing):
+                os.unlink(dst_backing)
+            sid = None
+            with self.metrics.open_trial(
+                    f"dual-path-rename-{i}", scenario="dual_path_rename") as t:
                 try:
-                    self.fs_client.begin_epoch(cg_id, epoch_id)
-                except Exception as e:
-                    epoch_ok = False
-                    print(f"    [exp2] WARNING: begin_epoch failed trial={trial}: {e}")
+                    sid, cg, agent = self._open_session("rename")
+                    self._begin_epoch(sid, agent)
+                    # mv is an external command (forks) -- fine here because the
+                    # rollback is driven by decision=deny, not by the audit.
+                    self.orch.session_run(
+                        sid, f"mv {fuse_path(src_rel)} {fuse_path(dst_rel)}",
+                        timeout=30.0)
+                    reply = self._resolve(sid, agent, "deny")
+                    if reply.get("status") != "ok":
+                        t.infra_error(reply.get("message", reply),
+                                      stage="rollback")
+                        continue
+                    time.sleep(0.3)  # let the FUSE cache expire
+                    src_restored = os.path.exists(src_backing)
+                    dst_removed = not os.path.exists(dst_backing)
+                    t.check("dual_path_rollback_complete",
+                            src_restored and dst_removed,
+                            f"src_restored={src_restored} dst_removed={dst_removed}")
+                finally:
+                    if sid:
+                        self._close_session(sid)
 
-                # Create a file through FUSE that "violates" the deny policy
-                test_file = os.path.join(self.work_dir, f"violation-{trial}.txt")
-                snapshot_before = FileSnapshot.capture(test_file)
+    # ── Test 6: dual-path hard link fully undone by rollback ────────────
 
-                # Policy denies WRITE to this path
-                deny_write = {"event_type": "WRITE", "action": "deny",
-                              "path_pattern": self.work_dir}
-                # But allows CONNECT (future op should also not proceed
-                # because the epoch is rolled back)
-                allow_net = {"event_type": "CONNECT", "action": "allow",
-                             "path_pattern": "/"}
-                policy = PolicyIR.from_allowed_ops(
-                    [deny_write, allow_net]).to_proc_policy()
-                self.proc_client.install_proc_policy(cg_id, policy)
-                self.proc_client.set_epoch_mode(cg_id, 2)
-
-                # Attempt the violating write through a probe (goes via FUSE)
-                probe_target = fuse_path(f"exp2/violation-{trial}.txt")
-                self.runner.run_probe("fs_write", cg_path, args=[probe_target])
-
-                # Orchestrator decides: audit trail shows WRITE, policy denies WRITE
-                # → automatic rollback
-                audit_trail = [{"event_type": "WRITE", "action": "deny"}]
-                policy_ops = [deny_write, allow_net]
-                decision = self._orchestrator_decide(
-                    cg_id, epoch_id, audit_trail, policy_ops)
-
-                # Orchestrator MUST decide rollback (WRITE violates policy)
-                if decision != "rollback":
-                    self.metrics.record(
-                        "historical_violation_not_rolled_back", True,
-                        f"trial={trial}: orchestrator decided '{decision}' "
-                        f"but should be 'rollback' (WRITE denied)",
-                        {"scenario": "hist_violation_rollback", "trial": trial})
-                else:
-                    self.metrics.record(
-                        "historical_violation_not_rolled_back", False,
-                        trial_info={"scenario": "hist_violation_rollback",
-                                    "trial": trial})
-
-            finally:
+    def test_dual_path_hardlink_rollback(self):
+        """A hard link adds a directory entry AND bumps nlink. Rollback must
+        remove the new link and restore the original nlink."""
+        for i in range(self.repeats):
+            src_rel = f"exp2/link-src-{self.run_id}-{i}.txt"
+            dst_rel = f"exp2/link-dst-{self.run_id}-{i}.txt"
+            src_backing, dst_backing = self._backing(src_rel), self._backing(dst_rel)
+            os.makedirs(os.path.dirname(src_backing), exist_ok=True)
+            with open(src_backing, "w") as f:
+                f.write("hardlink test data")
+            if os.path.exists(dst_backing):
+                os.unlink(dst_backing)
+            nlink_before = os.stat(src_backing).st_nlink
+            sid = None
+            with self.metrics.open_trial(
+                    f"dual-path-hardlink-{i}", scenario="dual_path_hardlink") as t:
                 try:
-                    self.proc_client.kill_by_cgroup(cg_id)
-                    self.proc_client.clear_all_policies(cg_id)
-                    self.proc_client.remove_cgroup(cg_path)
-                except Exception:
-                    pass
-                self.cgroup_mgr.remove(cg_path)
+                    sid, cg, agent = self._open_session("hardlink")
+                    self._begin_epoch(sid, agent)
+                    self.orch.session_run(
+                        sid, f"ln {fuse_path(src_rel)} {fuse_path(dst_rel)}",
+                        timeout=30.0)
+                    reply = self._resolve(sid, agent, "deny")
+                    if reply.get("status") != "ok":
+                        t.infra_error(reply.get("message", reply),
+                                      stage="rollback")
+                        continue
+                    time.sleep(0.3)
+                    nlink_after = (os.stat(src_backing).st_nlink
+                                   if os.path.exists(src_backing) else 0)
+                    dst_removed = not os.path.exists(dst_backing)
+                    t.check("dual_path_rollback_complete",
+                            nlink_after == nlink_before and dst_removed,
+                            f"nlink {nlink_before}->{nlink_after} "
+                            f"dst_removed={dst_removed}")
+                finally:
+                    if sid:
+                        self._close_session(sid)
 
-    # ─── Test: Policy fingerprint integrity ──────────────────────────────
-
-    def test_policy_fingerprint_integrity(self):
-        """If the policy hash changes between authorization and release,
-        the effect must NOT be released."""
-        for trial in range(self.repeats):
-            cg_path = self.cgroup_mgr.create(f"exp2-fp-{trial}-{int(time.time()*1000)}")
-            cg_id = self.cgroup_mgr.get_cgroup_id(cg_path)
-            self.proc_client.add_cgroup(cg_path)
-
-            try:
-                # Install initial policy
-                policy_v1 = PolicyIR.from_allowed_ops([
-                    {"event_type": "CONNECT", "action": "allow",
-                     "path_pattern": "/",
-                     "endpoint": {"family": 2, "addr": 0x7F000001, "port": 9999}}
-                ]).to_proc_policy()
-                hash_v1 = self._policy_hash(policy_v1)
-
-                self.proc_client.install_proc_policy(cg_id, policy_v1)
-                self.proc_client.set_epoch_mode(cg_id, 2)
-
-                # Now modify the policy (simulating tampering)
-                policy_v2 = PolicyIR.from_allowed_ops([
-                    {"event_type": "CONNECT", "action": "allow",
-                     "path_pattern": "/",
-                     "endpoint": {"family": 2, "addr": 0x7F000001, "port": 80}}
-                ]).to_proc_policy()
-                hash_v2 = self._policy_hash(policy_v2)
-
-                # Hashes must differ
-                assert hash_v1 != hash_v2, "Policy hashes should differ"
-
-                # With modified policy, the original authorization is invalid
-                # The system should NOT release effects authorized under v1
-                # when the current policy is v2
-                self.proc_client.install_proc_policy(cg_id, policy_v2)
-
-                # Probe connecting to port 9999 (authorized under v1 but not v2)
-                result = self.runner.run_probe("net_connect", cg_path,
-                                               args=["9999"])
-
-                # Should be denied because current policy (v2) doesn't allow 9999
-                released = (result.ret >= 0 and result.errno == 0)
-                self.metrics.record(
-                    "fingerprint_mismatch_released", released,
-                    f"trial={trial}: effect released despite policy change "
-                    f"(v1 hash={hash_v1[:8]}... v2 hash={hash_v2[:8]}...)",
-                    {"scenario": "fingerprint_integrity", "trial": trial})
-
-            finally:
-                try:
-                    self.proc_client.kill_by_cgroup(cg_id)
-                    self.proc_client.clear_all_policies(cg_id)
-                    self.proc_client.remove_cgroup(cg_path)
-                except Exception:
-                    pass
-                self.cgroup_mgr.remove(cg_path)
-
-    # ─── Test: rename/link dual-path check ───────────────────────────────
-    # NOTE: Filesystem operations (rename, link) are handled by the ShadowFS
-    # FUSE layer, NOT by BPF LSM. The FUSE layer does NOT do path-based access
-    # control - it records all operations as versions for commit/rollback.
-    # Therefore, the correct dual-path test verifies that ShadowFS correctly
-    # tracks BOTH source and destination paths, so rollback fully undoes the
-    # operation (source restored, destination removed).
-
-    def test_dual_path_operations(self):
-        """rename must track BOTH source and destination paths.
-
-        Verification: after rename + rollback, source must be restored and
-        destination must not exist. This proves ShadowFS records both paths.
-        """
-        for trial in range(self.repeats):
-            cg_path = self.cgroup_mgr.create(f"exp2-dp-{trial}-{int(time.time()*1000)}")
-            cg_id = self.cgroup_mgr.get_cgroup_id(cg_path)
-            self.proc_client.add_cgroup(cg_path)
-
-            try:
-                # Begin ShadowFS epoch
-                epoch_id = f"exp2-dp-{self.run_id}-{trial}"
-                epoch_ok = True
-                try:
-                    self.fs_client.begin_epoch(cg_id, epoch_id)
-                except Exception as e:
-                    epoch_ok = False
-                    print(f"    [exp2] WARNING: begin_epoch failed: {e}")
-
-                # Setup: create source file through backing store
-                src = os.path.join(self.work_dir, f"rename-src-{trial}.txt")
-                dst = os.path.join(self.work_dir, f"rename-dst-{trial}.txt")
-                os.makedirs(os.path.dirname(src), exist_ok=True)
-                with open(src, "w") as f:
-                    f.write("rename test data")
-                # Ensure dst does not exist
-                if os.path.exists(dst):
-                    os.unlink(dst)
-
-                # Allow all (FUSE doesn't do path-based denial, it versions)
-                self.proc_client.set_epoch_mode(cg_id, 2)
-
-                # Perform rename through probe (goes via FUSE, creates version)
-                fuse_src = fuse_path(f"exp2/rename-src-{trial}.txt")
-                fuse_dst = fuse_path(f"exp2/rename-dst-{trial}.txt")
-                result = self.runner.run_probe("fs_rename", cg_path,
-                                               args=[fuse_src, fuse_dst])
-
-                # Now rollback the epoch
-                if epoch_ok:
-                    try:
-                        self.fs_client.rollback(cg_id, epoch_id)
-                    except Exception:
-                        pass
-
-                # After rollback: source must be restored, dst must not exist
-                # This verifies ShadowFS tracked BOTH paths of the rename
-                import time as _time
-                _time.sleep(0.2)  # allow FUSE cache to expire
-
-                src_restored = os.path.exists(src)
-                dst_removed = not os.path.exists(dst)
-
-                # If rename went through FUSE and rollback worked correctly,
-                # both conditions must hold
-                dual_path_ok = src_restored and dst_removed
-
-                # Record: violation if rollback didn't properly undo both paths
-                self.metrics.record(
-                    "dual_path_single_check", not dual_path_ok and epoch_ok,
-                    f"trial={trial}: dual-path rollback incomplete "
-                    f"(src_restored={src_restored} dst_removed={dst_removed})",
-                    {"scenario": "dual_path_rename", "trial": trial})
-
-                # Semantic gap: if dst exists but src doesn't, rename was
-                # partially tracked (only one path recorded)
-                semantic_gap = (not src_restored) and os.path.exists(dst)
-                self.metrics.record(
-                    "semantic_gap_detected", semantic_gap,
-                    f"trial={trial}: rename partially tracked (src gone, dst exists)",
-                    {"scenario": "dual_path_rename", "trial": trial})
-
-            finally:
-                try:
-                    self.proc_client.kill_by_cgroup(cg_id)
-                    self.proc_client.clear_all_policies(cg_id)
-                    self.proc_client.remove_cgroup(cg_path)
-                except Exception:
-                    pass
-                self.cgroup_mgr.remove(cg_path)
-
-    # ─── Test: hard link dual-path check ─────────────────────────────────
-
-    def test_dual_path_hardlink(self):
-        """hard link must track BOTH source and destination paths.
-
-        Verification: after link + rollback, the extra link must be removed
-        (nlink of source returns to original). This proves ShadowFS records
-        both paths of the link operation.
-        """
-        for trial in range(self.repeats):
-            cg_path = self.cgroup_mgr.create(f"exp2-hl-{trial}-{int(time.time()*1000)}")
-            cg_id = self.cgroup_mgr.get_cgroup_id(cg_path)
-            self.proc_client.add_cgroup(cg_path)
-
-            try:
-                # Begin ShadowFS epoch
-                epoch_id = f"exp2-hl-{self.run_id}-{trial}"
-                epoch_ok = True
-                try:
-                    self.fs_client.begin_epoch(cg_id, epoch_id)
-                except Exception as e:
-                    epoch_ok = False
-                    print(f"    [exp2] WARNING: begin_epoch failed: {e}")
-
-                # Setup: create source file
-                src = os.path.join(self.work_dir, f"link-src-{trial}.txt")
-                dst = os.path.join(self.work_dir, f"link-dst-{trial}.txt")
-                os.makedirs(os.path.dirname(src), exist_ok=True)
-                with open(src, "w") as f:
-                    f.write("hardlink test data")
-                # Ensure dst does not exist
-                if os.path.exists(dst):
-                    os.unlink(dst)
-
-                nlink_before = os.stat(src).st_nlink
-
-                # Allow all (FUSE versions the operation)
-                self.proc_client.set_epoch_mode(cg_id, 2)
-
-                # Perform hard link through probe (goes via FUSE)
-                fuse_src = fuse_path(f"exp2/link-src-{trial}.txt")
-                fuse_dst = fuse_path(f"exp2/link-dst-{trial}.txt")
-                result = self.runner.run_probe("fs_link", cg_path,
-                                               args=[fuse_src, fuse_dst])
-
-                # Now rollback the epoch
-                if epoch_ok:
-                    try:
-                        self.fs_client.rollback(cg_id, epoch_id)
-                    except Exception:
-                        pass
-
-                # After rollback: nlink must be restored, dst must not exist
-                import time as _time
-                _time.sleep(0.2)  # allow FUSE cache to expire
-
-                nlink_after = os.stat(src).st_nlink if os.path.exists(src) else 0
-                dst_removed = not os.path.exists(dst)
-                nlink_restored = (nlink_after == nlink_before)
-
-                # Dual-path tracking is correct if rollback undid the link
-                dual_path_ok = nlink_restored and dst_removed
-
-                self.metrics.record(
-                    "dual_path_single_check", not dual_path_ok and epoch_ok,
-                    f"trial={trial}: hardlink dual-path rollback incomplete "
-                    f"(nlink {nlink_before}->{nlink_after}, dst_removed={dst_removed})",
-                    {"scenario": "dual_path_hardlink", "trial": trial})
-
-                # Semantic gap: link was created but rollback didn't remove it
-                semantic_gap = (nlink_after > nlink_before) and epoch_ok
-                self.metrics.record(
-                    "semantic_gap_detected", semantic_gap,
-                    f"trial={trial}: hard link not undone by rollback "
-                    f"(nlink={nlink_after})",
-                    {"scenario": "dual_path_hardlink", "trial": trial})
-
-            finally:
-                try:
-                    self.proc_client.kill_by_cgroup(cg_id)
-                    self.proc_client.clear_all_policies(cg_id)
-                    self.proc_client.remove_cgroup(cg_path)
-                except Exception:
-                    pass
-                self.cgroup_mgr.remove(cg_path)
-
-    # ─── Test: Combined allow-history + allow-future (positive case) ─────
-
-    def test_both_allowed_positive(self):
-        """When policy allows both historical and future ops, both proceed."""
-        for trial in range(self.repeats):
-            cg_path = self.cgroup_mgr.create(f"exp2-pos-{trial}-{int(time.time()*1000)}")
-            cg_id = self.cgroup_mgr.get_cgroup_id(cg_path)
-            self.proc_client.add_cgroup(cg_path)
-
-            try:
-                # Allow everything
-                policy = PolicyIR.from_allowed_ops([
-                    {"event_type": "*", "action": "allow", "path_pattern": "/"}
-                ]).to_proc_policy()
-                self.proc_client.install_proc_policy(cg_id, policy)
-                self.proc_client.set_epoch_mode(cg_id, 2)
-
-                # Network connect should succeed
-                result = self.runner.run_probe("net_connect", cg_path,
-                                               args=["9999"])
-
-                # With wildcard allow, should not be EPERM
-                denied = (result.errno == errno.EPERM)
-                self.metrics.record(
-                    "semantic_gap_detected", denied,
-                    f"trial={trial}: denied despite wildcard allow",
-                    {"scenario": "both_allowed_positive", "trial": trial})
-
-            finally:
-                try:
-                    self.proc_client.kill_by_cgroup(cg_id)
-                    self.proc_client.clear_all_policies(cg_id)
-                    self.proc_client.remove_cgroup(cg_path)
-                except Exception:
-                    pass
-                self.cgroup_mgr.remove(cg_path)
-
-    # ─── Test: Future violation must get EPERM on syscall restart ─────────
-
-    def test_future_violation_eperm_restart(self):
-        """When a fenced syscall is restarted after policy denies it,
-        the process must receive EPERM (not silently succeed or hang).
-
-        Correct flow:
-          1. Set SPECULATIVE (mode=0) so probe gets fenced
-          2. Spawn probe and confirm it enters frozen list
-          3. Install deny policy
-          4. continue_by_cgroup (restart syscall with policy)
-          5. Verify probe receives EPERM
-        """
-        for trial in range(self.repeats):
-            cg_path = self.cgroup_mgr.create(f"exp2-ep-{trial}-{int(time.time()*1000)}")
-            cg_id = self.cgroup_mgr.get_cgroup_id(cg_path)
-            self.proc_client.add_cgroup(cg_path)
-
-            try:
-                # Step 1: SPECULATIVE mode (probe will be fenced by BPF)
-                self.proc_client.set_epoch_mode(cg_id, 0)
-
-                # Step 2: Spawn probe - it should get fenced
-                proc, write_fd = self.runner.spawn_and_hold(
-                    "net_connect", cg_path, args=["9999"])
-                self.runner.release(write_fd)
-
-                # Wait for fence and confirm probe is in frozen list
-                time.sleep(0.2)
-                frozen = self.proc_client.list_frozen(cg_id)
-                if not frozen:
-                    # Probe was not fenced - cannot test restart path
-                    proc.kill()
-                    proc.wait(timeout=2)
-                    self.metrics.record(
-                        "future_violation_not_denied", False,
-                        trial_info={"scenario": "eperm_restart",
-                                    "trial": trial, "skipped": True,
-                                    "reason": "probe not fenced"})
-                    continue
-
-                # Step 3: Install deny policy
-                deny_net = {"event_type": "CONNECT", "action": "deny",
-                            "path_pattern": "/"}
-                policy = PolicyIR.from_allowed_ops([deny_net]).to_proc_policy()
-                self.proc_client.install_proc_policy(cg_id, policy)
-                # Switch to ENFORCED so the policy takes effect on restart
-                self.proc_client.set_epoch_mode(cg_id, 2)
-
-                # Step 4: Continue (restart syscall with deny policy)
-                try:
-                    self.proc_client.continue_by_cgroup(cg_id)
-                except Exception:
-                    pass
-
-                # Step 5: Collect result - must show EPERM
-                result = self.runner.wait_result(proc, "net_connect", timeout=5.0)
-
-                succeeded = (result.ret >= 0 and result.errno == 0)
-                self.metrics.record(
-                    "future_violation_not_denied", succeeded,
-                    f"trial={trial}: future violation not denied on restart "
-                    f"(ret={result.ret} errno={result.errno})",
-                    {"scenario": "eperm_restart", "trial": trial})
-
-            finally:
-                try:
-                    self.proc_client.kill_by_cgroup(cg_id)
-                    self.proc_client.clear_all_policies(cg_id)
-                    self.proc_client.remove_cgroup(cg_path)
-                except Exception:
-                    pass
-                self.cgroup_mgr.remove(cg_path)
+    # ── driver ──────────────────────────────────────────────────────────
 
     def run(self):
-        """Run all audit consistency tests."""
         self.setup()
-        print(f"\n{'='*70}")
-        print(f"  EXPERIMENT 2: Audit Consistency")
+        print(f"\n{'=' * 70}")
+        print("  EXPERIMENT 2: Audit Consistency (real orchestrator sessions)")
         print(f"  Repeats: {self.repeats}")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
+        tests = [
+            ("Allowed historical write committed", self.test_historical_write_allowed),
+            ("Disallowed historical write rejected", self.test_historical_write_rejected),
+            ("Allow file history + deny future connect", self.test_allow_history_deny_future),
+            ("Future connect denied on restart", self.test_future_connect_denied_restart),
+            ("Dual-path rename rollback", self.test_dual_path_rename_rollback),
+            ("Dual-path hard link rollback", self.test_dual_path_hardlink_rollback),
+        ]
         try:
-            print("  [1/7] Allow history + deny future ...", flush=True)
-            self.test_allow_history_deny_future()
-
-            print("  [2/7] Historical violation rollback ...", flush=True)
-            self.test_historical_violation_rollback()
-
-            print("  [3/7] Policy fingerprint integrity ...", flush=True)
-            self.test_policy_fingerprint_integrity()
-
-            print("  [4/7] Dual-path operations (rename) ...", flush=True)
-            self.test_dual_path_operations()
-
-            print("  [5/7] Dual-path operations (hard link) ...", flush=True)
-            self.test_dual_path_hardlink()
-
-            print("  [6/7] Positive case (both allowed) ...", flush=True)
-            self.test_both_allowed_positive()
-
-            print("  [7/7] Future violation EPERM on restart ...", flush=True)
-            self.test_future_violation_eperm_restart()
-
+            for idx, (label, fn) in enumerate(tests, 1):
+                print(f"  [{idx}/{len(tests)}] {label} ...", flush=True)
+                fn()
         except KeyboardInterrupt:
             print("\n[exp2] Interrupted")
         finally:
@@ -695,8 +629,13 @@ def main():
         sys.exit(1)
 
     exp = Experiment2(repeats=args.repeats)
-    metrics = exp.run()
+    try:
+        metrics = exp.run()
+    except InfrastructureError as exc:
+        print(f"\n[exp2] FATAL INFRASTRUCTURE ERROR: {exc}")
+        sys.exit(2)
     metrics.save_report(args.output_dir)
+    sys.exit(metrics.exit_code)
 
 
 if __name__ == "__main__":

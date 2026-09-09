@@ -39,11 +39,23 @@ import sys
 import time
 
 EXPERIMENTS_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJ_DIR = os.path.dirname(os.path.dirname(EXPERIMENTS_DIR))  # speculative_shadow
+# Make both the experiment modules (framework.*) and the project packages
+# (policy.*) importable no matter what CWD the harness is launched from.
+for _p in (EXPERIMENTS_DIR, PROJ_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 RUN_EXPERIMENTS = os.environ.get("SHADOW_RUN_RQ2_EXPERIMENTS") == "1"
 
 
 def check_prerequisites():
-    """Verify all prerequisites are met."""
+    """Verify all prerequisites are met.
+
+    All four daemons (ShadowProc, ShadowFS, ShadowObserve, orchestrator) and
+    the FUSE mount are REQUIRED: exp1 verifies real audit events and exp2-4
+    drive the orchestrator session API over a mounted shadow filesystem, so a
+    missing component invalidates the run rather than degrading it.
+    """
     errors = []
 
     if os.geteuid() != 0:
@@ -52,7 +64,7 @@ def check_prerequisites():
     if not RUN_EXPERIMENTS:
         errors.append("Set SHADOW_RUN_RQ2_EXPERIMENTS=1 to enable experiments")
 
-    # Check sockets
+    # Check daemon sockets
     proc_sock = os.environ.get("SHADOWPROC_SOCK", "/tmp/shadow_proc.sock")
     if not os.path.exists(proc_sock):
         errors.append(f"ShadowProc socket not found: {proc_sock}")
@@ -60,6 +72,27 @@ def check_prerequisites():
     fs_sock = os.environ.get("SHADOWFS_SOCK", "/tmp/shadowfs.sock")
     if not os.path.exists(fs_sock):
         errors.append(f"ShadowFS socket not found: {fs_sock}")
+
+    observe_sock = os.environ.get("SHADOWOBSERVE_SOCK",
+                                  "/tmp/shadow_observe.sock")
+    if not os.path.exists(observe_sock):
+        errors.append(f"ShadowObserve socket not found: {observe_sock}")
+
+    orch_sock = (os.environ.get("PENUMBRA_ORCH_SOCK")
+                 or os.environ.get("SHADOW_ORCH_SOCK")
+                 or "/tmp/shadow-orch.sock")
+    if not os.path.exists(orch_sock):
+        errors.append(f"Orchestrator socket not found: {orch_sock}")
+
+    # Check the ShadowFS FUSE mount is live
+    fuse_mnt = os.environ.get("SHADOWFS_MNT", "/tmp/shadow-rq2-test/mnt")
+    try:
+        with open("/proc/mounts", "r") as f:
+            mounts = f.read()
+        if f" {fuse_mnt} " not in mounts:
+            errors.append(f"ShadowFS FUSE not mounted at {fuse_mnt}")
+    except OSError as exc:
+        errors.append(f"cannot read /proc/mounts to verify FUSE: {exc}")
 
     # Check cgroup v2
     cgroup_root = os.environ.get("SHADOW_CGROUP_ROOT", "/sys/fs/cgroup")
@@ -92,43 +125,59 @@ def build_probes():
     return result.returncode == 0
 
 
+def _make_experiment(exp_num: int, repeats: int, trials: int):
+    """Instantiate the experiment object for exp_num."""
+    if exp_num == 1:
+        from exp1_effect_coverage import Experiment1
+        return Experiment1(repeats=repeats)
+    if exp_num == 2:
+        from exp2_audit_consistency import Experiment2
+        return Experiment2(repeats=repeats)
+    if exp_num == 3:
+        from exp3_rollback_correctness import Experiment3
+        return Experiment3(repeats=repeats)
+    if exp_num == 4:
+        from exp4_dependency_propagation import Experiment4
+        return Experiment4(repeats=max(1, repeats // 2))
+    if exp_num == 5:
+        from exp5_failclosed_concurrency import Experiment5
+        return Experiment5(trials=trials)
+    raise ValueError(f"Unknown experiment: {exp_num}")
+
+
 def run_experiment(exp_num: int, repeats: int, trials: int,
                    output_dir: str) -> dict:
-    """Run a single experiment and return its metrics dict."""
+    """Run a single experiment and return its metrics dict.
+
+    A lifecycle/infrastructure failure inside exp.run() is re-raised by the
+    experiment after being recorded as an INFRA_ERROR. We capture it here so
+    the report is still saved and the result carries a non-zero exit_code,
+    rather than silently disappearing.
+    """
     print(f"\n{'#'*70}")
     print(f"  RUNNING EXPERIMENT {exp_num}")
     print(f"{'#'*70}\n")
 
     t0 = time.time()
-
-    if exp_num == 1:
-        from exp1_effect_coverage import Experiment1
-        exp = Experiment1(repeats=repeats)
+    exp = _make_experiment(exp_num, repeats, trials)
+    try:
         metrics = exp.run()
-    elif exp_num == 2:
-        from exp2_audit_consistency import Experiment2
-        exp = Experiment2(repeats=repeats)
-        metrics = exp.run()
-    elif exp_num == 3:
-        from exp3_rollback_correctness import Experiment3
-        exp = Experiment3(repeats=repeats)
-        metrics = exp.run()
-    elif exp_num == 4:
-        from exp4_dependency_propagation import Experiment4
-        exp = Experiment4(repeats=max(1, repeats // 2))
-        metrics = exp.run()
-    elif exp_num == 5:
-        from exp5_failclosed_concurrency import Experiment5
-        exp = Experiment5(trials=trials)
-        metrics = exp.run()
-    else:
-        raise ValueError(f"Unknown experiment: {exp_num}")
+        result = metrics.to_dict()
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        metrics = exp.metrics
+        if not metrics.has_infra_errors:
+            metrics.record_infra_error(f"exp{exp_num}", exc)
+        metrics.finish()
+        result = metrics.to_dict()
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[runner] Experiment {exp_num} INFRASTRUCTURE ERROR: {exc}")
 
     elapsed = time.time() - t0
-    result = metrics.to_dict()
     result["wall_time_seconds"] = round(elapsed, 1)
 
-    # Save individual report
+    # Save individual report (even on infra error, so the run is auditable)
     metrics.save_report(output_dir)
     return result
 
@@ -141,13 +190,21 @@ def print_combined_report(all_results: list, output_dir: str):
 
     total_violations = 0
     total_trials = 0
+    total_infra = 0
 
     for result in all_results:
         exp_name = result.get("experiment", "unknown")
         duration = result.get("wall_time_seconds", 0)
         counters = result.get("counters", {})
+        infra_n = result.get("infrastructure_errors", 0)
+        total_infra += infra_n
 
-        print(f"  {exp_name} ({duration}s):")
+        tag = ""
+        if infra_n:
+            tag = f"  [INFRA_ERRORS={infra_n} - INVALID RUN]"
+        elif result.get("error"):
+            tag = f"  [ERROR: {result['error']}]"
+        print(f"  {exp_name} ({duration}s):{tag}")
         for name, data in counters.items():
             count = data["count"]
             total = data["total"]
@@ -160,8 +217,12 @@ def print_combined_report(all_results: list, output_dir: str):
         print()
 
     print(f"  {'='*60}")
-    print(f"  TOTAL: {total_violations} violations / {total_trials} trials")
-    if total_violations == 0:
+    print(f"  TOTAL: {total_violations} violations / {total_trials} trials "
+          f"({total_infra} infrastructure errors)")
+    if total_infra > 0:
+        print(f"  RESULT: INVALID RUN - infrastructure failed, the safety "
+              f"properties were NOT established")
+    elif total_violations == 0:
         print(f"  RESULT: ALL SAFETY PROPERTIES HELD ACROSS ALL EXPERIMENTS")
     else:
         print(f"  RESULT: VIOLATIONS DETECTED - SEE INDIVIDUAL REPORTS")
@@ -196,14 +257,20 @@ def print_combined_report(all_results: list, output_dir: str):
             existing_experiments[name] = result
     merged = list(existing_experiments.values())
 
-    # Validate: experiments with no counters are errors, not passes
+    # Validate: experiments with no counters are errors, not passes; any
+    # infrastructure error invalidates the whole run.
     has_error = False
     has_warning = False
+    has_infra = False
     for r in merged:
         counters = r.get("counters", {})
         if not counters:
             print(f"  ERROR: {r.get('experiment')} has no counters (crashed?)")
             has_error = True
+        if r.get("infrastructure_errors", 0) or r.get("has_infra_errors"):
+            print(f"  INFRA: {r.get('experiment')} recorded "
+                  f"{r.get('infrastructure_errors', 0)} infrastructure error(s)")
+            has_infra = True
         # Warn on 0/0 counters (no effective observations)
         empty = r.get("empty_counters", [])
         if empty:
@@ -218,23 +285,37 @@ def print_combined_report(all_results: list, output_dir: str):
         c["count"] for r in merged for c in r.get("counters", {}).values())
     total_t = sum(
         c["total"] for r in merged for c in r.get("counters", {}).values())
+    total_i = sum(r.get("infrastructure_errors", 0) for r in merged)
+
+    # Overall exit code: 2 = infra errors / crashed experiments (invalid run),
+    # 1 = safety violations observed, 0 = clean.
+    if has_infra or has_error:
+        overall_exit = 2
+    elif total_v > 0:
+        overall_exit = 1
+    else:
+        overall_exit = 0
 
     with open(combined_path, "w") as f:
         json.dump({
             "experiments": merged,
             "total_violations": total_v,
             "total_trials": total_t,
+            "total_infra_errors": total_i,
             "has_error": has_error,
             "has_warning": has_warning,
+            "has_infra_errors": has_infra,
+            "exit_code": overall_exit,
             "experiments_present": sorted(existing_experiments.keys()),
             "experiments_missing": sorted(CANONICAL_NAMES - set(existing_experiments.keys())),
             "timestamp": time.time(),
         }, f, indent=2)
     print(f"  Combined results saved to: {combined_path}")
-    if has_error:
-        print(f"  ERROR: Some experiments have errors - results may be invalid")
+    if has_infra or has_error:
+        print(f"  ERROR: Some experiments failed - results are INVALID")
     if has_warning:
         print(f"  WARNING: Some counters have 0 effective observations")
+    return overall_exit
 
 
 def main():
@@ -275,7 +356,15 @@ def main():
         exp_nums = [int(args.exp)]
 
     # Run experiments
+    canonical = {
+        1: "exp1_effect_coverage",
+        2: "exp2_audit_consistency",
+        3: "exp3_rollback_correctness",
+        4: "exp4_dependency_propagation",
+        5: "exp5_failclosed_concurrency",
+    }
     all_results = []
+    runner_error = False
     for num in exp_nums:
         try:
             result = run_experiment(num, args.repeats, args.trials,
@@ -283,20 +372,30 @@ def main():
             all_results.append(result)
         except KeyboardInterrupt:
             print(f"\n[runner] Interrupted during experiment {num}")
+            runner_error = True
             break
         except Exception as e:
-            print(f"\n[runner] Experiment {num} failed: {e}")
+            # Instantiation/import failure: record it under the canonical name
+            # so the combined report flags the run as invalid (no counters).
+            print(f"\n[runner] Experiment {num} failed to run: {e}")
             import traceback
             traceback.print_exc()
+            runner_error = True
             all_results.append({
-                "experiment": f"exp{num}",
+                "experiment": canonical.get(num, f"exp{num}"),
                 "error": str(e),
                 "counters": {},
+                "has_infra_errors": True,
+                "infrastructure_errors": 1,
             })
 
     # Combined report
+    overall_exit = 0
     if all_results:
-        print_combined_report(all_results, args.output_dir)
+        overall_exit = print_combined_report(all_results, args.output_dir)
+    if runner_error:
+        overall_exit = 2
+    sys.exit(overall_exit)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,198 @@
+{
+  "experiment": "exp2_audit_consistency",
+  "duration_seconds": 11.32,
+  "start_time": 1788779016.153259,
+  "end_time": 1788779027.4752278,
+  "metadata": {
+    "orch_sock": "/tmp/shadow-orch.sock",
+    "shadowfs_mount": "/tmp/shadow-rq2-test/mnt",
+    "backing_store": "/tmp/shadow-rq2-test/orig",
+    "repeats": 1,
+    "run_id": "79016153"
+  },
+  "attempted_trials": 6,
+  "completed_trials": 6,
+  "skipped_trials": 0,
+  "infra_error_trials": 0,
+  "infrastructure_errors": 0,
+  "property_checks": 10,
+  "violations": 4,
+  "has_infra_errors": false,
+  "exit_code": 1,
+  "counters": {
+    "allowed_write_committed": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "disallowed_write_rejected": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "backing_store_unchanged": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "history_passed_audit": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "future_connect_denied": {
+      "count": 2,
+      "total": 2,
+      "rate": 1.0,
+      "ci_95": [
+        0.15811388300841905,
+        1.0
+      ],
+      "details": [
+        "output='CONNECT_OK'",
+        "output='CONNECT_OK'"
+      ]
+    },
+    "receiver_saw_no_connection": {
+      "count": 2,
+      "total": 2,
+      "rate": 1.0,
+      "ci_95": [
+        0.15811388300841905,
+        1.0
+      ],
+      "details": [
+        "connections=1 bytes=0",
+        "connections=1"
+      ]
+    },
+    "dual_path_rollback_complete": {
+      "count": 0,
+      "total": 2,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.8418861169915808
+      ],
+      "details": []
+    }
+  },
+  "empty_counters": [],
+  "infra_errors": [],
+  "trials": [
+    {
+      "trial_id": "hist-write-allowed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": false,
+          "detail": "output='CONNECT_OK'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": false,
+          "detail": "connections=1 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "future-connect-denied-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": false,
+          "detail": "output='CONNECT_OK'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": false,
+          "detail": "connections=1"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "dual-path-rename-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-hardlink-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    }
+  ],
+  "trials_truncated": false,
+  "total_trials": 6
+}

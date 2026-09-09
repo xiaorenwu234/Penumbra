@@ -1,0 +1,396 @@
+{
+  "experiment": "exp3_rollback_correctness",
+  "duration_seconds": 31.16,
+  "start_time": 1788843275.4202683,
+  "end_time": 1788843306.5842593,
+  "metadata": {
+    "orch_sock": "/tmp/shadow-orch.sock",
+    "shadowfs_mount": "/tmp/shadow-rq2-test/mnt",
+    "backing_store": "/tmp/shadow-rq2-test/orig",
+    "repeats": 1,
+    "run_id": "43275420"
+  },
+  "attempted_trials": 12,
+  "completed_trials": 12,
+  "skipped_trials": 0,
+  "infra_error_trials": 0,
+  "infrastructure_errors": 0,
+  "property_checks": 22,
+  "violations": 0,
+  "has_infra_errors": false,
+  "exit_code": 0,
+  "counters": {
+    "rollback_content_mismatch": {
+      "count": 0,
+      "total": 3,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.7075982261787133
+      ],
+      "details": []
+    },
+    "rollback_metadata_mismatch": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "rollback_direntry_mismatch": {
+      "count": 0,
+      "total": 3,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.7075982261787133
+      ],
+      "details": []
+    },
+    "child_process_survived": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "provisional_output_not_removed": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "commit_not_exactly_once": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "rollback_state_leak": {
+      "count": 0,
+      "total": 2,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.8418861169915808
+      ],
+      "details": []
+    },
+    "env_cwd_not_restored": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "whiteout_not_cleaned": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "memory_state_leaked": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "baseline_sees_original": {
+      "count": 0,
+      "total": 2,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.8418861169915808
+      ],
+      "details": []
+    },
+    "baseline_sees_original_mode": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "epoch_child_joined": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "baseline_serves_next_command": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "baseline_sees_source": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    },
+    "baseline_sees_file": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    }
+  },
+  "empty_counters": [],
+  "infra_errors": [],
+  "trials": [
+    {
+      "trial_id": "file-content-rollback-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "rollback_content_mismatch",
+          "passed": true,
+          "detail": "backing=b'ORIGINAL_CONTENT\\n' expected=b'ORIGINAL_CONTENT\\n'"
+        },
+        {
+          "property": "baseline_sees_original",
+          "passed": true,
+          "detail": "next-command cat='ORIGINAL_CONTENT'"
+        }
+      ],
+      "scenario": "file_content_rollback"
+    },
+    {
+      "trial_id": "permission-rollback-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "rollback_metadata_mismatch",
+          "passed": true,
+          "detail": "mode 0o644->0o644"
+        },
+        {
+          "property": "baseline_sees_original_mode",
+          "passed": true,
+          "detail": "next-command stat='644'"
+        }
+      ],
+      "scenario": "permission_rollback"
+    },
+    {
+      "trial_id": "child-process-termination-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "epoch_child_joined",
+          "passed": true,
+          "detail": "candidate=2409375 child=2409378 tree=[2409378]"
+        },
+        {
+          "property": "child_process_survived",
+          "passed": true,
+          "detail": "child_dead=True candidate_dead=True survivors=[]"
+        },
+        {
+          "property": "baseline_serves_next_command",
+          "passed": true,
+          "detail": "output='BASELINE_OK'"
+        }
+      ],
+      "scenario": "child_process_termination"
+    },
+    {
+      "trial_id": "rename-rollback-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "rollback_state_leak",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        },
+        {
+          "property": "baseline_sees_source",
+          "passed": true,
+          "detail": "next-command='E content-43275420-0.txt\\nE perm-43275420-0.txt\\nE rename-src-43275420-0.txt\\nSRC_EXISTS'"
+        },
+        {
+          "property": "rollback_direntry_mismatch",
+          "passed": true,
+          "detail": "rename-0: backing_dir_restored=True fuse_listing_ok=True staging_residue=none",
+          "meta": {
+            "label": "rename-0",
+            "epoch_id": "ep-ecd4710f53a1"
+          }
+        }
+      ],
+      "scenario": "rename_rollback"
+    },
+    {
+      "trial_id": "whiteout-cleanup-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "whiteout_not_cleaned",
+          "passed": true,
+          "detail": "backing exists=True"
+        },
+        {
+          "property": "baseline_sees_file",
+          "passed": true,
+          "detail": "next-command='E content-43275420-0.txt\\nE perm-43275420-0.txt\\nE rename-src-43275420-0.txt\\nE whiteout-43275420-0.txt\\nEXISTS'"
+        },
+        {
+          "property": "rollback_direntry_mismatch",
+          "passed": true,
+          "detail": "whiteout-0: backing_dir_restored=True fuse_listing_ok=True staging_residue=none",
+          "meta": {
+            "label": "whiteout-0",
+            "epoch_id": "ep-a5e583ee6f4f"
+          }
+        }
+      ],
+      "scenario": "whiteout_cleanup"
+    },
+    {
+      "trial_id": "commit-exactly-once-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "commit_not_exactly_once",
+          "passed": true,
+          "detail": "effect appeared 1 times"
+        }
+      ],
+      "scenario": "commit_once"
+    },
+    {
+      "trial_id": "hardlink-rollback-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "rollback_state_leak",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        },
+        {
+          "property": "rollback_direntry_mismatch",
+          "passed": true,
+          "detail": "hardlink-0: backing_dir_restored=True fuse_listing_ok=True staging_residue=none",
+          "meta": {
+            "label": "hardlink-0",
+            "epoch_id": "ep-78e27e64d1ba"
+          }
+        }
+      ],
+      "scenario": "hardlink_rollback"
+    },
+    {
+      "trial_id": "env-cwd-restoration-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "env_cwd_not_restored",
+          "passed": true,
+          "detail": "cwd '/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq2'->'/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq2' leak='unset'"
+        }
+      ],
+      "scenario": "env_cwd_restoration"
+    },
+    {
+      "trial_id": "file-offset-restoration-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "rollback_content_mismatch",
+          "passed": true,
+          "detail": "external read 20B expected 20B"
+        },
+        {
+          "property": "baseline_sees_original",
+          "passed": true,
+          "detail": "next-command='AAAAABBBBBCCCCCDDDDD'"
+        }
+      ],
+      "scenario": "file_offset"
+    },
+    {
+      "trial_id": "provisional-output-removal-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "provisional_output_not_removed",
+          "passed": true,
+          "detail": "output_leaked=False file_leaked=False"
+        }
+      ],
+      "scenario": "provisional_output"
+    },
+    {
+      "trial_id": "memory-state-rollback-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "memory_state_leaked",
+          "passed": true,
+          "detail": "child_dead=True content_ok=True after=b'ORIGINAL_MMAP_CONTENT'"
+        }
+      ],
+      "scenario": "memory_state"
+    },
+    {
+      "trial_id": "allow-matches-native-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allow_matches_native",
+          "passed": true,
+          "detail": "shadow_size=21 native_size=21"
+        }
+      ],
+      "scenario": "allow_matches_native"
+    }
+  ],
+  "trials_truncated": false,
+  "total_trials": 12
+}

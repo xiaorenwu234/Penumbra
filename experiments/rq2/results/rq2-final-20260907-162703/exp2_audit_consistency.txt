@@ -1,0 +1,24 @@
+========================================================================
+  EXPERIMENT: exp2_audit_consistency
+  Duration: 124.6s
+  Trials: 2 completed / 6 attempted (0 skipped, 4 infra_error)
+  Property checks: 2
+========================================================================
+
+  Property                       Violations        Rate                95% CI
+  ---------------------------  ------------  ----------  --------------------
+  dual_path_rollback_complete           0/2    0.000000  [0.000000, 0.841886]
+
+========================================================================
+
+  0 violations across 2 property checks in 2 completed trials
+
+  INFRASTRUCTURE ERRORS: 4
+    - resolve_fail_closed: 4
+      [hist-write-allowed-0] audit fail-closed: start_observe unreachable: Connection to /tmp/shadow_observe.sock closed
+      [hist-write-rejected-0] audit fail-closed: start_observe unreachable: [Errno 32] Broken pipe
+      [allow-hist-deny-future-0] invalid policy (compile failed): unknown policy event_type: 'READ'
+      [future-connect-denied-0] invalid policy (compile failed): unknown policy event_type: 'READ'
+
+  RESULT: INVALID RUN - infrastructure failed, the safety properties were NOT established
+========================================================================

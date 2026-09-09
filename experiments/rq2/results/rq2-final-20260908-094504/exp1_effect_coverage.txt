@@ -1,0 +1,25 @@
+========================================================================
+  EXPERIMENT: exp1_effect_coverage
+  Duration: 9.0s
+  Trials: 245 completed / 245 attempted (0 skipped, 0 infra_error)
+  Property checks: 248
+========================================================================
+
+  Property                    Violations        Rate                95% CI
+  ------------------------  ------------  ----------  --------------------
+  escaped_before_auth               0/38    0.000000  [0.000000, 0.092513]
+  incorrectly_allowed              0/134    0.000000  [0.000000, 0.027153]
+  incorrectly_denied                1/47    0.021277  [0.000539, 0.112938]
+  duplicated_after_restart           0/1    0.000000  [0.000000, 0.975000]
+  missing_audit_events              0/26    0.000000  [0.000000, 0.132275]
+  effect_not_observed                0/2    0.000000  [0.000000, 0.841886]
+
+========================================================================
+
+  1 violations across 248 property checks in 245 completed trials
+
+  VIOLATIONS DETECTED: 1
+
+  incorrectly_denied (1 violations):
+    - ipc_pipe trial=0: denied despite allow policy (ret=-1 errno=1)
+========================================================================

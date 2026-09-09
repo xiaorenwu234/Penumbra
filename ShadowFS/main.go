@@ -148,16 +148,200 @@ var (
 	_ fs.FileSetlkwer = (*trackedHandle)(nil)
 )
 
+// Every operation that touches the backing descriptor goes through `dead`
+// first, and Release is the only closer. Both rules exist because a cascade
+// rollback force-closes this descriptor from under the handle (CloseEpochFDs),
+// and from that instant the NUMBER is free to be recycled by any other
+// goroutine in the daemon -- the WAL file, an accepted control-socket
+// connection, or another epoch's stage copy. Using it would read or write
+// somebody else's descriptor; closing it a second time would destroy it.
+var (
+	_ fs.FileReader    = (*trackedHandle)(nil)
+	_ fs.FileWriter    = (*trackedHandle)(nil)
+	_ fs.FileFlusher   = (*trackedHandle)(nil)
+	_ fs.FileFsyncer   = (*trackedHandle)(nil)
+	_ fs.FileGetattrer = (*trackedHandle)(nil)
+	_ fs.FileSetattrer = (*trackedHandle)(nil)
+	_ fs.FileAllocater = (*trackedHandle)(nil)
+	_ fs.FileLseeker   = (*trackedHandle)(nil)
+	_ fs.FileIoctler   = (*trackedHandle)(nil)
+	_ fs.FileStatxer   = (*trackedHandle)(nil)
+)
+
+// dead reports whether a cascade rollback already took this handle's
+// descriptor away. EBADF is the answer the design intends: the process must
+// not be able to keep reading a version that no longer exists.
+func (h *trackedHandle) dead() bool { return h.tfd.IsClosed() }
+
+func (h *trackedHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	if h.dead() {
+		return nil, syscall.EBADF
+	}
+	return h.LoopbackFile.Read(ctx, dest, off)
+}
+
+func (h *trackedHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
+	if h.dead() {
+		return 0, syscall.EBADF
+	}
+	return h.LoopbackFile.Write(ctx, data, off)
+}
+
+func (h *trackedHandle) Flush(ctx context.Context) syscall.Errno {
+	if h.dead() {
+		return syscall.EBADF
+	}
+	return h.LoopbackFile.Flush(ctx)
+}
+
+func (h *trackedHandle) Fsync(ctx context.Context, flags uint32) syscall.Errno {
+	if h.dead() {
+		return syscall.EBADF
+	}
+	return h.LoopbackFile.Fsync(ctx, flags)
+}
+
+func (h *trackedHandle) Getattr(ctx context.Context, out *fuse.AttrOut) syscall.Errno {
+	if h.dead() {
+		return syscall.EBADF
+	}
+	return h.LoopbackFile.Getattr(ctx, out)
+}
+
+func (h *trackedHandle) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	if h.dead() {
+		return syscall.EBADF
+	}
+	return h.LoopbackFile.Setattr(ctx, in, out)
+}
+
+func (h *trackedHandle) Allocate(ctx context.Context, off uint64, size uint64, mode uint32) syscall.Errno {
+	if h.dead() {
+		return syscall.EBADF
+	}
+	return h.LoopbackFile.Allocate(ctx, off, size, mode)
+}
+
+func (h *trackedHandle) Lseek(ctx context.Context, off uint64, whence uint32) (uint64, syscall.Errno) {
+	if h.dead() {
+		return 0, syscall.EBADF
+	}
+	return h.LoopbackFile.Lseek(ctx, off, whence)
+}
+
+func (h *trackedHandle) Ioctl(ctx context.Context, cmd uint32, arg uint64, input []byte, output []byte) (int32, syscall.Errno) {
+	if h.dead() {
+		return 0, syscall.EBADF
+	}
+	return h.LoopbackFile.Ioctl(ctx, cmd, arg, input, output)
+}
+
+func (h *trackedHandle) Statx(ctx context.Context, flags uint32, mask uint32, out *fuse.StatxOut) syscall.Errno {
+	if h.dead() {
+		return syscall.EBADF
+	}
+	return h.LoopbackFile.Statx(ctx, flags, mask, out)
+}
+
+func (h *trackedHandle) Getlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32, out *fuse.FileLock) syscall.Errno {
+	if h.dead() {
+		return syscall.EBADF
+	}
+	return h.LoopbackFile.Getlk(ctx, owner, lk, flags, out)
+}
+
+func (h *trackedHandle) Setlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	if h.dead() {
+		return syscall.EBADF
+	}
+	return h.LoopbackFile.Setlk(ctx, owner, lk, flags)
+}
+
+func (h *trackedHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	if h.dead() {
+		return syscall.EBADF
+	}
+	return h.LoopbackFile.Setlkw(ctx, owner, lk, flags)
+}
+
+// PassthroughFd always reports "no passthrough fd", which disables FUSE
+// passthrough for every ShadowFS handle -- dead or alive.
+//
+// go-fuse turns passthrough on by itself for any FileHandle that exposes a
+// PassthroughFd once the kernel negotiates CAP_PASSTHROUGH, which it does here
+// because the daemon runs as root. It was never requested: this is a side
+// effect of embedding LoopbackFile. Passthrough then lets the kernel read and
+// write the backing file DIRECTLY, bypassing this daemon, and that is wrong for
+// ShadowFS twice over:
+//
+//  1. It defeats trackedHandle. Every read/write/lock below is guarded so a
+//     cascade-rolled-back epoch answers EBADF instead of serving stale data,
+//     and so I/O resolves against the epoch's own version. A kernel-side bypass
+//     skips all of it and reads whatever the backing fd number points at now --
+//     the same recycled-number hazard those guards exist to prevent.
+//
+//  2. It deadlocks the entire FUSE serve loop against the rollback invalidation.
+//     Registering the backing fd (rawBridge.Open -> addBackingID ->
+//     Server.RegisterBackingFd) takes go-fuse's Server.writeMu WHILE HOLDING the
+//     rawBridge mutex. The post-rollback dentry invalidation (notifyInvalidated
+//     -> Inode.NotifyEntry -> Server.writev) takes the SAME writeMu and then
+//     blocks in writev(/dev/fuse): the kernel cannot finish an INVAL_ENTRY
+//     notify until it takes the target dentry's dcache lock, which an in-flight
+//     FUSE request is holding -- and that request can never be answered, because
+//     answering it needs the rawBridge mutex and the writeMu this notify sits
+//     on. Captured live under the RQ3 rollback workload (SIGQUIT dump): the
+//     notify goroutine parked in unix.Writev holding writeMu, the Open handler
+//     parked on writeMu holding the rawBridge mutex, the Lookup handler parked
+//     on the rawBridge mutex, and the agent's `cat` stuck in D on the mount for
+//     good -- while the backend stayed healthy (checkpoint kept ticking), which
+//     is why the backend-only stall watchdog could not see it.
+//
+// EntryTimeout is 1s, so the invalidation notify is required for correctness
+// and cannot simply be dropped; removing passthrough is what breaks the cycle,
+// because with no backing-fd registration the serve loop never contends writeMu
+// and a notify that briefly stalls in the kernel no longer freezes lookups and
+// opens. This is the same call as DisableSplice below: turn off go-fuse
+// data-path shortcuts that can strand the whole filesystem mid-run. A useful
+// side effect is that root and non-root runs now behave identically -- without
+// CAP_PASSTHROUGH go-fuse already disables backing files, so tests never
+// exercised the path production did.
+func (h *trackedHandle) PassthroughFd() (int, bool) {
+	return -1, false
+}
+
 func (h *trackedHandle) Release(ctx context.Context) syscall.Errno {
-	// Unregister from backend so CloseEpochFDs won't double-close.
+	// Unregister first so a concurrent cascade rollback does not race for the
+	// same descriptor.
 	shadowBackend.UnregisterFD(h.epochID, h.tfd)
-	// Close via TrackedFD (idempotent). If rollback already closed it,
-	// this is a no-op.
-	_ = h.tfd.Close()
-	// The inner FileHandle (LoopbackFile) will also try syscall.Close
-	// on the raw fd, but since tfd.Close() already closed it, the
-	// second close returns EBADF which is silently ignored.
-	return h.LoopbackFile.Release(ctx)
+	// TrackedFD is the ONLY closer, and it is idempotent: when a cascade
+	// rollback already force-closed the descriptor this is a no-op.
+	//
+	// Delegating to LoopbackFile.Release would issue a SECOND syscall.Close on
+	// the same number, and that does not harmlessly fail with EBADF the way it
+	// was once assumed to. Between the two closes any other goroutine can open
+	// a file or accept a connection and be handed the very same number, so the
+	// stale close succeeds and destroys an unrelated descriptor. Observed in a
+	// live daemon under the RQ3 rollback workload as
+	//
+	//	[backend] Rollback WAL barrier failed: WAL barrier: fsync:
+	//	  .../staging/metadata/.shadow_wal: bad file descriptor
+	//
+	// on a descriptor opened microseconds earlier -- flushWALBarrier reopens
+	// the WAL on every rollback, so it is the most frequent taker of a freshly
+	// freed number. The other victims are the same kind of short-lived
+	// descriptor: an accepted control connection (whose handler then exits
+	// while its peer still waits, and whose own deferred Close strikes the
+	// recycled number again), and another epoch's stage or orig file, which
+	// surfaces to an agent as a spurious EIO on a path that exists.
+	//
+	// Note what this does NOT explain on its own: /dev/fuse is opened once at
+	// startup and never freed, so a stale close can never land on it. A daemon
+	// that stops logging entirely, from every goroutine, without panicking, is
+	// not accounted for by fd corruption alone.
+	if err := h.tfd.Close(); err != nil {
+		return fs.ToErrno(err)
+	}
+	return 0
 }
 
 // --- Path helpers ---

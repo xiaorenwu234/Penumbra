@@ -1,6 +1,17 @@
 #!/bin/bash
 # RQ3 性能实验启动脚本
 # 启动 ShadowFS + ShadowProc + Orchestrator，然后运行 RQ3 实验
+#
+# 用法: start_and_run.sh <workload> [该实验自己的参数...]
+#   all        run_all.py 的全部负载（默认）
+#   <name>     run_all.py 的单个负载
+#   dep        实验 B：dep_graph_scalability.py（依赖图形状 scaling）
+#   multi      实验 A：multi_agent_scaling.py（agent 数量 scaling）
+#   scaling    实验 A + 实验 B，依次跑完
+#   baseline   overlayfs + CRIU 对照实验（不需要守护进程）
+#   summarize  只汇总 results/ 下已有的 JSON（不需要守护进程）
+#
+# 例：sudo ./start_and_run.sh scaling --quick
 set -e
 
 PROJ="/home/xht/桌面/penumbra-work/RQ2/speculative_shadow"
@@ -10,6 +21,13 @@ EXP_RQ3="$PROJ/experiments/rq3"
 SHADOWFS_SOCK="/tmp/shadowfs.sock"
 SHADOWPROC_SOCK="/tmp/shadow_proc.sock"
 ORCH_SOCK="/tmp/shadow-orch.sock"
+
+# 守护进程 pidfile。framework/resources.py 按 env → pidfile → /proc cmdline
+# 的顺序发现 PID；实验进程本身拿到的是 env，pidfile 是给「守护进程还在、实验
+# 另开一个终端跑」的情况留的，也是 pkill 之外唯一可靠的回收依据。
+FS_PIDFILE="/var/tmp/shadowfs-rq3.pid"
+SP_PIDFILE="/var/tmp/shadowproc-rq3.pid"
+ORCH_PIDFILE="/var/tmp/orch-rq3.pid"
 
 # ShadowFS paths (与 RQ2 共用)
 BASE_DIR="/tmp/shadow-rq2-test"
@@ -24,6 +42,14 @@ echo "════════════════════════�
 # 解析参数
 WORKLOAD="${1:-all}"
 EXTRA_ARGS="${@:2}"
+
+# ─── summarize 分支：只读 results/ 下已有的 JSON ──────────────────────────────
+# 汇总不需要守护进程，也不应该因为 /tmp 里还挂着一个 FUSE 就跑不起来。
+if [ "$WORKLOAD" = "summarize" ]; then
+    cd "$EXP_RQ3"
+    python3 summarize_scaling.py $EXTRA_ARGS
+    exit $?
+fi
 
 # ─── baseline 分支：overlayfs + CRIU 对照实验 ─────────────────────────────────
 # 不需要 ShadowFS/ShadowProc/Orchestrator，完全独立运行；负载与 Penumbra 实验
@@ -65,6 +91,7 @@ pkill -9 -f shadow_orchestrator 2>/dev/null || true
 umount -l "$MNT_DIR" 2>/dev/null || true
 sleep 1
 rm -f "$SHADOWFS_SOCK" "$SHADOWPROC_SOCK" "$ORCH_SOCK"
+rm -f "$FS_PIDFILE" "$SP_PIDFILE" "$ORCH_PIDFILE"
 # 清理旧 journal：orchestrator 启动时会把整个 journal 读入内存做崩溃恢复。
 # 旧版记录的是每个 epoch 的全量 transcript（O(n²)），一次正式实验可达几十 GB，
 # 不清理会导致重启时 load 慢甚至二次 OOM。实验环境每次全新启动，无跨启动
@@ -98,6 +125,7 @@ sleep 2
 
 if kill -0 $FS_PID 2>/dev/null; then
     echo "  ShadowFS PID=$FS_PID OK"
+    echo "$FS_PID" > "$FS_PIDFILE"
 else
     echo "ERROR: ShadowFS 启动失败"
     cat /var/tmp/shadowfs-rq3.log
@@ -123,6 +151,7 @@ sleep 3
 
 if kill -0 $SP_PID 2>/dev/null; then
     echo "  ShadowProc PID=$SP_PID OK"
+    echo "$SP_PID" > "$SP_PIDFILE"
 else
     echo "ERROR: ShadowProc 启动失败"
     cat /var/tmp/shadowproc-rq3.log
@@ -143,6 +172,7 @@ sleep 2
 
 if kill -0 $ORCH_PID 2>/dev/null; then
     echo "  Orchestrator PID=$ORCH_PID OK"
+    echo "$ORCH_PID" > "$ORCH_PIDFILE"
 else
     echo "ERROR: Orchestrator 启动失败"
     cat /var/tmp/orch-rq3.log
@@ -185,16 +215,45 @@ export SHADOW_ORCH_SOCK="$ORCH_SOCK"
 export SHADOWFS_MNT="$MNT_DIR"
 export SHADOWFS_ORIG="$ORIG_DIR"
 export SHADOWFS_STAGING="$STAGING_DIR"
+# framework/resources.py 的第一发现路径。直接给 PID，避免它去扫 /proc 时
+# 把上一轮没清干净的同类进程当成当前守护进程。
+export SHADOW_FS_PID="$FS_PID"
+export SHADOW_PROC_PID="$SP_PID"
+export SHADOW_ORCH_PID="$ORCH_PID"
 
-# 支持 "dep" 或 "dep-graph" 参数运行依赖图扩展性实验
-if [ "$WORKLOAD" = "dep" ] || [ "$WORKLOAD" = "dep-graph" ]; then
-    echo "运行依赖图扩展性实验..."
+run_dep_graph() {
+    echo "运行实验 B：依赖图形状 scaling (dep_graph_scalability.py)..."
     python3 dep_graph_scalability.py $EXTRA_ARGS
-else
-    python3 run_all.py --workload "$WORKLOAD" --skip-build $EXTRA_ARGS
-fi
+}
 
-EXIT_CODE=$?
+run_multi_agent() {
+    echo "运行实验 A：multi-agent scaling (multi_agent_scaling.py)..."
+    python3 multi_agent_scaling.py $EXTRA_ARGS
+}
+
+EXIT_CODE=0
+case "$WORKLOAD" in
+    dep|dep-graph)
+        run_dep_graph || EXIT_CODE=$?
+        ;;
+    multi|multi-agent)
+        run_multi_agent || EXIT_CODE=$?
+        ;;
+    scaling)
+        # 两个实验共用同一批守护进程，但各自写自己的 results JSON。
+        # A 先跑：它的 agent 数轴短，能在 B 的一小时长跑之前先暴露环境问题。
+        run_multi_agent || EXIT_CODE=$?
+        if [ "$EXIT_CODE" -eq 0 ]; then
+            run_dep_graph || EXIT_CODE=$?
+        else
+            echo "实验 A 失败 (exit=$EXIT_CODE)，跳过实验 B"
+        fi
+        ;;
+    *)
+        python3 run_all.py --workload "$WORKLOAD" --skip-build $EXTRA_ARGS \
+            || EXIT_CODE=$?
+        ;;
+esac
 
 # ─── 清理 ─────────────────────────────────────────────────────────────────────
 echo ""
@@ -211,6 +270,7 @@ done
 # 不 wait（进程可能已被 SIGKILL，wait 可能卡住）
 umount -l "$MNT_DIR" 2>/dev/null || true
 rm -f "$SHADOWFS_SOCK" "$SHADOWPROC_SOCK" "$ORCH_SOCK"
+rm -f "$FS_PIDFILE" "$SP_PIDFILE" "$ORCH_PIDFILE"
 
 echo ""
 echo "══════════════════════════════════════════════════════════"

@@ -10,12 +10,67 @@ import json
 import os
 import socket
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .timing import Timer
 
 
 ORCH_SOCK = os.environ.get("SHADOW_ORCH_SOCK", "/tmp/shadow-orch.sock")
+
+
+# Cumulative graph-maintenance counters. These are the ONLY graph_stats fields
+# for which a difference is meaningful: the remaining fields are an
+# instantaneous shape (epochs/edges/scc_*) or a whole-process memory reading
+# (heap_*/sys_bytes), where the second sample is the value to report.
+GRAPH_COUNTER_KEYS = (
+    "edge_insertions", "edge_insert_ns",
+    "scc_computations", "scc_compute_ns",
+    "affected_queries", "affected_query_ns", "affected_nodes_total",
+    "prepare_calls", "prepare_ns",
+    "finalize_calls", "finalize_ns", "finalized_nodes_total",
+    "finalize_rejected_toctou",
+    "rollbacks", "rollback_ns", "rollback_nodes_total",
+)
+
+# Fields describing the live graph at the moment of the sample.
+GRAPH_SHAPE_KEYS = (
+    "epochs", "edges", "versions", "objects", "graph_generation",
+    "scc_count", "cyclic_scc_count", "max_scc_size", "active_groups",
+)
+
+# Whole-daemon memory, reported as-is from the later sample.
+GRAPH_MEMORY_KEYS = ("heap_alloc_bytes", "heap_inuse_bytes", "sys_bytes",
+                     "goroutines")
+
+
+def graph_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
+    """Attribute the graph work done between two snapshots to a phase.
+
+    Prefer this over graph_stats(reset=True): a delta needs no mutation of the
+    shared daemon, so a crashed or interrupted phase cannot leave the counters
+    zeroed for whoever runs next.
+
+    The returned dict carries three groups, so a results table can tell them
+    apart:
+      counters  after-before for every GRAPH_COUNTER_KEYS entry
+      shape     the AFTER value of the instantaneous fields, under `shape_*`
+      memory    the AFTER value of the daemon memory fields, under `mem_*`
+
+    Derived per-invocation figures (edges per invocation, nanoseconds per SCC
+    sweep) are deliberately NOT computed here: they need the invocation count,
+    which only the calling experiment knows. Dividing by a count this function
+    cannot see is how a scaling curve ends up quietly wrong.
+    """
+    out: Dict[str, Any] = {}
+    for key in GRAPH_COUNTER_KEYS:
+        a = before.get(key) or 0
+        b = after.get(key) or 0
+        out[key] = b - a
+    for key in GRAPH_SHAPE_KEYS:
+        out[f"shape_{key}"] = after.get(key)
+    for key in GRAPH_MEMORY_KEYS:
+        out[f"mem_{key}"] = after.get(key)
+    return out
 
 
 class OrchClient:
@@ -195,6 +250,68 @@ class OrchClient:
             "cgroup_id": cgroup_id,
         })
 
+    def graph_stats(self, reset: bool = False) -> Dict[str, Any]:
+        """Dependency-graph shape + cumulative maintenance counters.
+
+        Returns the `graph` object (see GRAPH_*_KEYS), or {} if the daemon does
+        not implement the action -- an older ShadowFS must degrade a column of
+        the results table, not abort a multi-hour experiment.
+
+        Sample OUTSIDE timed intervals: the snapshot runs a full Tarjan sweep
+        and runtime.ReadMemStats, which stops the Go world.
+        """
+        resp = self.request({"action": "graph_stats", "reset": bool(reset)})
+        if resp.get("status") != "ok":
+            return {}
+        return resp.get("graph") or {}
+
+    def epoch_states(self) -> List[Dict[str, Any]]:
+        """Per-epoch ShadowFS state: [{epoch_id, state, versions, cgroup_id}].
+
+        Needed because a contended commit can legitimately return
+        `authorized_pending` -- an SCC member that authorized before its
+        siblings -- and the experiment must then poll to the real outcome
+        instead of recording the first response as final.
+        """
+        resp = self.request({"action": "epoch_states"})
+        if resp.get("status") != "ok":
+            return []
+        return resp.get("epochs") or []
+
+    def wait_epochs_gone(self, epoch_ids: List[str], timeout: float = 60.0,
+                         interval: float = 0.02) -> Tuple[bool, int, List[str]]:
+        """Poll until every listed epoch has left the graph.
+
+        A committed epoch is finalized (edges dropped) and then acked (node
+        dropped), so "gone" is the observable end state of a successful commit;
+        a rolled-back epoch leaves the same way. Returns
+        (all_gone, elapsed_ns, states_seen) where states_seen is the last state
+        each epoch was observed in -- empty string once it has left.
+
+        This measures the DRAIN after publication: the gap between a commit
+        returning and the component actually leaving the graph, which is what a
+        later session opening the same files would have to wait out. It is not
+        the finalization wait itself -- that is measured by the caller retrying
+        an `authorized_pending` reply, because the orchestrator's own background
+        retry loop ticks every 2 s and would quantize any wait read through it
+        to that interval instead of to the size of the graph.
+        """
+        want = set(epoch_ids)
+        t0 = time.perf_counter_ns()
+        seen: Dict[str, str] = {e: "" for e in want}
+        deadline = time.perf_counter() + timeout
+        while True:
+            present = {e["epoch_id"]: e.get("state", "")
+                       for e in self.epoch_states() if e.get("epoch_id") in want}
+            for eid, st in present.items():
+                seen[eid] = st
+            if not present:
+                return True, time.perf_counter_ns() - t0, [seen[e] for e in epoch_ids]
+            if time.perf_counter() >= deadline:
+                return (False, time.perf_counter_ns() - t0,
+                        [seen.get(e) or present.get(e, "missing") for e in epoch_ids])
+            time.sleep(interval)
+
     # ─── Timed operations ─────────────────────────────────────────────────
 
     def timed_begin_epoch(self, session_id: str,
@@ -202,6 +319,17 @@ class OrchClient:
         """Begin epoch and return (response, elapsed_ns)."""
         with Timer() as t:
             resp = self.session_begin_epoch(session_id, agent_id)
+        return resp, t.elapsed_ns
+
+    def timed_open(self, agent_id: str = "rq3-bench") -> Tuple[Dict, int]:
+        """Open a session and return (response, elapsed_ns).
+
+        session_open creates the cgroup and forks the baseline shell, so under
+        agent scaling it is a real cost of admitting one more agent and has to
+        be reported separately from the per-invocation epoch begin.
+        """
+        with Timer() as t:
+            resp = self.session_open(agent_id)
         return resp, t.elapsed_ns
 
     def timed_run(self, session_id: str, command: str) -> Tuple[Dict, int]:

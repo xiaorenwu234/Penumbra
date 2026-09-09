@@ -216,3 +216,56 @@ func TestUnsupportedWALFormatRefused(t *testing.T) {
 		t.Fatal("unsupported WAL format must abort startup (fail closed)")
 	}
 }
+
+// TestGraphGenSurvivesCheckpointRestore pins the one counter the checkpoint used
+// to drop. b.graphGen is exported as a scalability metric AND is stored per
+// group inside ActiveGroups, but the backend's own counter was never serialized,
+// so after a recovery it came back as 0 while every restored group still named
+// its original generation. BeginFinalize no longer compares the two -- it
+// revalidates by SCC member set, which is why that asymmetry stopped being a
+// wedge -- but a metric that silently restarts from zero on every crash is not a
+// metric, and a snapshot that disagrees with itself is a trap for the next
+// caller that trusts it.
+func TestGraphGenSurvivesCheckpointRestore(t *testing.T) {
+	dir := t.TempDir()
+	orig := filepath.Join(dir, "orig")
+	staging := filepath.Join(dir, "staging")
+	if err := os.MkdirAll(orig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(orig, "f.txt")
+	if err := os.WriteFile(f, []byte("base"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b1, err := NewBackend(staging, orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b1.BeginEpoch("A", "/cg-a", "s-a"); err != nil {
+		t.Fatal(err)
+	}
+	sp, err := b1.PrepareWrite("A", f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sp, []byte("fa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := b1.BeginEpoch("B", "/cg-b", "s-b"); err != nil {
+		t.Fatal(err)
+	}
+	if r := b1.Resolve("B", f); r.Producer != "A" {
+		t.Fatal("setup: B must read A's version")
+	}
+	before := b1.GraphStatsSnapshot().GraphGeneration
+	if before == 0 {
+		t.Fatal("setup: graph_generation never moved, so a dropped counter would be indistinguishable")
+	}
+	b1.Close() // graceful: final checkpoint captures the full version graph
+
+	b2 := reopen(t, staging, orig)
+	if after := b2.GraphStatsSnapshot().GraphGeneration; after != before {
+		t.Fatalf("graph_generation across recovery = %d, want %d", after, before)
+	}
+}

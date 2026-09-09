@@ -1,0 +1,26 @@
+========================================================================
+  EXPERIMENT: exp4_dependency_propagation
+  Duration: 61.3s
+  Trials: 5 completed / 6 attempted (0 skipped, 1 infra_error)
+  Property checks: 6
+========================================================================
+
+  Property                        Violations        Rate                95% CI
+  ----------------------------  ------------  ----------  --------------------
+  rollback_set_mismatch                  0/5    0.000000  [0.000000, 0.521824]
+  downstream_not_rolled_back             0/0    0.000000  [0.000000, 1.000000]
+  unrelated_branch_affected              0/0    0.000000  [0.000000, 1.000000]
+  scc_partial_finalization               0/1    0.000000  [0.000000, 0.975000]
+  premature_downstream_release           0/0    0.000000  [0.000000, 1.000000]
+  dependency_edge_missing                0/0    0.000000  [0.000000, 1.000000]
+
+========================================================================
+
+  0 violations across 6 property checks in 5 completed trials
+
+  INFRASTRUCTURE ERRORS: 1
+    - InfrastructureError: 1
+      [dir-enumeration-0] [INFRA:orchestrator_session_run] timeout: command timed out: 'ls -1 /tmp/shadow-rq2-test/mnt/exp4/direnum-72142734-0 > /dev/null'
+
+  RESULT: INVALID RUN - infrastructure failed, the safety properties were NOT established
+========================================================================

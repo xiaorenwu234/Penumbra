@@ -126,13 +126,18 @@ class FakeProxy:
 
     def __init__(self, output="TRANSCRIPT"):
         self.calls = []
+        # proc_policy handed to each finalize_commit, in call order. Recorded
+        # separately from `calls` so a test can assert WHAT the process layer
+        # was released under, not merely that it was released.
+        self.commit_policies = []
         self._output = output
 
     def quiesce_for_commit(self, sid):
         self.calls.append("quiesce_for_commit")
 
-    def finalize_commit(self, sid):
+    def finalize_commit(self, sid, proc_policy=None):
         self.calls.append("finalize_commit")
+        self.commit_policies.append(proc_policy)
 
     def get_output(self, sid):
         self.calls.append("get_output")
@@ -238,6 +243,45 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
                         acts.index("begin_finalize"))
         self.assertLess(acts.index("begin_finalize"),
                         acts.index("ack_release_group"))
+
+    def test_authorized_policy_reaches_the_process_release(self):
+        """The policy the epoch was audited against MUST be forwarded to the
+        destructive process release.
+
+        finalize_commit resumes the candidate. A policy-less resume makes
+        ShadowProc transition the cgroup to ENFORCED + allow-all, so every
+        effect the epoch was NOT authorized for escapes on resume (regression:
+        a session epoch resolved with "filesystem ops only" let its fenced
+        NETWORK/CONNECT out, because the session commit path dropped
+        proc_policy while the sibling path forwarded it).
+        """
+        proxy = FakeProxy(output="OUT")
+
+        def fs(req):
+            a = req["action"]
+            if a == "prepare_resolution":
+                return {"status": "ok", "group_id": 1,
+                        "members": ["epoch-1"], "graph_generation": 1}
+            if a in ("begin_finalize", "get_finalize_status"):
+                return {"status": "ok", "state": "finalized"}
+            return {"status": "ok"}
+
+        orch = _session_orch(proxy, fs)
+        # FILESYSTEM/WRITE only -- deliberately NOT a wildcard, so an allow-all
+        # fallback is distinguishable from the authorized policy.
+        allowed = [{"event_type": "WRITE", "action": "allow",
+                    "path_pattern": "/"}]
+        resp = orch.session_commit_epoch("sid1", allowed_ops=allowed)
+
+        self.assertEqual(resp["status"], "ok")
+        self.assertEqual(proxy.commit_policies, [
+            PolicyIR.from_allowed_ops(allowed).to_proc_policy()])
+        classes = {(c["effect_class"], c["operation"])
+                   for c in proxy.commit_policies[0]["classes"]}
+        # NETWORK/CONNECT (class 2, op 1) is absent => default-deny in
+        # MODE_ENFORCED, which is what makes the fenced connect return EPERM.
+        self.assertNotIn((2, 1), classes)
+        self.assertTrue(classes, "the authorized policy must not be empty")
 
     def test_fs_failure_preserves_baseline(self):
         """prepare_resolution fail => quiesce ran but finalize_commit NEVER

@@ -1,0 +1,835 @@
+{
+  "experiment": "exp4_dependency_propagation",
+  "duration_seconds": 40.84,
+  "start_time": 1788843306.6508443,
+  "end_time": 1788843347.4897885,
+  "metadata": {
+    "orch_sock": "/tmp/shadow-orch.sock",
+    "shadowfs_mount": "/tmp/shadow-rq2-test/mnt",
+    "backing_store": "/tmp/shadow-rq2-test/orig",
+    "repeats": 1,
+    "run_id": "43306650"
+  },
+  "attempted_trials": 10,
+  "completed_trials": 10,
+  "skipped_trials": 0,
+  "infra_error_trials": 0,
+  "infrastructure_errors": 0,
+  "property_checks": 67,
+  "violations": 0,
+  "has_infra_errors": false,
+  "exit_code": 0,
+  "counters": {
+    "rollback_set_mismatch": {
+      "count": 0,
+      "total": 7,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.4096163972250032
+      ],
+      "details": []
+    },
+    "downstream_not_rolled_back": {
+      "count": 0,
+      "total": 22,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.15437251281557435
+      ],
+      "details": []
+    },
+    "unrelated_branch_affected": {
+      "count": 0,
+      "total": 29,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.11944486906950263
+      ],
+      "details": []
+    },
+    "scc_partial_finalization": {
+      "count": 0,
+      "total": 2,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.8418861169915808
+      ],
+      "details": []
+    },
+    "premature_downstream_release": {
+      "count": 0,
+      "total": 2,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.8418861169915808
+      ],
+      "details": []
+    },
+    "dependency_edge_missing": {
+      "count": 0,
+      "total": 4,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.6023646356164742
+      ],
+      "details": []
+    },
+    "absence_rollback_restores": {
+      "count": 0,
+      "total": 1,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.9749999999999999
+      ],
+      "details": []
+    }
+  },
+  "empty_counters": [],
+  "infra_errors": [],
+  "trials": [
+    {
+      "trial_id": "chain-topology-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "chain trial=0: B not in cascade of A",
+          "meta": {
+            "topology": "chain",
+            "trial": 0,
+            "node": "B",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "chain trial=0: C not in cascade of A",
+          "meta": {
+            "topology": "chain",
+            "trial": 0,
+            "node": "C",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "chain trial=0: C not in cascade of B",
+          "meta": {
+            "topology": "chain",
+            "trial": 0,
+            "node": "C",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "chain trial=0: unrelated A in cascade of B",
+          "meta": {
+            "topology": "chain",
+            "trial": 0,
+            "node": "A",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "chain trial=0: unrelated A in cascade of C",
+          "meta": {
+            "topology": "chain",
+            "trial": 0,
+            "node": "A",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "chain trial=0: unrelated B in cascade of C",
+          "meta": {
+            "topology": "chain",
+            "trial": 0,
+            "node": "B",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "chain trial=0 mismatch=False",
+          "meta": {
+            "topology": "chain",
+            "trial": 0
+          }
+        }
+      ],
+      "scenario": "topology_chain"
+    },
+    {
+      "trial_id": "fanout-topology-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "fanout trial=0: B not in cascade of A",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "B",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "fanout trial=0: C not in cascade of A",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "C",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "fanout trial=0: D not in cascade of A",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "D",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "fanout trial=0: unrelated A in cascade of B",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "A",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "fanout trial=0: unrelated C in cascade of B",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "C",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "fanout trial=0: unrelated D in cascade of B",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "D",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "fanout trial=0: unrelated A in cascade of C",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "A",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "fanout trial=0: unrelated B in cascade of C",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "B",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "fanout trial=0: unrelated D in cascade of C",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "D",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "fanout trial=0: unrelated A in cascade of D",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "A",
+            "reject": "D"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "fanout trial=0: unrelated B in cascade of D",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "B",
+            "reject": "D"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "fanout trial=0: unrelated C in cascade of D",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0,
+            "node": "C",
+            "reject": "D"
+          }
+        },
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "fanout trial=0 mismatch=False",
+          "meta": {
+            "topology": "fanout",
+            "trial": 0
+          }
+        }
+      ],
+      "scenario": "topology_fanout"
+    },
+    {
+      "trial_id": "diamond-topology-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "diamond trial=0: B not in cascade of A",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "B",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "diamond trial=0: C not in cascade of A",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "C",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "diamond trial=0: D not in cascade of A",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "D",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "diamond trial=0: D not in cascade of B",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "D",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "diamond trial=0: unrelated A in cascade of B",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "A",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "diamond trial=0: unrelated C in cascade of B",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "C",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "diamond trial=0: D not in cascade of C",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "D",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "diamond trial=0: unrelated A in cascade of C",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "A",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "diamond trial=0: unrelated B in cascade of C",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "B",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "diamond trial=0: unrelated A in cascade of D",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "A",
+            "reject": "D"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "diamond trial=0: unrelated B in cascade of D",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "B",
+            "reject": "D"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "diamond trial=0: unrelated C in cascade of D",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0,
+            "node": "C",
+            "reject": "D"
+          }
+        },
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "diamond trial=0 mismatch=False",
+          "meta": {
+            "topology": "diamond",
+            "trial": 0
+          }
+        }
+      ],
+      "scenario": "topology_diamond"
+    },
+    {
+      "trial_id": "independent-topology-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "independent trial=0: B not in cascade of A",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "B",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "independent trial=0: unrelated C in cascade of A",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "C",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "independent trial=0: unrelated D in cascade of A",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "D",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "independent trial=0: unrelated A in cascade of B",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "A",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "independent trial=0: unrelated C in cascade of B",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "C",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "independent trial=0: unrelated D in cascade of B",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "D",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "independent trial=0: D not in cascade of C",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "D",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "independent trial=0: unrelated A in cascade of C",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "A",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "independent trial=0: unrelated B in cascade of C",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "B",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "independent trial=0: unrelated A in cascade of D",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "A",
+            "reject": "D"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "independent trial=0: unrelated B in cascade of D",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "B",
+            "reject": "D"
+          }
+        },
+        {
+          "property": "unrelated_branch_affected",
+          "passed": true,
+          "detail": "independent trial=0: unrelated C in cascade of D",
+          "meta": {
+            "topology": "independent",
+            "trial": 0,
+            "node": "C",
+            "reject": "D"
+          }
+        },
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "independent trial=0 mismatch=False",
+          "meta": {
+            "topology": "independent",
+            "trial": 0
+          }
+        }
+      ],
+      "scenario": "topology_independent"
+    },
+    {
+      "trial_id": "scc-topology-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "scc trial=0: A not in cascade of A",
+          "meta": {
+            "topology": "scc",
+            "trial": 0,
+            "node": "A",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "scc trial=0: B not in cascade of A",
+          "meta": {
+            "topology": "scc",
+            "trial": 0,
+            "node": "B",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "scc trial=0: C not in cascade of A",
+          "meta": {
+            "topology": "scc",
+            "trial": 0,
+            "node": "C",
+            "reject": "A"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "scc trial=0: A not in cascade of B",
+          "meta": {
+            "topology": "scc",
+            "trial": 0,
+            "node": "A",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "scc trial=0: B not in cascade of B",
+          "meta": {
+            "topology": "scc",
+            "trial": 0,
+            "node": "B",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "scc trial=0: C not in cascade of B",
+          "meta": {
+            "topology": "scc",
+            "trial": 0,
+            "node": "C",
+            "reject": "B"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "scc trial=0: A not in cascade of C",
+          "meta": {
+            "topology": "scc",
+            "trial": 0,
+            "node": "A",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "scc trial=0: B not in cascade of C",
+          "meta": {
+            "topology": "scc",
+            "trial": 0,
+            "node": "B",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "downstream_not_rolled_back",
+          "passed": true,
+          "detail": "scc trial=0: C not in cascade of C",
+          "meta": {
+            "topology": "scc",
+            "trial": 0,
+            "node": "C",
+            "reject": "C"
+          }
+        },
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "scc trial=0 mismatch=False",
+          "meta": {
+            "topology": "scc",
+            "trial": 0
+          }
+        },
+        {
+          "property": "scc_partial_finalization",
+          "passed": true,
+          "detail": "scc trial=0 partial=False",
+          "meta": {
+            "topology": "scc",
+            "trial": 0
+          }
+        }
+      ],
+      "scenario": "topology_scc"
+    },
+    {
+      "trial_id": "dir-enumeration-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dependency_edge_missing",
+          "passed": true,
+          "detail": "observed=['C', 'P'] expected=['C', 'P']"
+        },
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "observed=['C', 'P']"
+        }
+      ],
+      "scenario": "dep_directory_enumeration"
+    },
+    {
+      "trial_id": "absence-lookup-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dependency_edge_missing",
+          "passed": true,
+          "detail": "observed=['C', 'P']"
+        },
+        {
+          "property": "absence_rollback_restores",
+          "passed": true,
+          "detail": "backing exists=True"
+        }
+      ],
+      "scenario": "dep_absence_negative_lookup"
+    },
+    {
+      "trial_id": "overwrite-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dependency_edge_missing",
+          "passed": true,
+          "detail": "observed=['C', 'P']"
+        },
+        {
+          "property": "rollback_set_mismatch",
+          "passed": true,
+          "detail": "observed=['C', 'P']"
+        }
+      ],
+      "scenario": "dep_overwrite"
+    },
+    {
+      "trial_id": "predecessor-finalization-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dependency_edge_missing",
+          "passed": true,
+          "detail": "observed=['A', 'B']"
+        },
+        {
+          "property": "premature_downstream_release",
+          "passed": true,
+          "detail": "B published independently=False"
+        }
+      ],
+      "scenario": "dep_predecessor_finalization"
+    },
+    {
+      "trial_id": "scc-group-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "scc_partial_finalization",
+          "passed": true,
+          "detail": "partial=False"
+        },
+        {
+          "property": "premature_downstream_release",
+          "passed": true,
+          "detail": "published after group deny=[]"
+        }
+      ],
+      "scenario": "dep_scc_group"
+    }
+  ],
+  "trials_truncated": false,
+  "total_trials": 10
+}

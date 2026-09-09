@@ -1,0 +1,33 @@
+========================================================================
+  EXPERIMENT: exp1_effect_coverage
+  Duration: 89.5s
+  Trials: 2470 completed / 2470 attempted (0 skipped, 0 infra_error)
+  Property checks: 2500
+========================================================================
+
+  Property                    Violations        Rate                95% CI
+  ------------------------  ------------  ----------  --------------------
+  escaped_before_auth              0/380    0.000000  [0.000000, 0.009661]
+  incorrectly_allowed             0/1360    0.000000  [0.000000, 0.002709]
+  incorrectly_denied               9/470    0.019149  [0.008793, 0.036038]
+  duplicated_after_restart          0/10    0.000000  [0.000000, 0.308497]
+  missing_audit_events             0/260    0.000000  [0.000000, 0.014088]
+  effect_not_observed               0/20    0.000000  [0.000000, 0.168433]
+
+========================================================================
+
+  9 violations across 2500 property checks in 2470 completed trials
+
+  VIOLATIONS DETECTED: 9
+
+  incorrectly_denied (9 violations):
+    - out_splice trial=1: denied despite allow policy (ret=0 errno=1)
+    - out_splice trial=2: denied despite allow policy (ret=0 errno=1)
+    - out_splice trial=3: denied despite allow policy (ret=0 errno=1)
+    - out_splice trial=4: denied despite allow policy (ret=0 errno=1)
+    - out_splice trial=5: denied despite allow policy (ret=0 errno=1)
+    - out_splice trial=6: denied despite allow policy (ret=0 errno=1)
+    - out_splice trial=7: denied despite allow policy (ret=0 errno=1)
+    - out_splice trial=8: denied despite allow policy (ret=0 errno=1)
+    - out_splice trial=9: denied despite allow policy (ret=0 errno=1)
+========================================================================
