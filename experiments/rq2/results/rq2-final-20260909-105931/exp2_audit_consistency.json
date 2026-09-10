@@ -1,0 +1,1020 @@
+{
+  "experiment": "exp2_audit_consistency",
+  "duration_seconds": 107.67,
+  "start_time": 1788922872.5320702,
+  "end_time": 1788922980.1989386,
+  "metadata": {
+    "orch_sock": "/tmp/shadow-orch.sock",
+    "shadowfs_mount": "/tmp/shadow-rq2-test/mnt",
+    "backing_store": "/tmp/shadow-rq2-test/orig",
+    "repeats": 10,
+    "run_id": "22872532"
+  },
+  "attempted_trials": 60,
+  "completed_trials": 60,
+  "skipped_trials": 0,
+  "infra_error_trials": 0,
+  "infrastructure_errors": 0,
+  "property_checks": 100,
+  "violations": 0,
+  "has_infra_errors": false,
+  "exit_code": 0,
+  "counters": {
+    "allowed_write_committed": {
+      "count": 0,
+      "total": 10,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.3084971078187607
+      ],
+      "details": []
+    },
+    "disallowed_write_rejected": {
+      "count": 0,
+      "total": 10,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.3084971078187607
+      ],
+      "details": []
+    },
+    "backing_store_unchanged": {
+      "count": 0,
+      "total": 10,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.3084971078187607
+      ],
+      "details": []
+    },
+    "history_passed_audit": {
+      "count": 0,
+      "total": 10,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.3084971078187607
+      ],
+      "details": []
+    },
+    "future_connect_denied": {
+      "count": 0,
+      "total": 20,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.1684334709830852
+      ],
+      "details": []
+    },
+    "receiver_saw_no_connection": {
+      "count": 0,
+      "total": 20,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.1684334709830852
+      ],
+      "details": []
+    },
+    "dual_path_rollback_complete": {
+      "count": 0,
+      "total": 20,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.1684334709830852
+      ],
+      "details": []
+    }
+  },
+  "empty_counters": [],
+  "infra_errors": [],
+  "trials": [
+    {
+      "trial_id": "hist-write-allowed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-allowed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-allowed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-allowed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-allowed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-allowed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-allowed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-allowed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-allowed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-allowed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "allowed_write_committed",
+          "passed": true,
+          "detail": "resolved=allow committed=True violations=0"
+        }
+      ],
+      "scenario": "allow_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "hist-write-rejected-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "disallowed_write_rejected",
+          "passed": true,
+          "detail": "resolved=deny audit_rejected=True violations=2"
+        },
+        {
+          "property": "backing_store_unchanged",
+          "passed": true,
+          "detail": "backing exists=False"
+        }
+      ],
+      "scenario": "reject_history"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/33789: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/38601: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/45245: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/33157: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/35021: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/40859: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/41409: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/33877: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/44437: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "allow-hist-deny-future-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "history_passed_audit",
+          "passed": true,
+          "detail": "resolved=allow violations=0 backing=True"
+        },
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/41873: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0 bytes=0"
+        }
+      ],
+      "scenario": "allow_history_deny_future"
+    },
+    {
+      "trial_id": "future-connect-denied-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/44377: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "future-connect-denied-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/33299: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "future-connect-denied-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/33455: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "future-connect-denied-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/38841: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "future-connect-denied-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/45175: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "future-connect-denied-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/39835: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "future-connect-denied-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/43051: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "future-connect-denied-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/45731: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "future-connect-denied-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/42625: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "future-connect-denied-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "future_connect_denied",
+          "passed": true,
+          "detail": "output='bash: connect: 不允许的操作\\nbash: 行 1: /dev/tcp/127.0.0.1/34837: 不允许的操作\\nCONNECT_DENIED'"
+        },
+        {
+          "property": "receiver_saw_no_connection",
+          "passed": true,
+          "detail": "connections=0"
+        }
+      ],
+      "scenario": "deny_future_connect"
+    },
+    {
+      "trial_id": "dual-path-rename-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-rename-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-rename-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-rename-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-rename-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-rename-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-rename-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-rename-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-rename-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-rename-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "src_restored=True dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_rename"
+    },
+    {
+      "trial_id": "dual-path-hardlink-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    },
+    {
+      "trial_id": "dual-path-hardlink-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    },
+    {
+      "trial_id": "dual-path-hardlink-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    },
+    {
+      "trial_id": "dual-path-hardlink-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    },
+    {
+      "trial_id": "dual-path-hardlink-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    },
+    {
+      "trial_id": "dual-path-hardlink-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    },
+    {
+      "trial_id": "dual-path-hardlink-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    },
+    {
+      "trial_id": "dual-path-hardlink-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    },
+    {
+      "trial_id": "dual-path-hardlink-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    },
+    {
+      "trial_id": "dual-path-hardlink-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "dual_path_rollback_complete",
+          "passed": true,
+          "detail": "nlink 1->1 dst_removed=True"
+        }
+      ],
+      "scenario": "dual_path_hardlink"
+    }
+  ],
+  "trials_truncated": false,
+  "total_trials": 60
+}

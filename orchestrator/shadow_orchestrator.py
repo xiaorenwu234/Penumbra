@@ -923,6 +923,48 @@ class ShadowOrchestrator:
         except Exception as e:  # noqa: BLE001
             log.warning("  cancel_group(%s) failed: %s", group_id, e)
 
+    # A concurrent SCC member's group commit publishes the WHOLE component: it
+    # finalizes every member's epoch, commits every member's candidate
+    # (commit_by_cgroup) and acks the group (dropping every member's terminal
+    # record). A member whose own commit races behind that finds its epoch
+    # already finalized/gone. That is SUCCESS -- the atomic publication it was
+    # waiting for happened -- not a failure. These markers recognize exactly
+    # that and nothing else; a genuine vanished/rolled-back epoch still errors.
+    _EPOCH_PUBLISHED_MARKERS = ("already finalized", "already finalizing")
+
+    def _sibling_published_epoch(self, epoch_id: Optional[str], message) -> bool:
+        """True iff ShadowFS reports this epoch was already published by a
+        concurrent sibling's group commit (finalized, or finalized then acked).
+
+        "already finalized"/"already finalizing" is definitive: the epoch reached
+        a terminal published state. "not found" is ambiguous -- the epoch left
+        the graph either because a sibling's group ack dropped it AFTER
+        publishing (success) or because it never existed / was rolled back
+        (genuine error) -- so it counts as published ONLY when our own released
+        record proves it (a rolled-back epoch is popped from _epoch_results).
+        """
+        msg = str(message)
+        if any(m in msg for m in self._EPOCH_PUBLISHED_MARKERS):
+            return True
+        if "not found" in msg and epoch_id:
+            results = getattr(self, "_epoch_results", {})
+            return bool(results.get(epoch_id, {}).get("released"))
+        return False
+
+    def _published_by_sibling_result(self, epoch_id, cgroup_id, message) -> dict:
+        """A SUCCESS fs_result marking that a concurrent sibling's group commit
+        already published this member. The caller skips its own destructive
+        release/ack (the winner committed this candidate and acked the group)
+        and clears only the local session/proxy state."""
+        log.info("  prepare_resolution: epoch=%s already published by a "
+                 "concurrent sibling group commit (%s) -- treating as finalized",
+                 epoch_id, message)
+        return {"status": "ok", "state": "finalized",
+                "published_by_sibling": True, "group_id": 0, "members": [],
+                "graph_generation": 0, "member_cgroups": [],
+                "member_policies": {},
+                "message": f"already published by concurrent sibling: {message}"}
+
     def _fs_group_finalize(self, epoch_id: str, cgroup_id: str,
                            proc_policy: Optional[Dict] = None,
                            pre_frozen_cgroup: Optional[str] = None,
@@ -1019,8 +1061,16 @@ class ShadowOrchestrator:
                 prep = self.fs_client.request(prep_req)
                 tm["fs_prepare_resolution_ms"] = _ms_since(_t_prep)
             except Exception as e:  # noqa: BLE001
+                if self._sibling_published_epoch(epoch_id, e):
+                    return self._published_by_sibling_result(epoch_id, cgroup_id, e)
                 return {"status": "error", "message": f"prepare_resolution: {e}"}
             if prep.get("status") != "ok":
+                # A concurrent sibling's group commit may have finalized (and
+                # acked) this SCC between our authorize and prepare_resolution.
+                # That is the atomic publication succeeding, not an error.
+                if self._sibling_published_epoch(epoch_id, prep.get("message", "")):
+                    return self._published_by_sibling_result(
+                        epoch_id, cgroup_id, prep.get("message", ""))
                 return prep
 
             group_id = prep["group_id"]
@@ -1109,14 +1159,22 @@ class ShadowOrchestrator:
                       file=sys.stderr, flush=True)
 
             # ShadowFS's internal async state machine (epoch transitions,
-            # FUSE attribution) can advance graph_generation outside the
-            # orchestrator's control. If begin_finalize reports a mismatch,
-            # re-read the graph state and retry ONCE with the fresh gen.
+            # FUSE attribution) can change a group's SCC membership outside the
+            # orchestrator's control. begin_finalize then refuses with the
+            # structured code "toctou_reprepare"; re-read the graph state and
+            # retry ONCE with the fresh gen. Branch on err_code (the stable
+            # contract), NOT the message wording. The legacy substring checks
+            # remain only as a fallback for an out-of-date ShadowFS daemon that
+            # predates err_code -- matching on them alone is what silently died
+            # when the backend reworded its refusal, wedging publication.
             # This is NOT a race in orchestrator code — the lock correctly
             # serializes all orchestrator-initiated operations. This handles
             # ShadowFS's eventual-consistency internal updates.
             fin_msg = fin.get("message", "") if isinstance(fin, dict) else ""
-            if "graph_generation mismatch" in fin_msg:
+            fin_code = fin.get("err_code", "") if isinstance(fin, dict) else ""
+            if (fin_code == "toctou_reprepare"
+                    or "re-prepare required" in fin_msg
+                    or "graph_generation mismatch" in fin_msg):
                 log.info("  begin_finalize: mismatch (ShadowFS internal async) "
                          "— re-preparing with fresh graph state")
                 # Counted, not just logged: this is the orchestrator-visible
@@ -2765,6 +2823,30 @@ class ShadowOrchestrator:
                 log.error("  ShadowFS group finalize failed: %s -- baseline "
                           "preserved", fs_result.get("message"))
                 return fs_result
+            if fs_result.get("published_by_sibling"):
+                # A concurrent sibling's group commit already published this
+                # member: it finalized this epoch, committed this candidate
+                # (commit_by_cgroup) and acked the group. Re-running our own
+                # destructive release would fail on the already-committed
+                # candidate and skip the ack, leaving the finalized epoch to
+                # linger in the graph (the D7 drain timeout). Skip it: clear only
+                # the local session/proxy state and report the success it is.
+                log.info("  epoch=%s published by a concurrent sibling group "
+                         "commit -- successful no-op (skip release/ack)", epoch_id)
+                self._journal.append("commit_done", durable=False,
+                                     sid=session_id, cgroup=cgroup_id)
+                try:
+                    proxy.discard_committed_epoch(session_id)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("  discard_committed_epoch(%s) failed: %s",
+                                session_id, e)
+                with self._sessions_lock:
+                    self._session_epochs.pop(session_id, None)
+                self._recovered_outputs.pop(session_id, None)
+                return {"status": "ok", "state": "finalized",
+                        "decision": "published", "released": True,
+                        "published_by_sibling": True, "output": "",
+                        "message": fs_result.get("message", "")}
             if fs_result.get("state") != "finalized":
                 self._park_pending_group(fs_result.get("group_id", 0),
                                          fs_result.get("members", []),

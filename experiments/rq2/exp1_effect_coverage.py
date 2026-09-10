@@ -117,6 +117,15 @@ FUSE_ENFORCED_EFFECTS = {
     "fs_read",
 }
 
+# ─── Probes whose return value is a transferred byte count ─────────────────
+# For these, ret > 0 is direct evidence that the effect actually happened.
+# "No EPERM" is not enough: out_splice returned 0 -- a legal EOF on an empty
+# pipe, because its own setup write had been denied -- while errno still held
+# the residual EPERM, which an errno-only check misread as the splice itself
+# being denied. Without a byte-count oracle the corrected check would pass
+# while the effect never occurred, i.e. a hollow green.
+TRANSFER_BYTE_PROBES = ("out_splice", "out_sendfile")
+
 # ─── Effect matrix: (probe_name, event_name, class, op, endpoint, bucket) ───
 
 EFFECT_MATRIX = [
@@ -562,7 +571,12 @@ class Experiment1:
                 result = self.runner.run_probe(probe_name, cg_path, args=args)
 
                 # ── Primary check: BPF must not deny ──
-                incorrectly_denied = (result.errno == errno.EPERM)
+                # A denial is ret < 0 carrying EPERM. errno alone is not a
+                # verdict: it is thread-local residue that a successful syscall
+                # does not clear, so a probe whose *setup* was denied used to
+                # report the syscall under test as denied.
+                incorrectly_denied = (result.ret < 0
+                                      and result.errno == errno.EPERM)
                 self.metrics.record(
                     "incorrectly_denied", incorrectly_denied,
                     f"{probe_name} trial={trial}: denied despite allow policy "
@@ -597,6 +611,19 @@ class Experiment1:
                             f"errno={result.errno})",
                             {"probe": probe_name, "scenario": "allow",
                              "trial": trial})
+
+                elif probe_name in TRANSFER_BYTE_PROBES and not incorrectly_denied:
+                    # Byte-count oracle: splice/sendfile return how many bytes
+                    # they moved, so ret > 0 is the only evidence the effect
+                    # happened. Both outcomes are recorded so this counter's
+                    # denominator stays honest.
+                    transferred = result.ret > 0
+                    self.metrics.record(
+                        "effect_not_observed", not transferred,
+                        f"{probe_name} trial={trial}: allowed and transferred "
+                        f"{result.ret} byte(s) (errno={result.errno})",
+                        {"probe": probe_name, "scenario": "allow",
+                         "trial": trial})
 
                 # Check for duplication: verify effect occurred exactly once
                 # For fs probes, check file content appears exactly once
@@ -923,8 +950,11 @@ class Experiment1:
 
                 result = self.runner.wait_result(proc, probe_name, timeout=5.0)
 
-                # Should NOT be EPERM (endpoint is allowed)
-                incorrectly_denied = (result.errno == errno.EPERM)
+                # Should NOT be EPERM (endpoint is allowed). ret < 0 is
+                # required: errno is residue from an earlier failed syscall,
+                # not proof that this one was denied.
+                incorrectly_denied = (result.ret < 0
+                                      and result.errno == errno.EPERM)
                 self.metrics.record(
                     "incorrectly_denied", incorrectly_denied,
                     f"{probe_name} trial={trial}: allowed endpoint denied "
@@ -1103,8 +1133,10 @@ class Experiment1:
                     continue
 
                 result = self.runner.wait_result(proc, "sig_kill", timeout=3.0)
-                # Should NOT be EPERM (target B is allowed)
-                incorrectly_denied = (result.errno == errno.EPERM)
+                # Should NOT be EPERM (target B is allowed). ret < 0 is
+                # required: errno is residue, not proof this kill was denied.
+                incorrectly_denied = (result.ret < 0
+                                      and result.errno == errno.EPERM)
                 self.metrics.record(
                     "incorrectly_denied", incorrectly_denied,
                     f"sig_kill trial={trial}: allowed target denied "

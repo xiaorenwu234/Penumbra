@@ -36,6 +36,7 @@ ShadowObserve/third_party/
 # ===== Experiments (RQ3 baseline) =====
 experiments/rq3/third_party/criu-4.2.1/
 experiments/rq3/third_party/*.tar.gz
+experiments/rq2/probes/bin
 
 # ===== Build cache =====
 tmp/

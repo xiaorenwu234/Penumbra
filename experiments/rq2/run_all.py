@@ -105,16 +105,38 @@ def check_prerequisites():
     probes_bin = os.path.join(EXPERIMENTS_DIR, "probes", "bin")
     if not os.path.isdir(probes_bin):
         errors.append(f"Probe binaries not found: {probes_bin} (run 'make' first)")
+    else:
+        # WAIT_GO() lives in common.h, so a binary older than the header speaks
+        # an outdated handshake: the harness would block READY_TIMEOUT on every
+        # trial and then treat each result as race-dependent. Fail loudly here,
+        # because start_and_run.sh passes --skip-build and nothing else would
+        # notice a stale probes/bin.
+        common_h = os.path.join(EXPERIMENTS_DIR, "probes", "common.h")
+        if os.path.exists(common_h):
+            h_mtime = os.path.getmtime(common_h)
+            stale = sorted(
+                b for b in os.listdir(probes_bin)
+                if os.path.getmtime(os.path.join(probes_bin, b)) < h_mtime)
+            if stale:
+                shown = ", ".join(stale[:5]) + (" ..." if len(stale) > 5 else "")
+                errors.append(
+                    f"{len(stale)} probe binary(ies) older than probes/common.h "
+                    f"({shown}). Rebuild with: make -C {EXPERIMENTS_DIR} all")
 
     return errors
 
 
 def build_probes():
-    """Compile probe programs."""
+    """Compile probe programs.
+
+    make has to run with EXPERIMENTS_DIR as its cwd: every path in the Makefile
+    is written as probes/x.c, so the previous `-C probes` form went looking for
+    probes/probes/x.c and failed -- silently, because the recipe sends stderr to
+    /dev/null and finishes with an `echo` that exits 0.
+    """
     print("[build] Compiling probe programs ...")
     result = subprocess.run(
-        ["make", "-C", os.path.join(EXPERIMENTS_DIR, "probes"), "-f",
-         os.path.join(EXPERIMENTS_DIR, "Makefile"), "all"],
+        ["make", "-f", "Makefile", "all"],
         capture_output=True, text=True, cwd=EXPERIMENTS_DIR)
     if result.returncode != 0:
         print(f"[build] WARNING: make returned {result.returncode}")

@@ -8,6 +8,7 @@ results (ret/errno output).
 
 import os
 import re
+import select
 import subprocess
 import sys
 import time
@@ -53,14 +54,29 @@ class ProbeResult:
 class ProbeRunner:
     """Manages probe process lifecycle and synchronization.
 
-    Protocol (matches test_kernel_effect_decisions.py):
-      1. Create a pipe (read_fd, write_fd)
-      2. Spawn probe with SHADOW_GO_FD=read_fd in environment
-      3. Place probe PID into the monitored cgroup
-      4. Write a byte to write_fd to signal "go"
-      5. Probe executes its syscall and prints "ret=N errno=M"
-      6. Collect output and exit status
+    Protocol (two-step handshake; see WAIT_GO() in probes/common.h):
+      1. Create two pipes: go (harness->probe) and ready (probe->harness)
+      2. Spawn probe with SHADOW_GO_FD and SHADOW_READY_FD in environment
+      3. Probe performs its setup, then writes one byte to SHADOW_READY_FD
+      4. Harness reads that byte, and only NOW places the PID into the
+         monitored cgroup
+      5. Harness writes a byte to the go pipe to signal "go"
+      6. Probe executes its syscall and prints "ret=N errno=M"
+      7. Collect output and exit status
+
+    The ordering of steps 3 and 4 is the whole point. Joining the cgroup
+    before the probe has finished its setup makes "was this setup syscall
+    governed by the policy under test?" depend on a race, which is exactly how
+    out_splice came to pass on repeat 0 and fail on repeats 1..9.
+
+    Both environment variables are optional, so callers that spawn probes
+    themselves (exp5's fork storm, orchestrator/test_kernel_effect_decisions.py)
+    keep working unchanged -- they simply do not take part in the handshake.
     """
+
+    # Hang guard for the setup announcement, not a throttle: a probe only runs
+    # a handful of syscalls before announcing.
+    READY_TIMEOUT = 10.0
 
     def __init__(self, probes_dir: str = None, timeout: float = 3.0):
         self.probes_dir = probes_dir or PROBES_DIR
@@ -85,20 +101,24 @@ class ProbeRunner:
               args: List[str] = None) -> Tuple[subprocess.Popen, int]:
         """Spawn a probe and place it in the cgroup. Returns (process, go_write_fd).
 
-        The probe blocks reading from SHADOW_GO_FD until the caller writes a byte.
+        The probe performs its setup, announces completion on SHADOW_READY_FD,
+        then blocks reading SHADOW_GO_FD until the caller writes a byte. The
+        cgroup is joined only after that announcement -- see the class docstring.
         """
         probe_path = self.get_probe_path(probe_name)
         read_fd, write_fd = os.pipe()
+        ready_r, ready_w = os.pipe()
 
         env = dict(os.environ)
         env["SHADOW_GO_FD"] = str(read_fd)
+        env["SHADOW_READY_FD"] = str(ready_w)
         if env_extra:
             env.update(env_extra)
 
         cmd = [probe_path] + (args or [])
         proc = subprocess.Popen(
             cmd,
-            pass_fds=(read_fd,),
+            pass_fds=(read_fd, ready_w),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -106,14 +126,60 @@ class ProbeRunner:
             env=env,
         )
         os.close(read_fd)
+        os.close(ready_w)
         self._children.append(proc)
+
+        state = self._await_ready(ready_r, proc)
+        os.close(ready_r)
+
+        if state == "exited":
+            # The probe already reported and exited (a setup syscall failed and
+            # it called REPORT). Its ret/errno are on the stdout pipe for
+            # wait_result(); joining a dead PID would only raise.
+            return proc, write_fd
+        if state == "timeout":
+            # Never hang a whole run on one probe: fall back to joining anyway,
+            # but say so loudly, since this trial's setup is race-dependent.
+            print(f"[runner] WARNING: {probe_name} did not announce setup "
+                  f"completion within {self.READY_TIMEOUT}s; joining the "
+                  f"cgroup anyway, so this trial is race-dependent",
+                  file=sys.stderr)
 
         # Place into cgroup
         procs_file = os.path.join(cgroup_path, "cgroup.procs")
-        with open(procs_file, "w") as f:
-            f.write(str(proc.pid))
+        try:
+            with open(procs_file, "w") as f:
+                f.write(str(proc.pid))
+        except OSError as e:
+            # Probe died between announcing and being joined.
+            print(f"[runner] WARNING: cannot place {probe_name} (pid "
+                  f"{proc.pid}) into {procs_file}: {e}", file=sys.stderr)
 
         return proc, write_fd
+
+    def _await_ready(self, ready_r: int, proc: subprocess.Popen) -> str:
+        """Wait for the probe's "setup done" byte.
+
+        Returns "ready" on handshake, "exited" if the probe finished without
+        announcing (its ret/errno are already on stdout), or "timeout" if it is
+        still alive but silent past READY_TIMEOUT.
+        """
+        deadline = time.time() + self.READY_TIMEOUT
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return "timeout"
+            readable, _, _ = select.select([ready_r], [], [],
+                                           min(remaining, 0.2))
+            if readable:
+                try:
+                    # An empty read means the probe closed the fd without
+                    # writing, i.e. it exited during setup.
+                    return "ready" if os.read(ready_r, 1) else "exited"
+                except OSError:
+                    return "exited"
+            if proc.poll() is not None:
+                return "exited"
 
     def release(self, write_fd: int):
         """Signal the probe to execute its syscall."""

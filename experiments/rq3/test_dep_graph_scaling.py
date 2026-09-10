@@ -347,6 +347,113 @@ class TestSeedingCoversEveryRead(unittest.TestCase):
         self._check(rec, self._seeded())
 
 
+# ─── a partial build must not leak cgroup slots ────────────────────────────
+
+class TestPartialBuildNeverLeaksCgroupSlots(unittest.TestCase):
+    """A builder that fails partway MUST close the nodes it already opened.
+
+    Every open node holds one of ShadowProc's 64 concurrent cgroup slots. The
+    builders open nodes incrementally, so when the ceiling refuses one more
+    open mid-build the nodes opened so far exist only in the builder's local
+    list -- the caller never receives a return value to clean up. If the
+    builder does not close them itself they leak, the slot table stays full for
+    the rest of the run, and every later configuration fails session_open
+    instantly. That is the cascade which turned ONE over-ceiling chain=64
+    repeat into a whole run of errors (chain root-deny, fan-out, fan-in all
+    dying at 0.0s with `Maximum 64 concurrent cgroups supported`).
+    """
+
+    CEILING_MSG = ("Orchestrator session_open failed: add_cgroup: "
+                   "Maximum 64 concurrent cgroups supported")
+
+    def _fail_at_open(self, fn, fail_at, *args, **kwargs):
+        """Run `fn` with open_epoch_node raising on the (fail_at+1)-th open.
+
+        Returns (opened, closed): the nodes successfully opened before the
+        failure, and the nodes the builder handed to close_all_nodes. The leak
+        fix is correct iff closed == opened.
+        """
+        opened, closed = [], []
+
+        def fake_open(client, node_id, run_tag, res=None, own_client=False):
+            if len(opened) >= fail_at:
+                raise RuntimeError(self.CEILING_MSG)
+            nd = dgs.EpochNode(node_id=node_id, session_id=f"sid-{node_id}",
+                               cgroup_id=f"cg-{node_id}",
+                               epoch_id=f"ep-{node_id}",
+                               agent_id=f"dep-{run_tag}-{node_id}",
+                               client=FakeClient() if own_client else None)
+            opened.append(nd)
+            return nd
+
+        def fake_close(client, nds):
+            closed.extend(nds)
+
+        with patch.object(dgs, "open_epoch_node", fake_open), \
+                patch.object(dgs, "close_all_nodes", fake_close), \
+                patch.object(dgs, "run_cmd",
+                             lambda *a, **k: {"status": "ok",
+                                              "exit_code": 0}):
+            with self.assertRaises(RuntimeError):
+                fn(*args, **kwargs)
+        return opened, closed
+
+    def _assert_closes_exactly_what_it_opened(self, fn, fail_at, *a, **k):
+        opened, closed = self._fail_at_open(fn, fail_at, *a, **k)
+        self.assertEqual(len(opened), fail_at)
+        self.assertEqual([n.session_id for n in closed],
+                         [n.session_id for n in opened],
+                         "builder leaked the nodes it opened before failing")
+
+    def test_chain_closes_nodes_opened_before_the_ceiling(self):
+        self._assert_closes_exactly_what_it_opened(
+            dgs.build_chain, 5, FakeClient(), 8, "t")
+
+    def test_cycle_closes_nodes_opened_before_the_ceiling(self):
+        self._assert_closes_exactly_what_it_opened(
+            dgs.build_cycle, 3, FakeClient(), 6, "t")
+
+    def test_fan_out_closes_nodes_opened_before_the_ceiling(self):
+        self._assert_closes_exactly_what_it_opened(
+            dgs.build_fan_out, 4, FakeClient(), 6, "t")
+
+    def test_fan_in_closes_nodes_opened_before_the_ceiling(self):
+        self._assert_closes_exactly_what_it_opened(
+            dgs.build_fan_in, 4, FakeClient(), 6, "t")
+
+    def test_diamond_closes_nodes_opened_before_the_ceiling(self):
+        self._assert_closes_exactly_what_it_opened(
+            dgs.build_diamond, 3, FakeClient(), 4, "t")
+
+    def test_a_run_cmd_failure_also_closes_the_fully_opened_graph(self):
+        """The leak is not only at the open loop: a run_cmd that raises AFTER
+        every node is open must close them too, or the whole graph leaks."""
+        opened, closed = [], []
+
+        def fake_open(client, node_id, run_tag, res=None, own_client=False):
+            nd = dgs.EpochNode(node_id=node_id, session_id=f"sid-{node_id}",
+                               cgroup_id=f"cg-{node_id}",
+                               epoch_id=f"ep-{node_id}",
+                               agent_id=f"dep-{run_tag}-{node_id}", client=None)
+            opened.append(nd)
+            return nd
+
+        def fake_close(client, nds):
+            closed.extend(nds)
+
+        def boom(client, nd, command, res=None):
+            raise RuntimeError("run_cmd failed")
+
+        with patch.object(dgs, "open_epoch_node", fake_open), \
+                patch.object(dgs, "close_all_nodes", fake_close), \
+                patch.object(dgs, "run_cmd", boom):
+            with self.assertRaises(RuntimeError):
+                dgs.build_chain(FakeClient(), 4, "t")
+        self.assertEqual(len(opened), 4)
+        self.assertEqual([n.session_id for n in closed],
+                         [n.session_id for n in opened])
+
+
 # ─── expected affected sets ────────────────────────────────────────────────
 
 class TestVerifyDependencies(unittest.TestCase):
@@ -1001,26 +1108,30 @@ class TestNodeLifecycle(unittest.TestCase):
 
 class TestConfiguration(unittest.TestCase):
 
-    def test_no_configured_size_exceeds_the_cgroup_ceiling(self):
+    def test_no_configured_size_sits_at_or_over_the_cgroup_ceiling(self):
         """ShadowProc's BPF slot table caps concurrent live cgroups at 64 and
-        one node holds one for the whole repeat, so an oversized configuration
-        fails at session_open with an error that has nothing to do with the
-        graph."""
+        one node holds one for the whole repeat. Every sweep must stay STRICTLY
+        below that: a graph needing exactly 64 slots has zero headroom, so a
+        single residual slot tips its last session_open over the ceiling --
+        which is what killed chain=64. assertLess, not assertLessEqual."""
         for name, sizes in (
                 ("chain", dgs.FULL_CHAIN_SIZES), ("fan", dgs.FULL_FAN_SIZES),
                 ("scc", dgs.FULL_SCC_SIZES),
                 ("concurrent", dgs.FULL_CONCURRENT_SIZES)):
             for s in sizes:
                 extra = 1 if name in ("fan", "concurrent") else 0
-                self.assertLessEqual(s + extra, dgs.MAX_NODES,
-                                     f"{name}={s} builds {s + extra} nodes")
+                self.assertLess(s + extra, dgs.MAX_NODES,
+                                f"{name}={s} builds {s + extra} nodes")
         for w in dgs.FULL_DIAMOND_WIDTHS:
-            self.assertLessEqual(w + 2, dgs.MAX_NODES)
-        self.assertLessEqual(dgs.FULL_DECISION_CHAIN, dgs.MAX_NODES)
+            self.assertLess(w + 2, dgs.MAX_NODES)
+        self.assertLess(dgs.FULL_DECISION_CHAIN, dgs.MAX_NODES)
 
     def test_sweeps_cover_the_requested_ranges(self):
-        """The specification asks for chains to 64 and SCCs to 32."""
-        self.assertEqual(dgs.FULL_CHAIN_SIZES, [2, 4, 8, 16, 32, 64])
+        """Chains and SCCs sweep to 32. The chain deliberately stops one step
+        below MAX_NODES=64: a 64-node chain needs all 64 cgroup slots at once
+        (zero headroom) and fails at the last open, so 32 is the largest chain
+        that runs cleanly on this host."""
+        self.assertEqual(dgs.FULL_CHAIN_SIZES, [2, 4, 8, 16, 32])
         self.assertEqual(dgs.FULL_SCC_SIZES, [2, 4, 8, 16, 32])
         self.assertEqual(dgs.FULL_DIAMOND_WIDTHS, [2, 4, 8, 16])
         self.assertEqual(dgs.FULL_CONCURRENT_SIZES, [1, 4, 8, 16, 32])

@@ -7,7 +7,7 @@ session (one cgroup, one epoch), so the x-axis of every curve below is the
 number of DEPENDENCY NODES -- the number of concurrent agents is held fixed by
 construction and is varied separately in multi_agent_scaling.py (Experiment A).
 
-  D1: Chain — A → B → … → N, 2/4/8/16/32/64 nodes. Node[i] writes file[i] and
+  D1: Chain — A → B → … → N, 2/4/8/16/32 nodes. Node[i] writes file[i] and
       node[i+1] reads it, so every link is a real cross-epoch read-from edge.
       Measured TWICE per size:
         decision=allow      whole-chain publication (group finalization)
@@ -51,8 +51,15 @@ Ceiling on the node count
 ShadowProc's BPF slot table caps CONCURRENT live cgroups at 64
 (`add_cgroup: Maximum 64 concurrent cgroups supported`), and one graph node
 holds one cgroup for the whole repeat. A 64-node chain therefore sits exactly
-at a hard system limit; larger graphs cannot be reached end-to-end on this host
-and are not attempted. Sizes above MAX_NODES are rejected at argument parsing.
+at a hard system limit with ZERO headroom, so the default sweeps stop BELOW it
+(chain at 32; fan/SCC at 32 -> 33 nodes; diamond at 16 -> 18 nodes); larger
+graphs cannot be reached reliably end-to-end on this host and are not attempted.
+Sizes above MAX_NODES are rejected at argument parsing. Because a single leaked
+slot is enough to tip a near-ceiling build over, every topology builder closes
+the nodes it already opened before propagating a mid-build failure (see
+close_all_nodes) -- otherwise one refused open would exhaust the table and fail
+every later configuration's session_open, which is exactly the cascade that
+turns a single over-ceiling repeat into a whole run of errors.
 
 Usage:
     SHADOW_RUN_RQ3_EXPERIMENTS=1 python3 dep_graph_scalability.py [options]
@@ -872,14 +879,23 @@ def build_chain(client: OrchClient, n: int, run_tag: str,
     until the caller resolves them, which is what makes the chain a single
     N-node dependency graph instead of N independent ones.
     """
-    nodes = [open_epoch_node(client, f"n{i}", run_tag, res=res)
-             for i in range(n)]
-    for i in range(n):
-        fpath = dep_fuse_path(f"{prefix}_{i}.dat")
-        run_cmd(client, nodes[i], f"echo 'epoch-{i}' > {fpath}", res)
-        if i + 1 < n:
-            run_cmd(client, nodes[i + 1], f"cat {fpath} > /dev/null", res)
-    return nodes
+    nodes: List[EpochNode] = []
+    try:
+        for i in range(n):
+            nodes.append(open_epoch_node(client, f"n{i}", run_tag, res=res))
+        for i in range(n):
+            fpath = dep_fuse_path(f"{prefix}_{i}.dat")
+            run_cmd(client, nodes[i], f"echo 'epoch-{i}' > {fpath}", res)
+            if i + 1 < n:
+                run_cmd(client, nodes[i + 1], f"cat {fpath} > /dev/null", res)
+        return nodes
+    except Exception:
+        # Every opened node holds one of ShadowProc's 64 cgroup slots. If the
+        # build aborts partway (e.g. the ceiling refuses one more open), the
+        # caller never receives this list, so close the partial here or those
+        # slots leak and every later configuration fails session_open.
+        close_all_nodes(client, nodes)
+        raise
 
 
 def build_cycle(client: OrchClient, n: int, run_tag: str,
@@ -897,16 +913,21 @@ def build_cycle(client: OrchClient, n: int, run_tag: str,
     own_clients=True gives every node a private socket so the members can
     authorize concurrently -- the situation SCC-atomic publication exists for.
     """
-    nodes = [open_epoch_node(client, f"cyc{i}", run_tag, res=res,
-                             own_client=own_clients)
-             for i in range(n)]
-    for i in range(n):
-        fpath = dep_fuse_path(f"{prefix}_{i}.dat")
-        run_cmd(client, nodes[i], f"echo 'scc-{i}-written' > {fpath}", res)
-    for i in range(n):
-        read_path = dep_fuse_path(f"{prefix}_{(i - 1) % n}.dat")
-        run_cmd(client, nodes[i], f"cat {read_path} > /dev/null", res)
-    return nodes
+    nodes: List[EpochNode] = []
+    try:
+        for i in range(n):
+            nodes.append(open_epoch_node(client, f"cyc{i}", run_tag, res=res,
+                                         own_client=own_clients))
+        for i in range(n):
+            fpath = dep_fuse_path(f"{prefix}_{i}.dat")
+            run_cmd(client, nodes[i], f"echo 'scc-{i}-written' > {fpath}", res)
+        for i in range(n):
+            read_path = dep_fuse_path(f"{prefix}_{(i - 1) % n}.dat")
+            run_cmd(client, nodes[i], f"cat {read_path} > /dev/null", res)
+        return nodes
+    except Exception:
+        close_all_nodes(client, nodes)   # free partial cgroup slots
+        raise
 
 
 def build_diamond(client: OrchClient, width: int, run_tag: str,
@@ -919,23 +940,28 @@ def build_diamond(client: OrchClient, width: int, run_tag: str,
     where a rollback of the root must cascade down two independent arms and
     reconverge, and where rolling back one arm must NOT reach the other.
     """
-    nodes = [open_epoch_node(client, "root", run_tag, res=res)]
-    nodes += [open_epoch_node(client, f"m{i}", run_tag, res=res)
-              for i in range(width)]
-    sink = open_epoch_node(client, "sink", run_tag, res=res)
-    nodes.append(sink)
+    nodes: List[EpochNode] = []
+    try:
+        nodes.append(open_epoch_node(client, "root", run_tag, res=res))
+        for i in range(width):
+            nodes.append(open_epoch_node(client, f"m{i}", run_tag, res=res))
+        sink = open_epoch_node(client, "sink", run_tag, res=res)
+        nodes.append(sink)
 
-    root_file = dep_fuse_path(f"{prefix}_root.dat")
-    run_cmd(client, nodes[0], f"echo 'diamond-root' > {root_file}", res)
-    for i in range(width):
-        mid_file = dep_fuse_path(f"{prefix}_mid_{i}.dat")
-        run_cmd(client, nodes[i + 1], f"cat {root_file} > /dev/null", res)
-        run_cmd(client, nodes[i + 1], f"echo 'diamond-mid-{i}' > {mid_file}",
-                res)
-    for i in range(width):
-        mid_file = dep_fuse_path(f"{prefix}_mid_{i}.dat")
-        run_cmd(client, sink, f"cat {mid_file} > /dev/null", res)
-    return nodes
+        root_file = dep_fuse_path(f"{prefix}_root.dat")
+        run_cmd(client, nodes[0], f"echo 'diamond-root' > {root_file}", res)
+        for i in range(width):
+            mid_file = dep_fuse_path(f"{prefix}_mid_{i}.dat")
+            run_cmd(client, nodes[i + 1], f"cat {root_file} > /dev/null", res)
+            run_cmd(client, nodes[i + 1],
+                    f"echo 'diamond-mid-{i}' > {mid_file}", res)
+        for i in range(width):
+            mid_file = dep_fuse_path(f"{prefix}_mid_{i}.dat")
+            run_cmd(client, sink, f"cat {mid_file} > /dev/null", res)
+        return nodes
+    except Exception:
+        close_all_nodes(client, nodes)   # free partial cgroup slots
+        raise
 
 
 def build_fan_out(client: OrchClient, n: int, run_tag: str,
@@ -946,14 +972,19 @@ def build_fan_out(client: OrchClient, n: int, run_tag: str,
     The shape that asks whether a single hot version can be read by many epochs
     without the producer's publication cost growing with the reader count.
     """
-    nodes = [open_epoch_node(client, "root", run_tag, res=res)]
-    nodes += [open_epoch_node(client, f"leaf{i}", run_tag, res=res)
-              for i in range(n)]
-    root_file = dep_fuse_path(f"{prefix}_root.dat")
-    run_cmd(client, nodes[0], f"echo 'root-output' > {root_file}", res)
-    for leaf in nodes[1:]:
-        run_cmd(client, leaf, f"cat {root_file} > /dev/null", res)
-    return nodes
+    nodes: List[EpochNode] = []
+    try:
+        nodes.append(open_epoch_node(client, "root", run_tag, res=res))
+        for i in range(n):
+            nodes.append(open_epoch_node(client, f"leaf{i}", run_tag, res=res))
+        root_file = dep_fuse_path(f"{prefix}_root.dat")
+        run_cmd(client, nodes[0], f"echo 'root-output' > {root_file}", res)
+        for leaf in nodes[1:]:
+            run_cmd(client, leaf, f"cat {root_file} > /dev/null", res)
+        return nodes
+    except Exception:
+        close_all_nodes(client, nodes)   # free partial cgroup slots
+        raise
 
 
 def build_fan_in(client: OrchClient, n: int, run_tag: str,
@@ -965,17 +996,22 @@ def build_fan_in(client: OrchClient, n: int, run_tag: str,
     source invalidates the sink, so one node has N distinct reasons to be
     rolled back.
     """
-    nodes = [open_epoch_node(client, f"src{i}", run_tag, res=res)
-             for i in range(n)]
-    sink = open_epoch_node(client, "sink", run_tag, res=res)
-    nodes.append(sink)
-    for i, src in enumerate(nodes[:-1]):
-        fpath = dep_fuse_path(f"{prefix}_src_{i}.dat")
-        run_cmd(client, src, f"echo 'src-{i}-output' > {fpath}", res)
-    for i in range(n):
-        fpath = dep_fuse_path(f"{prefix}_src_{i}.dat")
-        run_cmd(client, sink, f"cat {fpath} > /dev/null", res)
-    return nodes
+    nodes: List[EpochNode] = []
+    try:
+        for i in range(n):
+            nodes.append(open_epoch_node(client, f"src{i}", run_tag, res=res))
+        sink = open_epoch_node(client, "sink", run_tag, res=res)
+        nodes.append(sink)
+        for i, src in enumerate(nodes[:-1]):
+            fpath = dep_fuse_path(f"{prefix}_src_{i}.dat")
+            run_cmd(client, src, f"echo 'src-{i}-output' > {fpath}", res)
+        for i in range(n):
+            fpath = dep_fuse_path(f"{prefix}_src_{i}.dat")
+            run_cmd(client, sink, f"cat {fpath} > /dev/null", res)
+        return nodes
+    except Exception:
+        close_all_nodes(client, nodes)   # free partial cgroup slots
+        raise
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1851,10 +1887,12 @@ def run_d7_scc_publish(sizes: List[int], repeats: int, obs: OrchClient,
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Default sizes — each graph node is an independent session (cgroup + fork),
-# measured at ~0.7 s of sequential construction on this host, so a 64-node
-# chain costs ~45 s per repeat before anything is timed. Sizes are capped at
-# MAX_NODES because that is where ShadowProc's cgroup slot table runs out.
-FULL_CHAIN_SIZES = [2, 4, 8, 16, 32, 64]
+# measured at ~0.53 s of sequential construction on this host. The chain sweep
+# deliberately STOPS AT 32, not MAX_NODES=64: a 64-node chain needs all 64 of
+# ShadowProc's cgroup slots at once (zero headroom), so a single residual slot
+# tips the 64th session_open over the ceiling and that repeat fails. 32 leaves
+# half the table free, which is where the scalability curve is still clean.
+FULL_CHAIN_SIZES = [2, 4, 8, 16, 32]
 FULL_FAN_SIZES = [2, 4, 8, 16, 32]
 FULL_SCC_SIZES = [2, 4, 8, 16, 32]
 FULL_CONCURRENT_SIZES = [1, 4, 8, 16, 32]

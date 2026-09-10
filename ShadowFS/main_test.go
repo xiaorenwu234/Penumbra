@@ -276,12 +276,13 @@ func TestAForceClosedHandleRefusesEveryRawFdOperation(t *testing.T) {
 	}
 }
 
-// TestPassthroughIsDisabledOnALiveHandle pins the fix for the FUSE serve-loop
-// deadlock, and the LIVE handle is the whole point: the wedge happened on
-// ordinary Opens, not on force-closed ones.
+// TestPassthroughIsDisabledByDefault pins the DEFAULT (flag off) that keeps the
+// multi-agent axis safe from the FUSE serve-loop deadlock, and the LIVE handle
+// is the point: the wedge happened on ordinary Opens, not force-closed ones.
+// The enabled path is covered by TestPassthroughEnabledReturnsBackingFdOnALiveHandle.
 //
-// A live trackedHandle used to return its real backing fd here, so go-fuse
-// registered it for passthrough (rawBridge.Open -> addBackingID ->
+// A live trackedHandle used to return its real backing fd here unconditionally,
+// so go-fuse registered it for passthrough (rawBridge.Open -> addBackingID ->
 // Server.RegisterBackingFd), which takes Server.writeMu WHILE HOLDING the
 // rawBridge mutex. The post-rollback dentry invalidation (notifyInvalidated ->
 // Inode.NotifyEntry -> Server.writev) takes the same writeMu and then blocks in
@@ -298,8 +299,11 @@ func TestAForceClosedHandleRefusesEveryRawFdOperation(t *testing.T) {
 // deadlock needs a real root mount with CAP_PASSTHROUGH, which a unit test
 // cannot stand up -- exactly why it survived the suite and had to be caught with
 // a live SIGQUIT dump.
-func TestPassthroughIsDisabledOnALiveHandle(t *testing.T) {
+func TestPassthroughIsDisabledByDefault(t *testing.T) {
 	useBackend(t)
+	prior := passthroughEnabled.Load()
+	passthroughEnabled.Store(false)
+	t.Cleanup(func() { passthroughEnabled.Store(prior) })
 	f := filepath.Join(t.TempDir(), "live.dat")
 	writeFile(t, f, "base")
 
@@ -320,5 +324,54 @@ func TestPassthroughIsDisabledOnALiveHandle(t *testing.T) {
 			"go-fuse would register a backing fd and couple the serve loop's Open "+
 			"path to Server.writeMu, deadlocking it against the rollback dentry "+
 			"invalidation", got)
+	}
+}
+
+// TestPassthroughEnabledReturnsBackingFdOnALiveHandle covers the opt-in path the
+// launcher turns on for the SINGLE-EPOCH overhead axis: with the flag set, a
+// live handle hands back its real backing fd so the kernel can serve read/write
+// directly (the ~2x file-op speedup). This is safe only because a single-epoch
+// workload has one opener per inode, satisfying the kernel's one-backing-file-
+// per-inode rule; the multi-agent axis leaves the flag off.
+func TestPassthroughEnabledReturnsBackingFdOnALiveHandle(t *testing.T) {
+	useBackend(t)
+	prior := passthroughEnabled.Load()
+	passthroughEnabled.Store(true)
+	t.Cleanup(func() { passthroughEnabled.Store(prior) })
+
+	f := filepath.Join(t.TempDir(), "live.dat")
+	writeFile(t, f, "base")
+	h, fd := newHandle(t, f, "ep-pt-live")
+	if h.dead() {
+		t.Fatal("setup: handle is already force-closed; this must test a LIVE one")
+	}
+	got, ok := h.PassthroughFd()
+	if !ok || got != fd {
+		t.Errorf("PassthroughFd with the flag on, live handle = (%d, %v), want (%d, true)",
+			got, ok, fd)
+	}
+}
+
+// TestPassthroughEnabledStillRefusesAForceClosedHandle pins that enabling
+// passthrough does NOT resurrect a cascade-rolled-back handle: even with the
+// flag on, a dead handle returns (-1, false), so the kernel is never pointed at
+// a backing file whose epoch was force-closed. Without this, passthrough would
+// bypass the EBADF guard every other trackedHandle method enforces.
+func TestPassthroughEnabledStillRefusesAForceClosedHandle(t *testing.T) {
+	useBackend(t)
+	prior := passthroughEnabled.Load()
+	passthroughEnabled.Store(true)
+	t.Cleanup(func() { passthroughEnabled.Store(prior) })
+
+	f := filepath.Join(t.TempDir(), "dead.dat")
+	writeFile(t, f, "base")
+	h, _ := newHandle(t, f, "ep-pt-dead")
+	shadowBackend.CloseEpochFDs("ep-pt-dead")
+	if !h.dead() {
+		t.Fatal("setup: CloseEpochFDs did not mark the handle dead")
+	}
+	if got, ok := h.PassthroughFd(); ok || got != -1 {
+		t.Errorf("PassthroughFd with the flag on, force-closed handle = (%d, %v), "+
+			"want (-1, false): the kernel would keep serving a dead backing file", got, ok)
 	}
 }

@@ -3,13 +3,18 @@
  * common.h - Shared infrastructure for RQ2 effect probe programs.
  *
  * Each probe:
- *   1. Reads SHADOW_GO_FD from the environment (a pipe fd).
- *   2. Blocks in read() on that fd until the test harness writes a byte.
- *   3. Executes exactly ONE side-effecting syscall.
- *   4. Prints "ret=<N> errno=<M>" to stdout and exits.
+ *   1. Performs its setup (open/pipe/create). Setup must not be the effect
+ *      under test.
+ *   2. Announces "setup done" by writing one byte to SHADOW_READY_FD.
+ *   3. Blocks in read() on SHADOW_GO_FD until the test harness writes a byte.
+ *   4. Executes exactly ONE side-effecting syscall.
+ *   5. Prints "ret=<N> errno=<M>" to stdout and exits.
  *
- * The test harness places the probe into a monitored cgroup BEFORE writing
- * the go byte, so the BPF hooks see the syscall under attribution.
+ * The harness waits for the step-2 announcement BEFORE placing the probe into
+ * the monitored cgroup, and only then writes the go byte. So the BPF hooks see
+ * the syscall under test -- and only that syscall -- under attribution.
+ * Both environment variables are optional; with neither set the probe runs
+ * standalone.
  */
 
 #ifndef SHADOW_PROBE_COMMON_H
@@ -25,12 +30,36 @@
 #include <sys/types.h>
 
 /*
- * WAIT_GO - Block until the harness signals execution.
- * Reads one byte from the fd named by SHADOW_GO_FD.
- * If the environment variable is missing, proceeds immediately (standalone mode).
+ * WAIT_GO - Announce that setup is complete, then block until the harness
+ * signals execution.
+ *
+ * Two-step handshake:
+ *   1. write one byte to SHADOW_READY_FD -> "every setup syscall has returned"
+ *   2. read one byte from SHADOW_GO_FD   -> "you are under test now, proceed"
+ *
+ * Why step 1 is needed: the harness used to Popen() the probe and write
+ * cgroup.procs only afterwards, so whether a *setup* syscall ran inside or
+ * outside the enforced cgroup was decided by a race. out_splice fills its pipe
+ * with write(2) into a FIFO, which the BPF write hook classifies as
+ * IPC/PIPE_WRITE; under an allow-OUTPUT/SPLICE policy that key is absent, so
+ * the write was default-denied, the pipe stayed empty, and splice() legitimately
+ * returned 0 with a residual EPERM in errno -- reported as "denied despite allow
+ * policy" on 9 of 10 repeats, while repeat 0 passed because a cold interpreter
+ * let the probe win the race.
+ *
+ * The announcing write happens before the cgroup is joined, so it is never
+ * itself subject to the policy under test.
  */
 #define WAIT_GO() do { \
     const char *_go_fd_str = getenv("SHADOW_GO_FD"); \
+    const char *_rdy_fd_str = getenv("SHADOW_READY_FD"); \
+    if (_rdy_fd_str) { \
+        int _rdy_fd = atoi(_rdy_fd_str); \
+        char _rdy = 'R'; \
+        ssize_t _rdy_wr = write(_rdy_fd, &_rdy, 1); \
+        (void)_rdy_wr;  /* harness may have stopped waiting - not fatal */ \
+        close(_rdy_fd); \
+    } \
     if (_go_fd_str) { \
         int _go_fd = atoi(_go_fd_str); \
         char _buf[1]; \

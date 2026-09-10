@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shadow_orchestrator import ShadowOrchestrator
+from session_proxy import SessionProxy
 from policy.policy_ir import PolicyIR
 
 
@@ -138,6 +139,9 @@ class FakeProxy:
     def finalize_commit(self, sid, proc_policy=None):
         self.calls.append("finalize_commit")
         self.commit_policies.append(proc_policy)
+
+    def discard_committed_epoch(self, sid):
+        self.calls.append("discard_committed_epoch")
 
     def get_output(self, sid):
         self.calls.append("get_output")
@@ -325,6 +329,139 @@ class TestSessionCommitEpochFSFirst(unittest.TestCase):
                          "baseline must NOT be discarded before Finalized")
         acts = orch.fs_client.actions()
         self.assertNotIn("ack_release_group", acts)
+
+
+class TestSiblingPublishedIsASuccessfulNoOp(unittest.TestCase):
+    """Atomic SCC publication: one member's group commit publishes the WHOLE
+    component. A member whose own commit races behind it finds its epoch already
+    finalized (or already acked/gone) and its candidate already committed. That
+    is the publication it was waiting for -- SUCCESS -- so the orchestrator must
+    NOT re-run the destructive release (which would fail on the committed
+    candidate and skip the ack, leaving the finalized epoch to linger in the
+    graph: the D7 drain timeout). It clears local state and reports published.
+    """
+
+    def _run(self, prep_message, epoch_id=None, released=False):
+        proxy = FakeProxy(output="OUT")
+
+        def fs(req):
+            if req["action"] == "prepare_resolution":
+                return {"status": "error", "message": prep_message}
+            return {"status": "ok"}
+
+        orch = _session_orch(proxy, fs)
+        orch._epoch_results = {}
+        if epoch_id is not None:
+            orch._session_epochs["sid1"] = epoch_id
+            if released:
+                orch._epoch_results[epoch_id] = {"released": True}
+        resp = orch.session_commit_epoch("sid1", allowed_ops=_TEST_ALLOWED_OPS)
+        return resp, orch, proxy
+
+    def test_already_finalized_is_published_no_release(self):
+        resp, orch, proxy = self._run(
+            'prepare_resolution: epoch "ep-1" already finalized')
+        self.assertEqual(resp["status"], "ok")
+        self.assertTrue(resp.get("published_by_sibling"))
+        self.assertIn("discard_committed_epoch", proxy.calls)
+        self.assertNotIn("finalize_commit", proxy.calls,
+                         "must not re-run the destructive commit")
+        self.assertNotIn("ack_release_group", orch.fs_client.actions(),
+                         "the winning sibling already acked the group")
+
+    def test_not_found_with_a_released_record_is_published(self):
+        resp, orch, proxy = self._run(
+            'prepare_resolution: epoch "ep-1" not found',
+            epoch_id="ep-1", released=True)
+        self.assertEqual(resp["status"], "ok")
+        self.assertTrue(resp.get("published_by_sibling"))
+        self.assertNotIn("sid1", orch._session_epochs, "local state cleared")
+
+    def test_not_found_without_a_released_record_is_a_genuine_error(self):
+        # Guard: an epoch that vanished WITHOUT having been released was rolled
+        # back or never existed -- that must stay an error, never be excused.
+        resp, orch, proxy = self._run(
+            'prepare_resolution: epoch "ep-1" not found',
+            epoch_id="ep-1", released=False)
+        self.assertNotEqual(resp["status"], "ok")
+        self.assertNotIn("discard_committed_epoch", proxy.calls)
+
+
+class _FakeProcClient:
+    """ShadowProc client whose commit_pid/continue_pid raise a set error."""
+
+    def __init__(self, commit_err=None, continue_err=None):
+        self.commit_err = commit_err
+        self.continue_err = continue_err
+        self.calls = []
+
+    def call(self, action, **fields):
+        self.calls.append(action)
+        if action == "commit_pid" and self.commit_err:
+            raise RuntimeError(self.commit_err)
+        if action == "continue_pid" and self.continue_err:
+            raise RuntimeError(self.continue_err)
+        return {"status": "ok"}
+
+
+class _FakeBuffer:
+    def __init__(self):
+        self.released = False
+
+    def release(self):
+        self.released = True
+        return {"user_output": [], "memory_updates": [], "agent_messages": [],
+                "telemetry": [], "tool_calls": []}
+
+
+class _FakeSess:
+    def __init__(self, candidate=4242, baseline=4141):
+        self.epoch = {"candidate": candidate, "baseline": baseline}
+        self.live_pid = None
+        self.epoch_id = "ep-1"
+        self.transcript = [("ep-1", "line")]
+        self.provisional_buffer = _FakeBuffer()
+
+
+class TestFinalizeCommitToleratesASiblingCommittedCandidate(unittest.TestCase):
+    """A concurrent SCC sibling's group release commits this cgroup's candidate
+    (commit_by_cgroup) before our own finalize_commit runs, so ShadowProc answers
+    commit_pid/continue_pid with 'not part of a tracked epoch'. The candidate is
+    already canonical -- the goal of commit_pid -- so finalize_commit treats it
+    as success and still does the proxy-side cleanup (drop epoch, release the
+    provisional buffer). Any OTHER failure must still propagate."""
+
+    def _run(self, commit_err=None, continue_err=None):
+        sess = _FakeSess()
+        client = _FakeProcClient(commit_err, continue_err)
+        p = SessionProxy.__new__(SessionProxy)
+        p.client = client
+        p.verbose = False
+        p.sessions = {"s1": sess}
+        p._proc_state = lambda pid: "running"
+        p._reap = lambda pid, timeout=2.0: None
+        p._wait_wchan_read = lambda pid, timeout=1.0: None
+        p._discard_epoch_tmp_snapshot = lambda s: None
+        p.finalize_commit("s1", proc_policy={"classes": []})
+        return sess, client
+
+    def test_commit_pid_already_committed_is_tolerated_and_cleaned_up(self):
+        sess, client = self._run(
+            commit_err="commit_pid: Process 4242 is not part of a tracked epoch")
+        self.assertIsNone(sess.epoch, "epoch dropped despite the redundant call")
+        self.assertEqual(sess.live_pid, 4242)
+        self.assertTrue(sess.provisional_buffer.released, "buffer still released")
+        self.assertIn("continue_pid", client.calls, "cleanup ran to completion")
+
+    def test_continue_pid_already_resumed_is_tolerated(self):
+        sess, _ = self._run(
+            continue_err="continue_pid: Process 4242 is not part of a tracked epoch")
+        self.assertIsNone(sess.epoch)
+        self.assertTrue(sess.provisional_buffer.released)
+
+    def test_a_genuine_commit_pid_failure_still_raises(self):
+        with self.assertRaises(RuntimeError):
+            self._run(commit_err="commit_pid: shadowproc exploded")
 
 
 class RunProxy:

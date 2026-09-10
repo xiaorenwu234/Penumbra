@@ -739,6 +739,15 @@ class _Session:
 
 
 # ──────────────────────────── The proxy ────────────────────────────────────
+# ShadowProc's answer when commit_pid/continue_pid targets a candidate whose
+# speculative epoch state was already consumed. In the commit path this means a
+# concurrent SCC sibling's group release (commit_by_cgroup + continue_by_cgroup)
+# already made this cgroup's candidate canonical under this member's own policy,
+# so the call is redundant SUCCESS, not failure. Narrow marker: only this exact
+# ShadowProc wording is excused; every other error still propagates.
+_CANDIDATE_ALREADY_COMMITTED = "is not part of a tracked epoch"
+
+
 class SessionProxy:
     def __init__(self, sock_path, cgroup_root="/sys/fs/cgroup",
                  cgroup_exec=None, verbose=True,
@@ -2070,7 +2079,20 @@ class SessionProxy:
             raise RuntimeError(
                 f"candidate {candidate} exited before finalize_commit")
         _tc = time.perf_counter()
-        self.client.call("commit_pid", pid=candidate)
+        try:
+            self.client.call("commit_pid", pid=candidate)
+        except Exception as e:  # noqa: BLE001
+            # A concurrent SCC sibling's group release commits THIS cgroup's
+            # candidate (commit_by_cgroup) before our own commit path runs, so
+            # ShadowProc no longer tracks it as speculative. The candidate is
+            # alive (checked above) and already canonical -- exactly what
+            # commit_pid exists to achieve -- so treat it as success and finish
+            # the local cleanup. Any other message is a genuine failure.
+            if _CANDIDATE_ALREADY_COMMITTED not in str(e):
+                raise
+            self._log(f"session {sid}: commit_pid found candidate {candidate} "
+                      f"already committed by a concurrent group release -- "
+                      f"treating as canonical")
         _tstep("commit.commit_pid_rpc", _tc)
         _t0 = time.perf_counter()
         self._reap(baseline)
@@ -2079,7 +2101,17 @@ class SessionProxy:
         # client.call drops None fields, so an absent proc_policy reproduces the
         # legacy policy-less continue_pid request exactly.
         _t1 = time.perf_counter()
-        self.client.call("continue_pid", pid=candidate, policy=proc_policy)
+        try:
+            self.client.call("continue_pid", pid=candidate, policy=proc_policy)
+        except Exception as e:  # noqa: BLE001
+            # Same race: the sibling's continue_by_cgroup already resumed the
+            # candidate under this member's own authorized policy (the group
+            # release forwards each member's policy), so continue_pid is
+            # redundant. Only this exact wording is excused.
+            if _CANDIDATE_ALREADY_COMMITTED not in str(e):
+                raise
+            self._log(f"session {sid}: continue_pid found candidate {candidate} "
+                      f"already resumed by a concurrent group release")
         _tstep("commit.continue_rpc", _t1)
         sess.live_pid = candidate            # unchanged: candidate stays live
         sess.epoch = None
@@ -2110,6 +2142,40 @@ class SessionProxy:
         _tstep("commit.TOTAL", _tc)
         self._log(f"session {sid}: COMMIT — candidate {candidate} is now canonical "
                   f"(baseline {baseline} discarded)")
+
+    def discard_committed_epoch(self, sid):
+        """Clear this session's epoch state after a CONCURRENT SIBLING's group
+        commit already committed the candidate and released the cgroup.
+
+        Atomic SCC publication means one member's group commit finalizes the
+        whole component: it discards every member's baseline and resumes every
+        member's candidate under that member's own authorized policy
+        (commit_by_cgroup + continue_by_cgroup). A member whose own commit raced
+        behind that must NOT touch ShadowProc again -- its candidate is already
+        canonical -- but it still owes the proxy-side bookkeeping finalize_commit
+        would have done: drop the epoch, retag the transcript canonical, and
+        release the provisional buffer, so the session is left exactly as a
+        successful commit leaves it.
+        """
+        sess = self.sessions.get(sid)
+        if sess is None or sess.epoch is None:
+            return
+        candidate = sess.epoch["candidate"]
+        sess.live_pid = candidate
+        sess.epoch = None
+        self._discard_epoch_tmp_snapshot(sess)
+        sess.transcript = [(None, text) if epoch == sess.epoch_id else (epoch, text)
+                           for epoch, text in sess.transcript]
+        sess.epoch_id = None
+        released = sess.provisional_buffer.release()
+        if released:
+            self._log(f"session {sid}: COMMIT (published by a concurrent sibling "
+                      f"group) — released provisional buffer: "
+                      f"{len(released.get('user_output', []))} user outputs, "
+                      f"{len(released.get('memory_updates', []))} memory updates, "
+                      f"{len(released.get('agent_messages', []))} agent messages, "
+                      f"{len(released.get('telemetry', []))} telemetry, "
+                      f"{len(released.get('tool_calls', []))} tool calls")
 
     def reject(self, sid):
         """Discard the candidate; resume the pristine baseline (lossless).

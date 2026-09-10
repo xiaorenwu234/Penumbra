@@ -463,11 +463,19 @@ func TestRollbackClosesEpochFDs(t *testing.T) {
 	stageWrite(t, b, "A", f, "fa")
 	// B reads A's version and holds an fd on it.
 	res := b.Resolve("B", f)
-	fd, err := os.Open(res.PhysicalPath)
+	// Open the raw fd directly, matching NewTrackedFD's contract ("a raw fd
+	// obtained from syscall.Open"): TrackedFD must be the ONLY closer. Going
+	// through os.Open + Fd() instead leaves the *os.File finalizer armed on the
+	// same number -- Fd() does not disarm it -- so after CloseEpochFDs releases
+	// the number, the GC closes it a second time and lands on whichever
+	// descriptor a later test happened to be given. That surfaced as
+	// intermittent EBADF in unrelated tests (2/14 full-suite runs, victim
+	// varying; 0/10 once this test was skipped).
+	rawFD, err := syscall.Open(res.PhysicalPath, syscall.O_RDONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tfd := NewTrackedFD(int(fd.Fd()))
+	tfd := NewTrackedFD(rawFD)
 	b.RegisterFD("B", tfd)
 
 	if _, err := b.RollbackWithAffected("A"); err != nil {
@@ -988,5 +996,173 @@ func TestRenameUserTempFileNotDeleted(t *testing.T) {
 	}
 	if readFile(t, userTemp) != "USER DATA" {
 		t.Fatalf("user file content = %q, want 'USER DATA'", readFile(t, userTemp))
+	}
+}
+
+// TestContendedDAGDrainsDespiteObjectCoOwnership reproduces the contended/n=16
+// throughput livelock: an ACYCLIC dependency graph whose epochs still never
+// finalize, because the object-level promote gate couples independent epochs
+// through shared object ownership.
+//
+// Topology (dependsOn is the chain e1 -> e2 -> e0, so every SCC has size 1):
+//
+//	e0: writes A                                   (root: depends on nobody)
+//	e2: reads A (sees e0's version) -> dep e0; writes B
+//	e1: reads B (sees e2's version) -> dep e2; writes A (supersedes e0)
+//
+// Object A's chain is co-owned by {e0, e1} with head = e1's version; object B
+// is owned by {e2}. Under the promote gate (tryPromoteObject), A cannot publish
+// until EVERY co-owner's external upstream is finalized -- here e1's upstream
+// e2 -- and B cannot publish until e2's upstream e0 is finalized. But e0 can
+// only finalize once A publishes (its superseded A version is cleared together
+// with A's chain). That closes a circular wait the epoch dependency graph does
+// NOT contain:
+//
+//	e0 finalized <- A promoted <- e2 finalized <- B promoted <- e0 finalized
+//
+// Nothing promotes, nothing finalizes, and the whole DAG is stranded even
+// though a valid topological publication order (e0, e2, e1) exists. A root with
+// no upstream of its own must not be held hostage by a co-owner's unrelated
+// upstream, so the DAG must drain.
+func TestContendedDAGDrainsDespiteObjectCoOwnership(t *testing.T) {
+	b, orig, _ := newTestBackend(t)
+	aPath := writeOrig(t, orig, "A.txt", "base-a")
+	bPath := writeOrig(t, orig, "B.txt", "base-b")
+
+	for _, ep := range []EpochID{"e0", "e1", "e2"} {
+		if err := b.BeginEpoch(ep, "/cg-"+string(ep), "s-"+string(ep)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// e0 writes A (v_a0).
+	stageWrite(t, b, "e0", aPath, "a0")
+	// e2 reads A -> sees e0's version -> edge e2 depends-on e0. Then writes B.
+	b.Resolve("e2", aPath)
+	stageWrite(t, b, "e2", bPath, "b2")
+	// e1 reads B -> sees e2's version -> edge e1 depends-on e2. Then writes A,
+	// superseding e0 so A's chain is co-owned by {e0, e1} with head = e1.
+	b.Resolve("e1", bPath)
+	stageWrite(t, b, "e1", aPath, "a1")
+
+	for _, ep := range []EpochID{"e0", "e1", "e2"} {
+		if _, err := b.Authorize(ep, "policy-hash"); err != nil {
+			t.Fatalf("Authorize %s: %v", ep, err)
+		}
+	}
+
+	b.mu.Lock()
+	// Sanity: the graph is acyclic (all SCCs size 1), so a valid publication
+	// order exists and the DAG MUST drain.
+	for _, scc := range b.computeSCCsLocked() {
+		if len(scc) != 1 {
+			b.mu.Unlock()
+			t.Fatalf("setup: expected an acyclic graph (all SCCs size 1), got %v", scc)
+		}
+	}
+	// Drive the promote/finalize engine directly: this isolates the promote
+	// gate from the quiesce/cgroup plumbing exercised by the BeginFinalize path.
+	_ = b.tryPromoteAll()
+	states := map[EpochID]AgentLifecycle{}
+	for _, ep := range []EpochID{"e0", "e1", "e2"} {
+		states[ep] = b.epochs[ep].State
+	}
+	b.mu.Unlock()
+
+	for _, ep := range []EpochID{"e0", "e1", "e2"} {
+		if states[ep] != Finalized {
+			t.Errorf("epoch %s stuck at %s, want Finalized: an acyclic dependency "+
+				"graph must drain even when epochs co-own objects (states=%v)",
+				ep, states[ep], states)
+		}
+	}
+}
+
+// TestPrefixPromotionNeverSplitsAnSCC pins the safety invariant of the
+// incremental-prefix promotion added for the contended DAG livelock: a cycle
+// still publishes ATOMICALLY. A strict prefix may not publish one SCC member's
+// version while another member of the same SCC is still fenced behind an
+// external, un-finalized upstream -- otherwise a later reject of that upstream
+// could cascade into state already published for the cycle.
+//
+// Topology: X and Y form a 2-cycle (Y reads X's A, X reads Y's C), so
+// SCC = {X, Y}. Object A is co-owned by both (X wrote it, Y superseded it), so
+// publishing A's chain is exactly where a naive prefix could split the cycle.
+// X additionally reads B written by Z, an EXTERNAL upstream. Until Z finalizes,
+// neither X nor Y may finalize, and A must keep BOTH versions (no partial
+// publish of X's A while Y is still fenced behind Z).
+func TestPrefixPromotionNeverSplitsAnSCC(t *testing.T) {
+	b, orig, _ := newTestBackend(t)
+	aPath := writeOrig(t, orig, "A.txt", "base-a")
+	bPath := writeOrig(t, orig, "B.txt", "base-b")
+	cPath := writeOrig(t, orig, "C.txt", "base-c")
+
+	for _, ep := range []EpochID{"X", "Y", "Z"} {
+		if err := b.BeginEpoch(ep, "/cg-"+string(ep), "s-"+string(ep)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stageWrite(t, b, "Z", bPath, "bz") // Z writes B (external upstream of X)
+	stageWrite(t, b, "X", aPath, "ax") // X writes A (vA_x)
+	b.Resolve("Y", aPath)              // Y reads X's A -> Y depends on X
+	stageWrite(t, b, "Y", aPath, "ay") // Y supersedes A (vA_y, head) -> A co-owned by {X,Y}
+	stageWrite(t, b, "Y", cPath, "cy") // Y writes C (vC_y)
+	b.Resolve("X", cPath)              // X reads Y's C -> X depends on Y (cycle X<->Y)
+	b.Resolve("X", bPath)              // X reads Z's B -> X depends on Z (external)
+
+	// Authorize ONLY the cycle; Z stays Speculative (un-finalized external
+	// upstream), so the SCC must remain fenced.
+	for _, ep := range []EpochID{"X", "Y"} {
+		if _, err := b.Authorize(ep, "policy-hash"); err != nil {
+			t.Fatalf("Authorize %s: %v", ep, err)
+		}
+	}
+
+	aObj := ObjectID(aPath)
+	b.mu.Lock()
+	// Sanity: X and Y really are one SCC (size 2), Z separate.
+	var sccXY int
+	for _, scc := range b.computeSCCsLocked() {
+		if len(scc) == 2 {
+			sccXY++
+		}
+	}
+	if sccXY != 1 {
+		b.mu.Unlock()
+		t.Fatalf("setup: expected exactly one 2-member SCC {X Y}, got %d", sccXY)
+	}
+	_ = b.tryPromoteAll()
+	xState, yState := b.epochs["X"].State, b.epochs["Y"].State
+	aVersions := len(b.versionsByObject[aObj])
+	b.mu.Unlock()
+
+	if xState == Finalized || yState == Finalized {
+		t.Fatalf("SCC published while external upstream Z was unfinalized: X=%s Y=%s",
+			xState, yState)
+	}
+	if aVersions != 2 {
+		t.Fatalf("object A partially published: %d version(s) remain, want 2 "+
+			"(prefix promotion must not split the {X Y} cycle)", aVersions)
+	}
+
+	// Now let Z commit: the external upstream finalizes, the whole SCC becomes
+	// ready, and A publishes as ONE unit (both versions cleared together).
+	if _, err := b.Authorize("Z", "policy-hash"); err != nil {
+		t.Fatalf("Authorize Z: %v", err)
+	}
+	b.mu.Lock()
+	_ = b.tryPromoteAll()
+	xState, yState = b.epochs["X"].State, b.epochs["Y"].State
+	zState := b.epochs["Z"].State
+	aVersions = len(b.versionsByObject[aObj])
+	b.mu.Unlock()
+
+	if xState != Finalized || yState != Finalized || zState != Finalized {
+		t.Fatalf("after Z finalized, the SCC must drain atomically: X=%s Y=%s Z=%s",
+			xState, yState, zState)
+	}
+	if aVersions != 0 {
+		t.Fatalf("object A not fully published after the SCC drained: %d version(s) remain", aVersions)
 	}
 }

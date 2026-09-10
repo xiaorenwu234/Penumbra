@@ -1,0 +1,6134 @@
+{
+  "experiment": "exp1_effect_coverage",
+  "duration_seconds": 92.68,
+  "start_time": 1789008747.6136868,
+  "end_time": 1789008840.2925334,
+  "metadata": {},
+  "attempted_trials": 2470,
+  "completed_trials": 2470,
+  "skipped_trials": 0,
+  "infra_error_trials": 0,
+  "infrastructure_errors": 0,
+  "property_checks": 2520,
+  "violations": 0,
+  "has_infra_errors": false,
+  "exit_code": 0,
+  "counters": {
+    "escaped_before_auth": {
+      "count": 0,
+      "total": 380,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.00966061107988142
+      ],
+      "details": []
+    },
+    "incorrectly_allowed": {
+      "count": 0,
+      "total": 1360,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.0027087360993107157
+      ],
+      "details": []
+    },
+    "incorrectly_denied": {
+      "count": 0,
+      "total": 470,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.007817959227397087
+      ],
+      "details": []
+    },
+    "duplicated_after_restart": {
+      "count": 0,
+      "total": 10,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.3084971078187607
+      ],
+      "details": []
+    },
+    "missing_audit_events": {
+      "count": 0,
+      "total": 260,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.014087822580252263
+      ],
+      "details": []
+    },
+    "effect_not_observed": {
+      "count": 0,
+      "total": 40,
+      "rate": 0.0,
+      "ci_95": [
+        0.0,
+        0.08809730287880185
+      ],
+      "details": []
+    }
+  },
+  "empty_counters": [],
+  "infra_errors": [],
+  "trials": [
+    {
+      "trial_id": "fs_write-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_write trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=0: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=0: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=1: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=1: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=2: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=2: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=3: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=3: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=4: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=4: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=5: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=5: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=6: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=6: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=7: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=7: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=8: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=8: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_allow-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "duplicated_after_restart",
+          "passed": true,
+          "detail": "fs_write trial=9: effect appeared 1 times"
+        },
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_write trial=9: committed but no effect data"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=1: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=2: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=3: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=4: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=5: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=6: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=7: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=8: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_deny-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=9: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=1: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=2: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=3: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=4: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=5: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=6: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=7: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=8: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_boundary-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=9: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=1: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=2: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=3: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=4: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=5: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=6: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=7: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=8: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_write-fuse_fail_closed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_write trial=9: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_create trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=0: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=1: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=2: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=3: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=4: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=5: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=6: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=7: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=8: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_allow-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_create trial=9: file not created after commit (ret=3 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=1: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=2: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=3: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=4: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=5: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=6: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=7: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=8: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_deny-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=9: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=1: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=2: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=3: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=4: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=5: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=6: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=7: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=8: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_boundary-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=9: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=0: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=1: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=2: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=3: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=4: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=5: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=6: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=7: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=8: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_create-fuse_fail_closed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_create trial=9: file visible when denied"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_delete trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=1: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=2: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=3: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=4: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=5: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=6: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=7: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=8: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_allow-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_delete trial=9: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=1: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=2: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=3: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=4: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=5: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=6: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=7: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=8: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_deny-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=9: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=1: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=2: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=3: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=4: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=5: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=6: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=7: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=8: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_boundary-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=9: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=1: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=2: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=3: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=4: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=5: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=6: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=7: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=8: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_delete-fuse_fail_closed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_delete trial=9: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rename trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=1: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=2: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=3: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=4: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=5: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=6: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=7: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=8: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_allow-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_rename trial=9: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=0: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=1: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=2: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=3: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=4: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=5: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=6: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=7: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=8: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_deny-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=9: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=0: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=1: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=2: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=3: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=4: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=5: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=6: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=7: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=8: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_boundary-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=9: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=0: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=1: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=2: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=3: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=4: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=5: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=6: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=7: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=8: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rename-fuse_fail_closed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_rename trial=9: op succeeded when denied (ret=-1 errno=18)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_link trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=1: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=2: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=3: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=4: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=5: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=6: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=7: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=8: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_allow-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_link trial=9: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=1: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=2: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=3: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=4: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=5: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=6: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=7: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=8: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_deny-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=9: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=1: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=2: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=3: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=4: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=5: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=6: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=7: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=8: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_boundary-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=9: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=1: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=2: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=3: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=4: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=5: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=6: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=7: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=8: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_link-fuse_fail_closed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_link trial=9: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_symlink trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=0: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=1: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=2: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=3: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=4: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=5: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=6: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=7: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=8: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_deny-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=9: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=0: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=1: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=2: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=3: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=4: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=5: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=6: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=7: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=8: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_boundary-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=9: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=0: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=1: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=2: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=3: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=4: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=5: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=6: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=7: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=8: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_symlink-fuse_fail_closed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_symlink trial=9: op succeeded when denied (ret=-1 errno=17)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_truncate trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=1: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=2: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=3: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=4: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=5: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=6: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=7: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=8: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_allow-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_truncate trial=9: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=1: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=2: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=3: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=4: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=5: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=6: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=7: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=8: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_deny-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=9: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=1: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=2: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=3: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=4: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=5: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=6: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=7: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=8: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_boundary-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=9: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=1: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=2: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=3: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=4: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=5: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=6: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=7: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=8: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_truncate-fuse_fail_closed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_truncate trial=9: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chmod trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=1: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=2: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=3: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=4: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=5: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=6: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=7: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=8: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_allow-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chmod trial=9: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=1: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=2: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=3: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=4: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=5: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=6: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=7: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=8: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_deny-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=9: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=1: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=2: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=3: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=4: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=5: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=6: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=7: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=8: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_boundary-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=9: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=1: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=2: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=3: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=4: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=5: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=6: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=7: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=8: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chmod-fuse_fail_closed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chmod trial=9: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_chown trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=0: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=1: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=2: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=3: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=4: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=5: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=6: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=7: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=8: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_allow-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_chown trial=9: op denied (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=0: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=1: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=2: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=3: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=4: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=5: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=6: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=7: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=8: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_deny-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=9: op succeeded when denied (ret=-1 errno=2)"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=1: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=2: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=3: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=4: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=5: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=6: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=7: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=8: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_boundary-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=9: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=0: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=1: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=2: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=3: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=4: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=5: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=6: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=7: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=8: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_chown-fuse_fail_closed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_chown trial=9: op succeeded when denied (ret=-1 errno=5)"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_mkdir trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=0: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=1: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=2: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=3: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=4: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=5: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=6: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=7: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=8: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_allow-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_denied",
+          "passed": true,
+          "detail": "fs_mkdir trial=9: dir not created after commit (ret=0 errno=0)"
+        }
+      ],
+      "scenario": "fuse_allow"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=0: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=1: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=2: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=3: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=4: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=5: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=6: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=7: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=8: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_deny-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=9: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_deny"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=0: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=1: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=2: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=3: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=4: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=5: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=6: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=7: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=8: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_boundary-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=9: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_boundary"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=0: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=1: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=2: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=3: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=4: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=5: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=6: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=7: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=8: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_mkdir-fuse_fail_closed-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "incorrectly_allowed",
+          "passed": true,
+          "detail": "fs_mkdir trial=9: dir exists when it should not"
+        }
+      ],
+      "scenario": "fuse_fail_closed"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-0",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=0: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-1",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=1: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-2",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=2: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-3",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=3: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-4",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=4: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-5",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=5: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-6",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=6: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-7",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=7: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-8",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=8: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    },
+    {
+      "trial_id": "fs_rmdir-fuse_fence-9",
+      "status": "completed",
+      "assertions": [
+        {
+          "property": "escaped_before_auth",
+          "passed": true,
+          "detail": "fs_rmdir trial=9: FUSE effect visible without epoch"
+        }
+      ],
+      "scenario": "fuse_fence"
+    }
+  ],
+  "trials_truncated": true,
+  "total_trials": 2470
+}

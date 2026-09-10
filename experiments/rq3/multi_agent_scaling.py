@@ -213,6 +213,13 @@ class ScalingResult:
     commit_attempts: List[int] = field(default_factory=list)
     pending_commits: int = 0        # commits that returned authorized_pending
     finalization_wait_ns: List[float] = field(default_factory=list)
+    # Same fail-closed EIO/EBADF as rollback_collisions, but surfacing on the
+    # throughput phase's in-flight `cat`/`echo` when a concurrent agent's
+    # cascade undoes the version being read. Tallied apart from genuine errors
+    # for the same reason (see _is_cascade_collision); the agent still aborts
+    # the rest of its invocations, so this can never mask a real failure.
+    throughput_collisions: int = 0
+    throughput_collision_samples: List[str] = field(default_factory=list)
 
     # ── rollback phase ──
     rollback_ns: List[float] = field(default_factory=list)
@@ -258,6 +265,16 @@ class ScalingResult:
     @property
     def total_invocations(self) -> int:
         return sum(self.invocations_ok)
+
+    @property
+    def total_collisions(self) -> int:
+        """Every expected fail-closed EIO/EBADF collision, from either phase.
+
+        The summary's `coll` column reports this so a collision surfacing on
+        the throughput phase is counted the same as one on the rollback phase,
+        and neither inflates the genuine-error column.
+        """
+        return self.rollback_collisions + self.throughput_collisions
 
     @property
     def edges_per_invocation(self) -> Optional[float]:
@@ -340,6 +357,8 @@ class ScalingResult:
         d["rollback_failed"] = self.rollback_failed
         d["rollback_collisions"] = self.rollback_collisions
         d["rollback_collision_samples"] = self.rollback_collision_samples[:20]
+        d["throughput_collisions"] = self.throughput_collisions
+        d["throughput_collision_samples"] = self.throughput_collision_samples[:20]
         d["rollback_affected_mean"] = (
             statistics.fmean(self.rollback_affected) if self.rollback_affected else None)
         d["rollback_affected_max"] = (
@@ -885,6 +904,7 @@ def _agent_commit_loop(h: Dict[str, Any], workload: str, n_agents: int,
         "ok": 0, "begin_ns": [], "run_ns": [], "commit_ns": [],
         "invocation_ns": [], "begin_timings": {}, "commit_timings": {},
         "commit_attempts": [], "pending": 0, "errors": [], "unresolved": [],
+        "collisions": 0, "collision_samples": [],
         "aborted": False,
     }
     client = h["client"]
@@ -897,7 +917,18 @@ def _agent_commit_loop(h: Dict[str, Any], workload: str, n_agents: int,
                 h, invocation_commands(workload, h["idx"], n_agents, k))
             cresp, commit_ns, attempts = commit_agent_epoch(h)
         except Exception as e:  # noqa: BLE001
-            out["errors"].append(f"agent{h['idx']} inv{k}: {e}")
+            msg = f"agent{h['idx']} inv{k}: {e}"
+            # A concurrent agent's cascade can undo the version this agent is
+            # mid-`cat`/`echo` on; ShadowFS then fails closed with EIO/EBADF.
+            # Under a shared workload that is the designed worst case, not a
+            # malfunction, so tally it exactly as the rollback phase does
+            # rather than inflating the genuine-error count. The agent still
+            # aborts below, so a collision is never mistaken for progress.
+            if _is_cascade_collision(workload, msg):
+                out["collisions"] += 1
+                out["collision_samples"].append(msg)
+            else:
+                out["errors"].append(msg)
             try:
                 client.request({"action": "session_rollback_epoch",
                                 "session_id": h["session_id"],
@@ -997,6 +1028,9 @@ def phase_throughput(obs: OrchClient, workload: str, n_agents: int,
                     _extend_timings(res.begin_timings, o["begin_timings"])
                     _extend_timings(res.commit_timings, o["commit_timings"])
                     res.errors.extend(o["errors"][:3])
+                    res.throughput_collisions += o["collisions"]
+                    res.throughput_collision_samples.extend(
+                        o["collision_samples"][:3])
                 print(f"    [{workload}/n={n_agents}] rep {rep+1}/{repeats}: "
                       f"{completed}/{n_agents*invocations} invocations in "
                       f"{wall:.2f}s -> {res.throughput[-1]:.1f} inv/s",
@@ -1366,9 +1400,10 @@ def run_configuration(workload: str, n_agents: int, cfg: Dict[str, Any],
     if res.errors:
         print(f"    errors: {len(res.errors)} (first: {res.errors[0][:120]})",
               flush=True)
-    if res.rollback_collisions:
+    if res.total_collisions:
         print(f"    cascade collisions (expected fail-closed EIO/EBADF): "
-              f"{res.rollback_collisions}", flush=True)
+              f"{res.total_collisions} (rollback={res.rollback_collisions} "
+              f"throughput={res.throughput_collisions})", flush=True)
     return res
 
 
@@ -1480,7 +1515,7 @@ def print_summary(results: List[ScalingResult]):
               f"{heap / 1048576.0:>8.1f}"
               f"{_verdict(r.structure_ok):>5}"
               f"{_verdict(r.branch_preservation_ok):>5}"
-              f"{r.rollback_collisions:>6}"
+              f"{r.total_collisions:>6}"
               f"{len(r.errors):>5}")
     print("\u2500" * 138)
     print("  latency columns are medians in ms; authz-fin is the orchestrator's")
@@ -1488,7 +1523,9 @@ def print_summary(results: List[ScalingResult]):
     print("  edg/inv = edge_insertions / measured invocations; heapMB = ShadowFS")
     print("  Go heap with every epoch of the structure phase open.")
     print("  coll = expected fail-closed EIO/EBADF: a concurrent cascade undid")
-    print("  this agent's epoch/version mid-setup (shared workloads, by design);")
+    print("  this agent's epoch/version mid-setup OR mid-invocation (shared")
+    print("  workloads, by design); summed over the rollback and throughput")
+    print("  phases so neither inflates err.")
     print("  err = genuine failures only (refused rollback, dropped socket, ...).")
 
 

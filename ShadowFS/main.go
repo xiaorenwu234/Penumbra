@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -264,49 +265,47 @@ func (h *trackedHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileL
 	return h.LoopbackFile.Setlkw(ctx, owner, lk, flags)
 }
 
-// PassthroughFd always reports "no passthrough fd", which disables FUSE
-// passthrough for every ShadowFS handle -- dead or alive.
+// passthroughEnabled gates FUSE passthrough (kernel-direct backing-fd I/O).
+// It is OFF by default and is enabled only by the -passthrough flag, which the
+// launcher passes for the SINGLE-EPOCH overhead-axis benchmarks (W series) and
+// never for the multi-agent / dependency-graph axis.
 //
-// go-fuse turns passthrough on by itself for any FileHandle that exposes a
-// PassthroughFd once the kernel negotiates CAP_PASSTHROUGH, which it does here
-// because the daemon runs as root. It was never requested: this is a side
-// effect of embedding LoopbackFile. Passthrough then lets the kernel read and
-// write the backing file DIRECTLY, bypassing this daemon, and that is wrong for
-// ShadowFS twice over:
+// Why it must stay off for concurrent epochs: the kernel allows only ONE
+// backing file per inode (go-fuse: "Within the kernel, an inode can only have a
+// single backing file"), and go-fuse caches the first opener's fd on the inode
+// (rawBridge.addBackingID registers only when n.backingID == 0, then reuses it).
+// ShadowFS resolves a DIFFERENT version -- a different backing file -- per epoch
+// for the same path, so with passthrough on every concurrent opener of a path
+// would be routed by the kernel to the FIRST opener's version: silent
+// wrong-version reads, which is fatal for an MVCC/speculative filesystem. A
+// single-epoch workload has exactly one opener per inode at a time, so the
+// kernel's one-backing-file-per-inode rule is satisfied and passthrough is both
+// safe and fast there.
 //
-//  1. It defeats trackedHandle. Every read/write/lock below is guarded so a
-//     cascade-rolled-back epoch answers EBADF instead of serving stale data,
-//     and so I/O resolves against the epoch's own version. A kernel-side bypass
-//     skips all of it and reads whatever the backing fd number points at now --
-//     the same recycled-number hazard those guards exist to prevent.
-//
-//  2. It deadlocks the entire FUSE serve loop against the rollback invalidation.
-//     Registering the backing fd (rawBridge.Open -> addBackingID ->
-//     Server.RegisterBackingFd) takes go-fuse's Server.writeMu WHILE HOLDING the
-//     rawBridge mutex. The post-rollback dentry invalidation (notifyInvalidated
-//     -> Inode.NotifyEntry -> Server.writev) takes the SAME writeMu and then
-//     blocks in writev(/dev/fuse): the kernel cannot finish an INVAL_ENTRY
-//     notify until it takes the target dentry's dcache lock, which an in-flight
-//     FUSE request is holding -- and that request can never be answered, because
-//     answering it needs the rawBridge mutex and the writeMu this notify sits
-//     on. Captured live under the RQ3 rollback workload (SIGQUIT dump): the
-//     notify goroutine parked in unix.Writev holding writeMu, the Open handler
-//     parked on writeMu holding the rawBridge mutex, the Lookup handler parked
-//     on the rawBridge mutex, and the agent's `cat` stuck in D on the mount for
-//     good -- while the backend stayed healthy (checkpoint kept ticking), which
-//     is why the backend-only stall watchdog could not see it.
-//
-// EntryTimeout is 1s, so the invalidation notify is required for correctness
-// and cannot simply be dropped; removing passthrough is what breaks the cycle,
-// because with no backing-fd registration the serve loop never contends writeMu
-// and a notify that briefly stalls in the kernel no longer freezes lookups and
-// opens. This is the same call as DisableSplice below: turn off go-fuse
-// data-path shortcuts that can strand the whole filesystem mid-run. A useful
-// side effect is that root and non-root runs now behave identically -- without
-// CAP_PASSTHROUGH go-fuse already disables backing files, so tests never
-// exercised the path production did.
+// Passthrough also re-arms the serve-loop deadlock that passthrough=false
+// avoids: registering the backing fd (rawBridge.Open -> addBackingID ->
+// Server.RegisterBackingFd) takes go-fuse's Server.writeMu WHILE HOLDING the
+// rawBridge mutex, and the post-rollback dentry invalidation (notifyInvalidated
+// -> Inode.NotifyEntry -> Server.writev) takes the SAME writeMu then blocks in
+// writev(/dev/fuse) on a dcache lock an in-flight request holds. Single-epoch
+// benchmarks freeze the process before rollback, so no Open races the notify --
+// which is exactly why the multi-agent axis (where that race was captured live
+// in a SIGQUIT dump) keeps passthrough off.
+var passthroughEnabled atomic.Bool
+
+// PassthroughFd returns the backing fd for kernel-direct I/O only when
+// passthrough is enabled AND this handle is alive. A cascade-rolled-back
+// (force-closed) handle must never be handed a passthrough fd: the kernel would
+// keep serving the dead backing file directly, bypassing the EBADF guard that
+// every other trackedHandle method enforces.
 func (h *trackedHandle) PassthroughFd() (int, bool) {
-	return -1, false
+	if !passthroughEnabled.Load() {
+		return -1, false
+	}
+	if h.dead() {
+		return -1, false
+	}
+	return h.LoopbackFile.PassthroughFd()
 }
 
 func (h *trackedHandle) Release(ctx context.Context) syscall.Errno {
@@ -1371,6 +1370,7 @@ func main() {
 	staging := flag.String("staging", "", "staging directory for the version store (required)")
 	sockPath := flag.String("sock", "", "Unix socket path for control API (optional)")
 	allowOther := flag.Bool("allow-other", false, "allow other users to access the mount")
+	passthrough := flag.Bool("passthrough", false, "enable FUSE passthrough (kernel-direct backing-fd I/O). SAFE ONLY for single-epoch workloads: the kernel allows one backing file per inode, so concurrent epochs opening the same path would all read the FIRST opener's version. The launcher enables this only for the overhead-axis W benchmarks, never for the multi-agent/dependency-graph axis.")
 	flag.Parse()
 	if flag.NArg() < 2 || *staging == "" {
 		fmt.Printf("usage: %s -staging STAGING_DIR [-sock SOCKET_PATH] MOUNTPOINT ORIGINAL\n", path.Base(os.Args[0]))
@@ -1381,6 +1381,10 @@ func main() {
 	mntDir := flag.Arg(0)
 	origDir := flag.Arg(1)
 	stagingDir := *staging
+
+	// Set BEFORE fs.Mount: PassthroughFd is read by the serve loop, so the flag
+	// must be published before any Open can consult it.
+	passthroughEnabled.Store(*passthrough)
 
 	// Harden the control plane: forbid gaining privileges via a
 	// setuid/setgid bit. Enabled only when already root: FUSE (un)mount
@@ -1445,7 +1449,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Mount fail: %v\n", err)
 	}
-	fmt.Printf("Mounted! orig=%q staging=%q\n", origDir, shadowBackend.StagingDir())
+	fmt.Printf("Mounted! orig=%q staging=%q passthrough=%v\n", origDir, shadowBackend.StagingDir(), passthroughEnabled.Load())
 
 	// Tell the backend the mountpoint so commit-time writable-MAP_SHARED
 	// quiescence can match /proc/<pid>/maps entries to stage copies.

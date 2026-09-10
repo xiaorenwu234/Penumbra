@@ -158,10 +158,15 @@ class TestGroupFinalizeTimings(unittest.TestCase):
 
         This is the orchestrator-visible half of graph revalidation; ShadowFS
         counts its own half in finalize_rejected_toctou, and the contended
-        workload reports both.
+        workload reports both. The refusal is classified by the structured
+        err_code, which is the stable contract the orchestrator branches on.
         """
         orch = _bare_orch(_proc_ok, self._fs([
-            {"status": "error", "message": "graph_generation mismatch: 7 != 8"},
+            {"status": "error", "err_code": "toctou_reprepare",
+             "message": "begin_finalize: group 3 is no longer atomic "
+                        "(prepared members=[ep-A] at graph_generation=7, "
+                        "caller=8): its SCC membership changed, "
+                        "re-prepare required (TOCTOU)"},
             {"status": "ok", "state": "finalized"},
         ]))
         tm = {}
@@ -173,6 +178,33 @@ class TestGroupFinalizeTimings(unittest.TestCase):
                          "the retry with the fresh generation must succeed")
         self.assertEqual(tm.get("graph_revalidations"), 1.0)
         self.assertEqual(orch.fs_client.actions().count("begin_finalize"), 2)
+        self.assertEqual(orch.fs_client.actions().count("prepare_resolution"), 2)
+
+    def test_current_backend_wording_without_err_code_still_reprepares(self):
+        """Regression: the reworded refusal must re-prepare even with no code.
+
+        Publication once wedged because the backend changed its TOCTOU message
+        to "no longer atomic ... re-prepare required" while the orchestrator
+        still matched only the retired "graph_generation mismatch" wording, so
+        the re-prepare branch became dead code and every refusal was returned
+        as a hard error. An out-of-date daemon that omits err_code must still
+        be recognised by the message fallback.
+        """
+        orch = _bare_orch(_proc_ok, self._fs([
+            {"status": "error",
+             "message": "begin_finalize: group 3 is no longer atomic "
+                        "(prepared members=[ep-A] at graph_generation=7, "
+                        "caller=8): its SCC membership changed, "
+                        "re-prepare required (TOCTOU)"},
+            {"status": "ok", "state": "finalized"},
+        ]))
+        tm = {}
+        res = orch._fs_group_finalize("ep-A", "cg-a",
+                                      proc_policy={"rules": []}, timings=tm)
+
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["state"], "finalized")
+        self.assertEqual(tm.get("graph_revalidations"), 1.0)
         self.assertEqual(orch.fs_client.actions().count("prepare_resolution"), 2)
 
     def test_waiting_for_a_sibling_reports_zero_finalized_wait(self):

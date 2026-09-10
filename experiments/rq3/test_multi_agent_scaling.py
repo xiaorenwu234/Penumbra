@@ -620,6 +620,95 @@ class TestProbeReadResolvesNothingItDependsOn(unittest.TestCase):
         self.assertEqual(err, "no cgroup left")
 
 
+# ─── throughput phase: a collision is not a genuine error ──────────────────
+
+class _FailRunClient(FakeAgentClient):
+    """FakeAgentClient whose timed_run fails with a given exit code + stderr.
+
+    run_agent_commands turns a non-zero exit into
+    `command exited {rc}: {cmd!r} -> {output!r}`, so putting the strerror text
+    in `output` reproduces exactly the message the real path raises -- the only
+    channel _is_cascade_collision has to work with.
+    """
+
+    def __init__(self, output, exit_code=1, **kw):
+        super().__init__(**kw)
+        self._output = output
+        self._exit_code = exit_code
+
+    def timed_run(self, session_id, command):
+        self.runs.append(command)
+        return ({"status": "ok", "output": self._output,
+                 "exit_code": self._exit_code}, self.run_ns)
+
+
+class TestThroughputCollisionIsNotAGenuineError(unittest.TestCase):
+    """A fail-closed EIO/EBADF on the throughput phase's in-flight `cat`/`echo`
+    is the SAME designed worst case the rollback phase already tallies as a
+    collision -- not a genuine error. Before _is_cascade_collision was wired
+    into _agent_commit_loop, contended's `err` column was inflated by exactly
+    these (2 at n=4, 1 at n=32) while the identical rollback-phase events were
+    correctly counted apart. Both classifier guards must still hold here:
+    `independent` is never excused, and text without an EIO/EBADF signature
+    stays genuine.
+    """
+
+    def _handle(self, client, idx=20):
+        return {"idx": idx, "agent_id": f"mas-t-a{idx}",
+                "session_id": f"s{idx}", "cgroup_id": f"cg{idx}",
+                "epoch_id": f"ep{idx}", "client": client, "error": None,
+                "open_ns": 0}
+
+    def _run(self, workload, output, n_agents=32):
+        c = _FailRunClient(output)
+        out = mas._agent_commit_loop(self._handle(c), workload, n_agents,
+                                     warmup=0, invocations=1)
+        return out, c
+
+    def test_shared_eio_is_tallied_as_a_collision_not_an_error(self):
+        out, c = self._run(
+            "contended",
+            "cat: /tmp/shadow-rq2-test/mnt/rq3-multi/sh_0.dat: 输入/输出错误")
+        self.assertEqual(out["collisions"], 1)
+        self.assertEqual(len(out["collision_samples"]), 1)
+        self.assertEqual(out["errors"], [])
+        self.assertTrue(out["aborted"], "a collision still aborts the agent")
+        self.assertEqual(c.rollbacks, 1, "epoch is rolled back before abort")
+
+    def test_shared_ebadf_is_also_a_collision(self):
+        out, _ = self._run("contended", "cat: /x/sh_1.dat: 错误的文件描述符")
+        self.assertEqual(out["collisions"], 1)
+        self.assertEqual(out["errors"], [])
+
+    def test_independent_eio_stays_a_genuine_error(self):
+        # Guard 1: independent files are disjoint, no foreign cascade reaches
+        # them, so an EIO there is a real bug and must never be excused.
+        out, _ = self._run("independent", "cat: /x/f.dat: 输入/输出错误",
+                           n_agents=1)
+        self.assertEqual(out["collisions"], 0)
+        self.assertEqual(len(out["errors"]), 1)
+
+    def test_a_non_eio_failure_stays_a_genuine_error(self):
+        # Guard 2: no EIO/EBADF signature -> genuine, so a dropped socket or a
+        # timeout is never masked as a collision.
+        out, _ = self._run("contended", "connection reset by peer")
+        self.assertEqual(out["collisions"], 0)
+        self.assertEqual(len(out["errors"]), 1)
+
+    def test_enoent_is_not_a_collision(self):
+        # A seeded file must not vanish; ENOENT is a real error, not a
+        # fail-closed collision (it is not in the classifier's marker set).
+        out, _ = self._run("contended", "cat: /x/sh_0.dat: 没有那个文件或目录")
+        self.assertEqual(out["collisions"], 0)
+        self.assertEqual(len(out["errors"]), 1)
+
+    def test_total_collisions_sums_both_phases(self):
+        r = make_result(workload="contended", agents=32)
+        r.rollback_collisions = 35
+        r.throughput_collisions = 1
+        self.assertEqual(r.total_collisions, 36)
+
+
 # ─── epoch lifecycle: the pending-commit retry budget ──────────────────────
 
 class _Clock:

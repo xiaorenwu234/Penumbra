@@ -196,10 +196,16 @@ type Backend struct {
 	// Epoch-local WAL buffer for batched persistence (Optimization 1).
 	// Records are buffered per-epoch and flushed with a single fsync when
 	// FlushEpochWAL is called (before results are released to the agent).
-	epochWALBuf   map[EpochID][]WALRecord
-	epochWALMu    sync.Mutex
-	walFileExists bool // tracks if WAL file has been created
-	walDirSynced  bool // tracks if WAL parent dir has been fsync'd (Fix 3)
+	epochWALBuf map[EpochID][]WALRecord
+	epochWALMu  sync.Mutex
+	// Both flags are touched without holding b.mu: flushPending reads
+	// walDirSynced after releasing it, and flushWALBarrier is reached via
+	// rollbackUnderOpLock under opRW.RLock(), which several agents hold at the
+	// same time. As plain bools that is a data race (the race detector reported
+	// it on 6/6 runs), so they are atomic -- matching debugLog, chkptHeartbeat
+	// and TrackedFD.closed.
+	walFileExists atomic.Bool // tracks if WAL file has been created
+	walDirSynced  atomic.Bool // tracks if WAL parent dir has been fsync'd (Fix 3)
 
 	// Per-epoch statistics for summary logging (Optimization 5).
 	epochStats   map[EpochID]*EpochStats
@@ -297,8 +303,8 @@ func NewBackend(stagingDir, trackedDir string) (*Backend, error) {
 	// Check if WAL file already exists. If so, both the file and its
 	// directory entry are already durable from a previous run.
 	if _, err := os.Stat(b.walPath); err == nil {
-		b.walFileExists = true
-		b.walDirSynced = true
+		b.walFileExists.Store(true)
+		b.walDirSynced.Store(true)
 	}
 
 	// --- Crash recovery (fail closed on unreadable state) ---
@@ -499,13 +505,13 @@ func (b *Backend) flushPending() {
 	}
 	// Optimization 1+4: write WAL without fsync (deferred to FlushEpochWAL).
 	// Fix 3: skipDirSync only if dir was ALREADY synced (not just file created).
-	skipDirSync := b.walDirSynced
+	skipDirSync := b.walDirSynced.Load()
 	err := appendWALEx(b.walPath, allRecs, skipDirSync, true) // true = skipFileSync
 	if err == nil {
 		// Mark WAL file as existing after first successful append.
 		// Note: walDirSynced is NOT set here — it's set by FlushEpochWAL
 		// after the actual dir fsync (Fix 3).
-		b.walFileExists = true
+		b.walFileExists.Store(true)
 		b.mu.Lock()
 		b.walCount += int64(len(allRecs))
 		over := b.walCount >= checkpointWALThreshold
@@ -760,11 +766,11 @@ func (b *Backend) flushWALBarrier() error {
 	f.Close()
 
 	// Fsync parent dir if it hasn't been synced yet (first creation).
-	if !b.walDirSynced {
+	if !b.walDirSynced.Load() {
 		if err := fsyncDir(filepath.Dir(b.walPath)); err != nil {
 			return fmt.Errorf("WAL barrier: dir fsync: %w", err)
 		}
-		b.walDirSynced = true
+		b.walDirSynced.Store(true)
 	}
 
 	if debugLog.Load() {
@@ -2952,59 +2958,59 @@ func (b *Backend) tryPromoteAll() error {
 	}
 }
 
-// tryPromoteObject attempts to promote the object's visible-head version to
-// the backing filesystem. It requires that EVERY owner in the object's chain
-// is authorized AND that none of those owners has an un-finalized upstream
-// dependency outside its SCC (chain co-owners are promoted together as a
-// unit and do not block each other).
+// tryPromoteObject promotes the longest READY PREFIX of the object's version
+// chain to the backing filesystem, and reports whether anything was promoted.
 //
-// All-or-nothing per object: if the head's promotion fails, NOTHING is torn
-// down — the chain, stage payloads and graph state are ALL preserved, the
-// involved owners are left in Finalizing with FinalizeErr set, and
-// (false, err) is returned. promoteVersion is idempotent, so RetryFinalize
+// Why a prefix and not only the whole chain's head: an ACYCLIC dependency graph
+// can still strand every epoch when promotion is all-or-nothing per object. If
+// a root epoch R writes an object that a downstream epoch D later supersedes,
+// R's version sits UNDER D's in the same chain. Publishing only the head means
+// R cannot finalize until D's version publishes -- but D may be waiting, through
+// other objects it shares, on R. That is a circular wait the epoch dependency
+// graph does NOT contain (reproduced deterministically by
+// TestContendedDAGDrainsDespiteObjectCoOwnership, the contended/n=16 throughput
+// livelock). Promoting the ready prefix lets R publish its own write and
+// finalize, which relaxes D's gate, so the chain drains in topological order.
+//
+// A prefix is READY when it satisfies exactly the gate the old whole-chain check
+// used -- every owner in the prefix is authorized and has no un-finalized
+// upstream outside the prefix and outside its own SCC. Two extra invariants keep
+// prefix promotion safe:
+//
+//   - SCC atomicity: a prefix never SPLITS a strongly-connected component, so a
+//     cycle still publishes as one atomic unit (prefixSCCClosedLocked).
+//   - Rename planning: planRenames physically stages only the VISIBLE HEAD
+//     rename, and a rename's SourceVersion may reference another version in the
+//     chain. Any chain containing a rename therefore falls back to the old
+//     all-or-nothing whole-chain promotion, so rename/snapshot handling is
+//     untouched (promotablePrefixLenLocked).
+//
+// All-or-nothing per PROMOTED PREFIX: if promoteVersion fails, nothing in the
+// prefix is torn down -- the chain, stage payloads and graph state are ALL
+// preserved, the involved owners are left in Finalizing with FinalizeErr set,
+// and (false, err) is returned. promoteVersion is idempotent, so RetryFinalize
 // re-runs the same promotion. Must be called with b.mu held.
 func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, error) {
 	chain := b.versionsByObject[obj]
 	if len(chain) == 0 {
 		return false, nil
 	}
+
+	// Longest promotable prefix (0 = nothing may publish yet).
+	k := b.promotablePrefixLenLocked(chain, sccOf)
+	if k == 0 {
+		return false, nil
+	}
+	prefix := chain[:k]
+
 	owners := make(map[EpochID]struct{})
-	for _, vid := range chain {
+	for _, vid := range prefix {
 		if v := b.versionByID[vid]; v != nil {
 			owners[v.Owner] = struct{}{}
 		}
 	}
-	for w := range owners {
-		ep, ok := b.epochs[w]
-		if !ok || !ep.approved() {
-			return false, nil
-		}
-		for up := range b.dependsOn[w] {
-			upEp, ok := b.epochs[up]
-			if !ok {
-				continue // upstream gone => finalized and acked
-			}
-			if upEp.State == Finalized {
-				continue
-			}
-			// Chain co-owners promote together as a unit; their mutual
-			// (write-write) dependency does not block this object.
-			if _, co := owners[up]; co {
-				continue
-			}
-			// Strong semantics: an un-finalized upstream OUTSIDE this
-			// owner's SCC blocks promotion. Its group must Finalize first,
-			// otherwise a later reject of that upstream could cascade into
-			// state we already published. Intra-SCC upstreams do NOT block:
-			// the whole cycle promotes and finalizes together.
-			if sccOf[up] == sccOf[w] {
-				continue
-			}
-			return false, nil
-		}
-	}
 
-	head := b.versionByID[b.visibleHead[obj]]
+	head := b.versionByID[prefix[k-1]]
 	if head == nil {
 		return false, nil
 	}
@@ -3014,8 +3020,8 @@ func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, e
 	// the chain and record publishDirs.
 	alreadyPromoted := head.State == VPromoted
 
-	// Promotion has started for this object: move its (authorized) owners
-	// to Finalizing so a normal rollback is refused from here on.
+	// Promotion has started for these owners: move the (authorized) ones to
+	// Finalizing so a normal rollback is refused from here on.
 	for w := range owners {
 		if ep := b.epochs[w]; ep != nil && ep.State == AuthorizedPending {
 			ep.State = Finalizing
@@ -3047,9 +3053,11 @@ func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, e
 		}
 	}
 
-	// Head published durably. Tear down the WHOLE chain: superseded
-	// intermediate versions are cleared together with the head.
-	for _, vid := range chain {
+	// Prefix published durably. Tear down ONLY the promoted prefix: versions
+	// superseded within it are cleared together with the prefix head. Any
+	// suffix (a not-yet-ready downstream co-owner) stays staged and remains the
+	// visible head for speculative readers.
+	for _, vid := range prefix {
 		v := b.versionByID[vid]
 		if v == nil {
 			continue
@@ -3071,13 +3079,123 @@ func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, e
 		}
 		delete(b.versionByID, vid)
 	}
-	delete(b.versionsByObject, obj)
-	delete(b.visibleHead, obj)
+	if k == len(chain) {
+		// Whole chain published: the object now lives only in the backing store.
+		delete(b.versionsByObject, obj)
+		delete(b.visibleHead, obj)
+	} else {
+		// Strict prefix published: keep the remaining suffix as the chain. The
+		// visible head is unchanged (still the newest, speculative version), so
+		// readers keep resolving to it while its owner converges.
+		b.versionsByObject[obj] = append([]VersionID(nil), chain[k:]...)
+	}
 
 	// Record this object's orig parent dir for the group publish barrier.
 	b.publishDirs[filepath.Dir(obj)] = struct{}{}
-	log.Printf("[backend] Promote: obj=%q head=v%d promoted (%d chain version(s) cleared)", obj, head.ID, len(chain))
+	log.Printf("[backend] Promote: obj=%q prefix-head=v%d promoted (%d of %d chain version(s) cleared)", obj, head.ID, k, len(chain))
 	return true, nil
+}
+
+// promotablePrefixLenLocked returns the length of the longest prefix of chain
+// (seq order) that may be promoted now, or 0 if none may. See tryPromoteObject
+// for why prefix promotion is needed and what keeps it safe.
+//
+// A chain containing ANY rename is promoted all-or-nothing (only len(chain) is
+// ever a candidate): planRenames stages renames only at the visible head, and a
+// rename's SourceVersion may point at another version in the chain, so clearing
+// a strict prefix could destroy a source a suffix rename still needs. Readiness
+// is NOT monotonic in prefix length -- adding a version can turn one owner's
+// external upstream into a co-owner of the prefix, which stops it blocking --
+// so candidates are checked longest-first and the first that is both gate-ready
+// and SCC-closed wins. Must be called with b.mu held.
+func (b *Backend) promotablePrefixLenLocked(chain []VersionID, sccOf map[EpochID]int) int {
+	hasRename := false
+	for _, vid := range chain {
+		if v := b.versionByID[vid]; v != nil && v.Operation == OpRename {
+			hasRename = true
+			break
+		}
+	}
+	for k := len(chain); k >= 1; k-- {
+		if hasRename && k < len(chain) {
+			continue // rename chain: fall back to whole-chain promotion
+		}
+		if !b.prefixSCCClosedLocked(chain[:k], chain[k:], sccOf) {
+			continue
+		}
+		if b.prefixReadyLocked(chain[:k], sccOf) {
+			return k
+		}
+	}
+	return 0
+}
+
+// prefixReadyLocked reports whether every owner of the prefix is authorized and
+// free of un-finalized upstreams that live outside the prefix and outside the
+// owner's own SCC. This is the exact gate the old whole-chain check applied,
+// scoped to the prefix's owner set. Must be called with b.mu held.
+func (b *Backend) prefixReadyLocked(prefix []VersionID, sccOf map[EpochID]int) bool {
+	owners := make(map[EpochID]struct{})
+	for _, vid := range prefix {
+		if v := b.versionByID[vid]; v != nil {
+			owners[v.Owner] = struct{}{}
+		}
+	}
+	for w := range owners {
+		ep, ok := b.epochs[w]
+		if !ok || !ep.approved() {
+			return false
+		}
+		for up := range b.dependsOn[w] {
+			upEp, ok := b.epochs[up]
+			if !ok {
+				continue // upstream gone => finalized and acked
+			}
+			if upEp.State == Finalized {
+				continue
+			}
+			// Chain co-owners in this prefix promote together as a unit; their
+			// mutual (write-write) dependency does not block the prefix.
+			if _, co := owners[up]; co {
+				continue
+			}
+			// Strong semantics: an un-finalized upstream OUTSIDE this owner's
+			// SCC blocks promotion. Its group must Finalize first, otherwise a
+			// later reject of that upstream could cascade into state we already
+			// published. Intra-SCC upstreams do NOT block: the whole cycle
+			// promotes and finalizes together.
+			if sccOf[up] == sccOf[w] {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+// prefixSCCClosedLocked reports whether splitting chain into prefix|suffix would
+// publish any strongly-connected component only partially. A cycle must publish
+// atomically, so if an SCC has a version in the prefix it may not also have one
+// in the suffix. An empty suffix (the whole chain) is trivially closed.
+// Must be called with b.mu held.
+func (b *Backend) prefixSCCClosedLocked(prefix, suffix []VersionID, sccOf map[EpochID]int) bool {
+	if len(suffix) == 0 {
+		return true
+	}
+	inPrefix := make(map[int]bool)
+	for _, vid := range prefix {
+		if v := b.versionByID[vid]; v != nil {
+			inPrefix[sccOf[v.Owner]] = true
+		}
+	}
+	for _, vid := range suffix {
+		if v := b.versionByID[vid]; v != nil {
+			if inPrefix[sccOf[v.Owner]] {
+				return false // SCC spans the split: refuse to publish it in part
+			}
+		}
+	}
+	return true
 }
 
 // ensureLinkTarget 在提升 OpLink 版本前，确保 link 目标文件在 orig 中存在。
@@ -3572,6 +3690,22 @@ func (b *Backend) PrepareResolution(epochID EpochID) (res PrepareResolutionResul
 	}, nil
 }
 
+// ErrCodeTOCTOUReprepare is the stable machine-readable code for a
+// begin_finalize refusal caused by the group's SCC membership having changed
+// between prepare_resolution and begin_finalize. The orchestrator branches on
+// this code (NOT on the human message) to decide that a re-prepare is required.
+const ErrCodeTOCTOUReprepare = "toctou_reprepare"
+
+// BackendError carries a stable Code alongside the human-readable Msg so RPC
+// callers can branch on the code instead of matching fragile message
+// substrings. Message wording is free to change; the Code is a contract.
+type BackendError struct {
+	Code string
+	Msg  string
+}
+
+func (e *BackendError) Error() string { return e.Msg }
+
 // BeginFinalizeResult reports the outcome of starting group finalization.
 type BeginFinalizeResult struct {
 	Status string `json:"status"` // "pending", "finalized", "failed"
@@ -3643,9 +3777,12 @@ func (b *Backend) BeginFinalize(groupID int, graphGeneration int64) (res BeginFi
 		// orchestrator to re-prepare (an extra whole-graph SCC sweep).
 		b.graphCtr.finalizeRejectedTOCTOU++
 		b.mu.Unlock()
-		return BeginFinalizeResult{}, fmt.Errorf(
-			"begin_finalize: group %d is no longer atomic (prepared members=%v at graph_generation=%d, caller=%d): its SCC membership changed, re-prepare required (TOCTOU)",
-			groupID, g.members, g.graphGen, graphGeneration)
+		return BeginFinalizeResult{}, &BackendError{
+			Code: ErrCodeTOCTOUReprepare,
+			Msg: fmt.Sprintf(
+				"begin_finalize: group %d is no longer atomic (prepared members=%v at graph_generation=%d, caller=%d): its SCC membership changed, re-prepare required (TOCTOU)",
+				groupID, g.members, g.graphGen, graphGeneration),
+		}
 	}
 
 	members := append([]EpochID(nil), g.members...)

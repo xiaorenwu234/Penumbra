@@ -268,6 +268,11 @@ func TestGraphStatsFinalizeCounters(t *testing.T) {
 
 	if _, err := b.BeginFinalize(prep2.GroupID, prep2.GraphGeneration); err == nil {
 		t.Fatal("BeginFinalize accepted a group whose SCC had split beneath it")
+	} else if be, ok := err.(*BackendError); !ok {
+		t.Fatalf("TOCTOU refusal = %T (%v), want *BackendError carrying a stable code", err, err)
+	} else if be.Code != ErrCodeTOCTOUReprepare {
+		t.Fatalf("TOCTOU refusal code = %q, want %q (the orchestrator branches on this)",
+			be.Code, ErrCodeTOCTOUReprepare)
 	}
 	st = b.GraphStatsSnapshot()
 	if st.FinalizeCalls != 2 || st.FinalizedNodes != 1 {

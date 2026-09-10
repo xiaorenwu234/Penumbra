@@ -1,0 +1,22 @@
+========================================================================
+  EXPERIMENT: exp1_effect_coverage
+  Duration: 91.4s
+  Trials: 2470 completed / 2470 attempted (0 skipped, 0 infra_error)
+  Property checks: 2520
+========================================================================
+
+  Property                    Violations        Rate                95% CI
+  ------------------------  ------------  ----------  --------------------
+  escaped_before_auth              0/380    0.000000  [0.000000, 0.009661]
+  incorrectly_allowed             0/1360    0.000000  [0.000000, 0.002709]
+  incorrectly_denied               0/470    0.000000  [0.000000, 0.007818]
+  duplicated_after_restart          0/10    0.000000  [0.000000, 0.308497]
+  missing_audit_events             0/260    0.000000  [0.000000, 0.014088]
+  effect_not_observed               0/40    0.000000  [0.000000, 0.088097]
+
+========================================================================
+
+  0 violations across 2520 property checks in 2470 completed trials
+
+  RESULT: ALL SAFETY PROPERTIES HELD
+========================================================================

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -51,6 +52,10 @@ type Request struct {
 type Response struct {
 	Status  string `json:"status"`
 	Message string `json:"message,omitempty"`
+	// ErrCode is a stable machine-readable classifier for an error response
+	// (empty on success). Callers branch on this instead of matching Message
+	// substrings, so the human wording can change without breaking clients.
+	ErrCode string `json:"err_code,omitempty"`
 	// EpochID echoes the epoch the action was applied to (useful when the
 	// caller addressed by cgroup_id, or when begin_epoch generated one).
 	EpochID string `json:"epoch_id,omitempty"`
@@ -401,7 +406,12 @@ func (s *SocketServer) handleRequest(req Request) Response {
 		log.Printf("[socket] begin_finalize group_id=%d graph_gen=%d", req.GroupID, req.GraphGeneration)
 		res, err := shadowBackend.BeginFinalize(req.GroupID, req.GraphGeneration)
 		if err != nil {
-			return Response{Status: "error", Message: err.Error()}
+			resp := Response{Status: "error", Message: err.Error()}
+			var be *backend.BackendError
+			if errors.As(err, &be) {
+				resp.ErrCode = be.Code
+			}
+			return resp
 		}
 		return Response{Status: "ok", GroupID: req.GroupID, State: res.Status}
 

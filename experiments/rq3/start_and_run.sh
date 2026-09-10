@@ -111,12 +111,30 @@ echo "[3/7] 构建 benchmark 程序..."
 make -C "$EXP_RQ3/benchmarks" all 2>&1 | tail -3
 echo "  Done"
 
+# FUSE passthrough（内核直读 backing fd，绕过守护进程）只对「单 epoch」负载安全：
+# 内核限制「每个 inode 只能有一个 backing file」，而 ShadowFS 对同一路径按 epoch
+# 解析出不同版本的 backing file。多 agent 并发打开同一路径时，passthrough 会让
+# 所有 epoch 都读到「第一个打开者」的版本（读错版本），并重新触发 serve-loop 与
+# 回滚失效通知争 writeMu 的死锁。开销轴（all / 单个 W 负载）是串行单 epoch，满足
+# 每 inode 单打开者，故启用它拿回文件 I/O 的 ~2x；多 agent / 依赖图轴必须关闭。
+case "$WORKLOAD" in
+    multi|multi-agent|dep|dep-graph|scaling)
+        FS_PASSTHROUGH=""
+        echo "  FUSE passthrough: OFF（多 epoch 并发轴：避免读错版本 + serve-loop 死锁）"
+        ;;
+    *)
+        FS_PASSTHROUGH="-passthrough"
+        echo "  FUSE passthrough: ON（单 epoch 开销轴：内核直读 backing fd）"
+        ;;
+esac
+
 # ─── [4/7] 启动 ShadowFS ──────────────────────────────────────────────────────
 echo "[4/7] 启动 ShadowFS..."
 "$PROJ/ShadowFS/shadowfs" \
     -staging "$STAGING_DIR" \
     -sock "$SHADOWFS_SOCK" \
     -allow-other \
+    $FS_PASSTHROUGH \
     "$MNT_DIR" \
     "$ORIG_DIR" \
     </dev/null >/var/tmp/shadowfs-rq3.log 2>&1 &
