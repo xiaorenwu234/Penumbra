@@ -1,7 +1,12 @@
 #!/bin/bash
 # RQ3 back-to-back experiment runner: full Penumbra suite (W1-W10), then
-# the overlayfs+CRIU baseline (same workloads). Logs go to separate files
+# the primary baseline (W1-W10, same workloads). Logs go to separate files
 # under experiments/rq3/logs/.
+#
+# Primary baseline = try (OSDI'26). The overlayfs+CRIU fallback is NOT run
+# here; to collect it separately:
+#   sudo ./experiments/rq3/start_and_run.sh baseline-criu
+# (results/rq3_baseline_criu.json — kept as a safety net)
 #
 # Usage (sudo required — mount/criu/daemon management):
 #   cd <repo>/speculative_shadow
@@ -59,9 +64,9 @@ echo "[run_both] Baseline log: $BASE_LOG"
 chmod a+r "$PEN_LOG"
 echo "[run_both] Penumbra exit=$PEN_RC (log: $PEN_LOG)"
 
-# ─── [2/2] overlayfs+CRIU baseline ─────────────────────────────────────
+# ─── [2/2] try (OSDI'26) baseline ──────────────────────────────────────
 {
-    echo "=== [2/2] overlayfs+CRIU baseline (W1-W10) — $(date '+%F %H:%M:%S') ==="
+    echo "=== [2/2] try baseline (W1-W10) — $(date '+%F %H:%M:%S') ==="
     ./experiments/rq3/start_and_run.sh baseline
     BASE_RC=$?
     echo ""
@@ -75,8 +80,8 @@ SUMMARY="$LOGDIR/run_both_${STAMP}.summary"
 {
     echo "RQ3 back-to-back run — finished $(date '+%F %H:%M:%S')"
     echo "  Penumbra (all):  exit=$PEN_RC  log=$PEN_LOG"
-    echo "  Baseline (all):  exit=$BASE_RC  log=$BASE_LOG"
-    echo "  Results: experiments/rq3/results/rq3.json + rq3_baseline.json"
+    echo "  Baseline (try):  exit=$BASE_RC  log=$BASE_LOG"
+    echo "  Results: experiments/rq3/results/rq3.json + rq3_baseline_try.json"
 } | tee "$SUMMARY"
 chmod a+r "$SUMMARY"
 

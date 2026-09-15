@@ -1,7 +1,9 @@
 #!/bin/bash
 # 完整 RQ3 套件串行跑：
 #   开销轴  all      -> results/rq3.json (+ rq3.txt)         [需守护进程]
-#   开销轴  baseline -> results/rq3_baseline.json            [无需守护进程; 末尾打印并排对比表]
+#   开销轴  baseline -> results/rq3_baseline_try.json        [无需守护进程; 末尾打印并排对比表]
+#                       （try/OSDI'26 主基线；CRIU 兜底版单独跑：
+#                         ./start_and_run.sh baseline-criu -> rq3_baseline_criu.json）
 #   扩展轴  scaling  -> results/multi_agent_scaling.json + dep_graph_scalability.json  [需守护进程; 含实验B长跑]
 #   汇总    summarize-> results/scaling_*.csv                 [无需守护进程]
 #

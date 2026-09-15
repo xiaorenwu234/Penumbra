@@ -1,36 +1,55 @@
 #!/usr/bin/env python3
-"""RQ3 Baseline Experiment Runner — overlayfs + CRIU checkpoint/restore.
+"""RQ3 Baseline Experiment Runner — selectable isolation engine.
 
 Runs the SAME workloads as run_all.py (shared definitions in workloads.py)
 against a vanilla isolation stack, so Penumbra's speculative-execution
-overhead can be compared against what a plain overlayfs + CRIU design
-would cost:
+overhead can be compared against what a plain single-mechanism design
+would cost. Two engines are available:
 
-  File-state isolation     overlayfs (upperdir = speculative scratch,
-                            lowerdir = committed state)
-  Process-state snapshot   CRIU dump at begin_epoch / restore at rollback
+  --engine try   (default, primary baseline)
+      OSDI'26 `try`: run the epoch's command in a per-epoch overlay sandbox
+      (per top-level dir, inside a user namespace); commit applies the
+      sandbox upperdir onto the live tree, rollback just drops the sandbox.
+      File-state isolation  overlay sandbox (try's native flow)
+      Process-state         none (try's scope is file effects only)
+
+  --engine criu  (fallback baseline, kept as a safety net)
+      overlayfs + CRIU: upperdir scratch + CRIU dump at begin_epoch /
+      restore at rollback.
+      File-state isolation  overlayfs (single lower/upper pair)
+      Process-state         CRIU checkpoint/restore of the session process
 
 Epoch phase mapping (timed identically to the Penumbra harness):
-  begin_epoch  → criu dump --leave-running
-  session_run  → command (bash -c, taskset-pinned) in the merged view
-  commit       → promote upperdir→lowerdir (whiteouts honored) + reset
-  rollback     → criu restore + discard upperdir + reset
+  begin_epoch  -> try: fresh sandbox dir | criu: criu dump --leave-running
+  session_run  -> command (bash -c, taskset-pinned) in the isolated view
+  commit       -> try: `try commit <sandbox>` | criu: promote upper->lower
+  rollback     -> try: drop the sandbox     | criu: criu restore + discard
+
+Results are written to engine-specific files so the two baselines never
+clobber each other: results/rq3_baseline_try.json and
+results/rq3_baseline_criu.json.
 
 Usage:
     sudo SHADOW_RUN_RQ3_EXPERIMENTS=1 python3 run_baseline.py [options]
 
 Options:
+    --engine E         try (default) or criu / overlayfs+criu
     --output-dir DIR   Output directory (default: ./results)
     --workload W       Run only workload W (1-10) or "all" (default: all)
-    --root DIR         Engine root (default: /tmp/shadow-rq3-baseline)
+    --root DIR         Engine root (default: /tmp/shadow-rq3-try for try,
+                       /tmp/shadow-rq3-baseline for criu)
     --skip-build       Skip benchmark compilation
     --quick            Use reduced repeat counts for quick testing
 
 Prerequisites:
-    - Root privileges (mount/umount/criu)
-    - criu built via third_party/build_criu.sh (Ubuntu 24.04 noble has
-      no criu apt package; the engine also honors $CRIU_BIN and $PATH)
-    - NO Penumbra daemons needed — this baseline is fully standalone.
+    - Root privileges for the full runs (mount/umount; criu mode needs it
+      unconditionally). Set RQ3_ALLOW_NONROOT=1 to bypass for functional
+      testing — the try engine itself works unprivileged (user namespaces).
+    - try mode: `try` built via third_party/build_try.sh (a plain script;
+      C tools compiled with gcc). Honors $TRY_BIN / $TRY_SRC.
+    - criu mode: criu built via third_party/build_criu.sh (Ubuntu 24.04
+      noble has no criu apt package; the engine also honors $CRIU_BIN)
+    - NO Penumbra daemons needed — these baselines are fully standalone.
 """
 
 import argparse
@@ -47,6 +66,9 @@ from framework.baseline_engine import (
     OverlayCriuEngine, BaselineEngineError, build_run_command,
     find_criu_binary,
 )
+from framework.try_engine import (
+    TryEngine, find_try_binary, find_try_utils_dir, smoke_test as try_smoke_test,
+)
 from framework.harness import (
     WorkloadResult, BENCHMARKS_BIN, CPU_PIN,
 )
@@ -57,23 +79,59 @@ from workloads import (
 
 EXPERIMENTS_DIR = os.path.dirname(os.path.abspath(__file__))
 RUN_EXPERIMENTS = os.environ.get("SHADOW_RUN_RQ3_EXPERIMENTS") == "1"
-DEFAULT_ENGINE_ROOT = "/tmp/shadow-rq3-baseline"
+# Functional-testing escape hatch: the try engine runs fine unprivileged
+# (user namespaces); the CRIU engine genuinely needs root (mount/criu).
+ALLOW_NONROOT = os.environ.get("RQ3_ALLOW_NONROOT") == "1"
+DEFAULT_ENGINE = "try"
+ENGINE_ALIASES = {"overlayfs+criu": "criu", "overlayfs": "criu"}
+ENGINE_DISPLAY = {"try": "try", "criu": "overlayfs+criu"}
+DEFAULT_ROOTS = {"try": "/tmp/shadow-rq3-try",
+                 "criu": "/tmp/shadow-rq3-baseline"}
+# Engine-specific result files — never clobber the other baseline's data.
+RESULT_FILES = {"try": "rq3_baseline_try.json",
+                "criu": "rq3_baseline_criu.json"}
 
 
-def check_prerequisites():
-    """Verify all prerequisites are met."""
+def normalize_engine(name: str) -> str:
+    """Map CLI spellings onto canonical engine names ("try" / "criu")."""
+    return ENGINE_ALIASES.get(name.lower(), name.lower())
+
+
+def engine_for(engine_name: str, root: str = None, verbose: bool = True):
+    """Construct the selected baseline engine."""
+    if engine_name == "try":
+        return TryEngine(root or DEFAULT_ROOTS["try"], verbose=verbose)
+    return OverlayCriuEngine(root or DEFAULT_ROOTS["criu"], verbose=verbose)
+
+
+def check_prerequisites(engine_name: str):
+    """Verify all prerequisites for the selected engine."""
     errors = []
-    if os.geteuid() != 0:
-        errors.append("Must run as root (mount/umount/criu require it)")
+    if os.geteuid() != 0 and not ALLOW_NONROOT:
+        errors.append("Must run as root (mount/umount/criu require it); "
+                      "set RQ3_ALLOW_NONROOT=1 to bypass for testing")
     if not RUN_EXPERIMENTS:
         errors.append("Set SHADOW_RUN_RQ3_EXPERIMENTS=1")
-    criu = find_criu_binary()
-    if criu is None:
-        errors.append(
-            "criu not found (neither third_party/ build nor $PATH) — "
-            "build it with: sudo bash "
-            "experiments/rq3/third_party/build_criu.sh "
-            "(Ubuntu 24.04 noble has no criu package in apt)")
+    if engine_name == "try":
+        try_bin = find_try_binary()
+        if try_bin is None:
+            errors.append(
+                "try not found (neither $TRY_BIN, <RQ2>/try-osdi26-ae, "
+                "third_party/try-osdi26-ae nor $PATH) — build it with: "
+                "bash experiments/rq3/third_party/build_try.sh")
+        elif find_try_utils_dir(try_bin) is None:
+            errors.append(
+                f"try-commit/try-summary not found next to {try_bin} — "
+                "try would use its slow shell commit path; rebuild with: "
+                "bash experiments/rq3/third_party/build_try.sh")
+    else:
+        criu = find_criu_binary()
+        if criu is None:
+            errors.append(
+                "criu not found (neither third_party/ build nor $PATH) — "
+                "build it with: sudo bash "
+                "experiments/rq3/third_party/build_criu.sh "
+                "(Ubuntu 24.04 noble has no criu package in apt)")
     if not os.path.isdir(BENCHMARKS_BIN):
         errors.append(f"Benchmark binaries not found: {BENCHMARKS_BIN}")
     return errors
@@ -125,9 +183,18 @@ class BaselineHarness:
             commands = (spec.spec_command
                         if isinstance(spec.spec_command, list)
                         else [spec.spec_command])
-            if commands and isinstance(spec.spec_command, list) and spec.pin_once:
-                # One epoch-level pin (single outer taskset), like the
-                # Penumbra pin_once path.
+            # Multi-command epochs: merge into ONE engine call when either
+            # the workload asks for an epoch-level pin (pin_once) or the
+            # engine declares per-call provisioning costs that must not be
+            # multiplied per command (TryEngine.merge_epoch_commands — each
+            # `try` call re-establishes its sandbox). One outer taskset
+            # pins the whole merged script, matching the raw baseline's
+            # single-wrapper pin.
+            merge_call = (isinstance(spec.spec_command, list)
+                          and (spec.pin_once
+                               or getattr(engine, "merge_epoch_commands",
+                                          False)))
+            if commands and merge_call:
                 argv = build_run_command(None, CPU_PIN,
                                          commands=commands, pin_once=True)
                 rc, out, ns = engine.timed_run(argv)
@@ -223,7 +290,9 @@ class BaselineHarness:
         result = WorkloadResult(
             workload_id=spec.workload_id,
             config=spec.config,
-            params=dict(spec.params, engine="overlayfs+criu",
+            params=dict(spec.params,
+                        engine=getattr(self.engine, "engine_name",
+                                       "overlayfs+criu"),
                         engine_root=self.engine.root),
             warmup_count=self.warmup,
             repeats=repeats,
@@ -263,8 +332,11 @@ class BaselineHarness:
 
 def smoke_test(root: str) -> bool:
     """One full engine cycle with hard verifications — validates every
-    mechanism (overlayfs mount, CRIU dump, run, commit promote, CRIU
-    rollback restore) before any real measurement. Returns success."""
+    CRIU-path mechanism (overlayfs mount, CRIU dump, run, commit promote,
+    CRIU rollback restore) before any real measurement. Returns success.
+
+    (CRIU-specific; the try engine ships its own smoke test in
+    framework/try_engine.py.)"""
     from framework.baseline_engine import SLEEPER_ARGV0
 
     print("=" * 62)
@@ -346,12 +418,17 @@ def smoke_test(root: str) -> bool:
     return ok
 
 
-def merge_save_baseline(new_results, output_dir: str):
-    """Save baseline results, merging with an existing report (same merge
-    semantics as run_all.merge_save_results)."""
+def merge_save_baseline(new_results, output_dir: str, engine_name: str):
+    """Save baseline results, merging with an existing report of the SAME
+    engine (same merge semantics as run_all.merge_save_results).
+
+    Each engine writes its own file (rq3_baseline_try.json /
+    rq3_baseline_criu.json) so the two baselines never clobber each
+    other's data.
+    """
     import json as _json
     os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, "rq3_baseline.json")
+    path = os.path.join(output_dir, RESULT_FILES[engine_name])
     merged = [r.to_dict() for r in new_results]
     new_keys = {(r.workload_id, r.config) for r in new_results}
     if os.path.exists(path):
@@ -364,8 +441,8 @@ def merge_save_baseline(new_results, output_dir: str):
         except Exception:
             print(f"[save] existing {path} unreadable/corrupt -- overwriting")
     data = {
-        "experiment": "rq3_baseline",
-        "engine": "overlayfs+criu",
+        "experiment": f"rq3_baseline_{engine_name}",
+        "engine": ENGINE_DISPLAY[engine_name],
         "timestamp": time.time(),
         "workloads": merged,
     }
@@ -374,12 +451,12 @@ def merge_save_baseline(new_results, output_dir: str):
     return path
 
 
-def compare_with_penumbra(output_dir: str):
-    """If a Penumbra rq3.json report exists next to the baseline report,
-    print a side-by-side median comparison (spec totals)."""
+def compare_with_penumbra(output_dir: str, engine_name: str):
+    """If a Penumbra rq3.json report exists next to this engine's baseline
+    report, print a side-by-side median comparison (spec totals)."""
     import json as _json
     rq3 = os.path.join(output_dir, "rq3.json")
-    base = os.path.join(output_dir, "rq3_baseline.json")
+    base = os.path.join(output_dir, RESULT_FILES[engine_name])
     if not (os.path.exists(rq3) and os.path.exists(base)):
         return
 
@@ -396,7 +473,7 @@ def compare_with_penumbra(output_dir: str):
         return
 
     print(f"\n{'='*78}")
-    print(f"  PENUMBRA vs OVERLAYFS+CRIU (median, ms)")
+    print(f"  PENUMBRA vs {ENGINE_DISPLAY[engine_name].upper()} (median, ms)")
     print(f"{'='*78}\n")
     print(f"  {'Workload':<34} {'raw':>9} {'pen-commit':>11} "
           f"{'base-commit':>12} {'pen-roll':>10} {'base-roll':>11}")
@@ -419,14 +496,19 @@ def compare_with_penumbra(output_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="RQ3 Baseline (overlayfs + CRIU) Experiment Runner",
+        description="RQ3 Baseline Experiment Runner "
+                    "(engine: try [default] / overlayfs+criu)",
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--engine", default=DEFAULT_ENGINE,
+                        help="Baseline engine: try (default, OSDI'26) or "
+                             "criu / overlayfs+criu (fallback)")
     parser.add_argument("--output-dir", default="./results",
                         help="Output directory")
     parser.add_argument("--workload", default="all",
-                        help="Workload number (1-8,10), comma list, or 'all'")
-    parser.add_argument("--root", default=DEFAULT_ENGINE_ROOT,
-                        help="Engine root directory")
+                        help="Workload number (1-10), comma list, or 'all'")
+    parser.add_argument("--root", default=None,
+                        help="Engine root directory (default: per-engine "
+                             "under /tmp)")
     parser.add_argument("--skip-build", action="store_true",
                         help="Skip benchmark compilation")
     parser.add_argument("--quick", action="store_true",
@@ -435,23 +517,40 @@ def main():
                         help="Print configuration without running")
     parser.add_argument("--smoke", action="store_true",
                         help="Run a single end-to-end engine validation "
-                             "(mount/dump/run/commit/rollback) and exit")
+                             "(run/isolate/commit/rollback) and exit")
     args = parser.parse_args()
+
+    engine_name = normalize_engine(args.engine)
+    if engine_name not in RESULT_FILES:
+        parser.error(f"unknown engine {args.engine!r} "
+                     f"(expected: try, criu, overlayfs+criu)")
+    root = args.root or DEFAULT_ROOTS[engine_name]
 
     if args.smoke:
         smoke_errors = []
-        if os.geteuid() != 0:
-            smoke_errors.append("Must run as root (mount/umount/criu)")
-        if find_criu_binary() is None:
-            smoke_errors.append("criu binary not found")
+        if engine_name == "try":
+            # try runs unprivileged (user namespaces); the C tools are
+            # required for a faithful commit path.
+            try_bin = find_try_binary()
+            if try_bin is None:
+                smoke_errors.append("try binary not found")
+            elif find_try_utils_dir(try_bin) is None:
+                smoke_errors.append("try-commit/try-summary not found")
+        else:
+            if os.geteuid() != 0 and not ALLOW_NONROOT:
+                smoke_errors.append("Must run as root (mount/umount/criu)")
+            if find_criu_binary() is None:
+                smoke_errors.append("criu binary not found")
         if smoke_errors:
             print("PREREQUISITE FAILURES:")
             for e in smoke_errors:
                 print(f"  - {e}")
             sys.exit(1)
-        sys.exit(0 if smoke_test(args.root) else 1)
+        if engine_name == "try":
+            sys.exit(0 if try_smoke_test(root) else 1)
+        sys.exit(0 if smoke_test(root) else 1)
 
-    errors = check_prerequisites()
+    errors = check_prerequisites(engine_name)
     if errors and not args.dry_run:
         print("PREREQUISITE FAILURES:")
         for e in errors:
@@ -472,21 +571,23 @@ def main():
     repeats_map = QUICK_REPEATS if args.quick else DEFAULT_REPEATS
 
     if args.dry_run:
-        print("\n[DRY RUN] Would execute (overlayfs + CRIU baseline):")
+        print(f"\n[DRY RUN] Would execute ({ENGINE_DISPLAY[engine_name]} "
+              f"baseline):")
         for wl in wl_nums:
             repeats = repeats_map.get(wl, 100)
             print(f"  W{wl}: repeats={repeats}, warmup={WARMUP}")
-        print(f"\n  Output: {args.output_dir}")
+        print(f"\n  Output: {args.output_dir} "
+              f"({RESULT_FILES[engine_name]})")
         print(f"  Benchmarks: {BENCHMARKS_BIN}")
-        print(f"  Engine root: {args.root}")
+        print(f"  Engine root: {root}")
         sys.exit(0)
 
-    engine = OverlayCriuEngine(args.root, verbose=True)
+    engine = engine_for(engine_name, root, verbose=True)
     engine.setup()
     ensure_work_dirs(engine.lower)
 
-    # Same workload definitions as run_all.py, against the baseline's
-    # (lowerdir, merged-view) directory pair.
+    # Same workload definitions as run_all.py, against the engine's
+    # (backing store, isolated-view) directory pair.
     all_specs = build_workloads(engine.lower, engine.mnt)
     specs = [s for s in all_specs if s.wl_num in wl_nums]
 
@@ -514,12 +615,13 @@ def main():
         engine.teardown()
 
     if all_results:
-        path = merge_save_baseline(all_results, args.output_dir)
+        path = merge_save_baseline(all_results, args.output_dir, engine_name)
         print(f"\n  Results saved to: {path}")
         WorkloadHarness.print_summary(all_results)
-        compare_with_penumbra(args.output_dir)
+        compare_with_penumbra(args.output_dir, engine_name)
 
-    print("\n[done] RQ3 baseline (overlayfs + CRIU) experiments complete.")
+    print(f"\n[done] RQ3 baseline ({ENGINE_DISPLAY[engine_name]}) "
+          f"experiments complete.")
 
 
 if __name__ == "__main__":

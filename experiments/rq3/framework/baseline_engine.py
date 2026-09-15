@@ -210,6 +210,9 @@ class OverlayCriuEngine:
         teardown()                 remove the whole directory tree
     """
 
+    # Reported in result params / comparison tables.
+    engine_name = "overlayfs+criu"
+
     def __init__(self, root: str, verbose: bool = True,
                  criu_bin: str = None):
         self.root = os.path.abspath(root)

@@ -8,7 +8,8 @@
 #   dep        实验 B：dep_graph_scalability.py（依赖图形状 scaling）
 #   multi      实验 A：multi_agent_scaling.py（agent 数量 scaling）
 #   scaling    实验 A + 实验 B，依次跑完
-#   baseline   overlayfs + CRIU 对照实验（不需要守护进程）
+#   baseline / baseline-try  try (OSDI'26) 主基线对照实验（不需要守护进程）
+#   baseline-criu            overlayfs + CRIU 备用基线（保留兜底，不需要守护进程）
 #   summarize  只汇总 results/ 下已有的 JSON（不需要守护进程）
 #
 # 例：sudo ./start_and_run.sh scaling --quick
@@ -16,6 +17,8 @@ set -e
 
 PROJ="/home/xht/桌面/penumbra-work/RQ2/speculative_shadow"
 EXP_RQ3="$PROJ/experiments/rq3"
+# RQ2 工作区根（try 源码默认克隆位置 <RQ2>/try-osdi26-ae 的父目录）
+RQ2_ROOT="$(dirname "$PROJ")"
 
 # Socket paths
 SHADOWFS_SOCK="/tmp/shadowfs.sock"
@@ -51,37 +54,77 @@ if [ "$WORKLOAD" = "summarize" ]; then
     exit $?
 fi
 
-# ─── baseline 分支：overlayfs + CRIU 对照实验 ─────────────────────────────────
+# ─── baseline 分支：对照实验（try 为主 baseline，overlayfs+CRIU 为备用） ──────
 # 不需要 ShadowFS/ShadowProc/Orchestrator，完全独立运行；负载与 Penumbra 实验
-# 完全相同（共享 workloads.py），结果写入 results/rq3_baseline.json。
-if [ "$WORKLOAD" = "baseline" ]; then
-    echo "运行 overlayfs + CRIU 基线实验（无需守护进程）..."
-    echo ""
+# 完全相同（共享 workloads.py）。
+#   baseline / baseline-try  → OSDI'26 try（主 baseline）
+#                              results/rq3_baseline_try.json
+#   baseline-criu            → overlayfs + CRIU（兜底备用，保留原实现）
+#                              results/rq3_baseline_criu.json
+case "$WORKLOAD" in
+    baseline|baseline-try|baseline-criu)
+        if [ "$WORKLOAD" = "baseline-criu" ]; then
+            ENGINE="criu"
+            ENGINE_DESC="overlayfs + CRIU (fallback)"
+        else
+            ENGINE="try"
+            ENGINE_DESC="try (OSDI'26, primary)"
+        fi
+        echo "运行 ${ENGINE_DESC} 基线实验（无需守护进程）..."
+        echo ""
 
-    # 检查 CRIU：Ubuntu 24.04 (noble) 软件源中没有 criu 包，需要源码构建。
-    # 优先 PATH / third_party 构建产物；都没有则自动触发构建（需 root）。
-    # 注意源码构建布局：二进制在 criu-<ver>/criu/criu（嵌套子目录）。
-    if ! command -v criu >/dev/null 2>&1 \
-            && [ ! -x "$EXP_RQ3/third_party/criu-4.2.1/criu/criu" ]; then
-        echo "[baseline] 未找到 CRIU，从源码构建（一次性，需要几分钟）..."
-        bash "$EXP_RQ3/third_party/build_criu.sh" || {
-            echo "ERROR: CRIU 构建失败，请检查上方日志"
-            exit 1
-        }
-    fi
+        if [ "$ENGINE" = "criu" ]; then
+            # 检查 CRIU：Ubuntu 24.04 (noble) 软件源中没有 criu 包，需要源码构建。
+            # 优先 PATH / third_party 构建产物；都没有则自动触发构建（需 root）。
+            # 注意源码构建布局：二进制在 criu-<ver>/criu/criu（嵌套子目录）。
+            if ! command -v criu >/dev/null 2>&1 \
+                    && [ ! -x "$EXP_RQ3/third_party/criu-4.2.1/criu/criu" ]; then
+                echo "[baseline] 未找到 CRIU，从源码构建（一次性，需要几分钟）..."
+                bash "$EXP_RQ3/third_party/build_criu.sh" || {
+                    echo "ERROR: CRIU 构建失败，请检查上方日志"
+                    exit 1
+                }
+            fi
+        else
+            # try：顶层是纯 sh 脚本，另需 gcc 编译的 try-commit/try-summary。
+            # 搜索顺序与 build_try.sh / framework/try_engine.py 保持一致。
+            try_ready() {
+                local root
+                for root in "${TRY_SRC:-}" \
+                            "$RQ2_ROOT/try-osdi26-ae" \
+                            "$EXP_RQ3/third_party/try-osdi26-ae"; do
+                    if [ -n "$root" ] && [ -x "$root/try" ] \
+                            && [ -x "$root/utils/try-commit" ] \
+                            && [ -x "$root/utils/try-summary" ]; then
+                        return 0
+                    fi
+                done
+                command -v try >/dev/null 2>&1 \
+                    && command -v try-commit >/dev/null 2>&1
+            }
+            if ! try_ready; then
+                echo "[baseline] 未找到已构建的 try，执行构建..."
+                bash "$EXP_RQ3/third_party/build_try.sh" || {
+                    echo "ERROR: try 构建失败，请检查上方日志"
+                    exit 1
+                }
+            fi
+        fi
 
-    cd "$EXP_RQ3"
-    export SHADOW_RUN_RQ3_EXPERIMENTS=1
-    python3 run_baseline.py $EXTRA_ARGS
-    EXIT_CODE=$?
+        cd "$EXP_RQ3"
+        export SHADOW_RUN_RQ3_EXPERIMENTS=1
+        # 额外参数里的 --engine 若再指定会覆盖这里的默认选择（argparse 取后者）。
+        python3 run_baseline.py --engine "$ENGINE" $EXTRA_ARGS
+        EXIT_CODE=$?
 
-    echo ""
-    echo "══════════════════════════════════════════════════════════"
-    echo "  RQ3 baseline 实验完成 (exit=$EXIT_CODE)"
-    echo "  结果: $EXP_RQ3/results/rq3_baseline.json"
-    echo "══════════════════════════════════════════════════════════"
-    exit $EXIT_CODE
-fi
+        echo ""
+        echo "══════════════════════════════════════════════════════════"
+        echo "  RQ3 baseline 实验完成 (engine=$ENGINE, exit=$EXIT_CODE)"
+        echo "  结果: $EXP_RQ3/results/rq3_baseline_${ENGINE}.json"
+        echo "══════════════════════════════════════════════════════════"
+        exit $EXIT_CODE
+        ;;
+esac
 
 # ─── [1/7] 清理 ───────────────────────────────────────────────────────────────
 echo "[1/7] 清理旧进程和挂载..."
