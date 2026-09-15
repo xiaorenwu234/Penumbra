@@ -13,6 +13,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <sys/un.h>
+#include <errno.h>
 
 // 当收到 SIGCONT 时打印提示
 void sigcont_handler(int sig) {
@@ -94,6 +96,51 @@ void test_signal() {
     kill(1, 0);
 }
 
+// [TEST 6] nscd 探针：良性本地名字服务探测，必须【不】被冻结
+// （glibc NSS 每次解析用户名/组名都会先 connect 这个路径）
+void test_unix_nscd_probe() {
+    printf("[TEST 6] connect AF_UNIX /var/run/nscd/socket (benign nscd probe, must NOT freeze)...\n");
+    fflush(stdout);
+
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return;
+    }
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/var/run/nscd/socket", sizeof(addr.sun_path) - 1);
+
+    int ret = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    printf("  connect() returned %d, errno=%d (%s) -- expected fast ENOENT, NO freeze\n",
+           ret, errno, strerror(errno));
+    fflush(stdout);
+    close(sock);
+}
+
+// [TEST 7] 其它 unix socket 路径：不在白名单内，必须被冻结
+void test_unix_other_path() {
+    printf("[TEST 7] connect AF_UNIX /tmp/shadowproc_other.sock (must be fenced)...\n");
+    fflush(stdout);
+
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return;
+    }
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/shadowproc_other.sock", sizeof(addr.sun_path) - 1);
+
+    int ret = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    // 被冻结时不会走到这里；如果看到这行说明拦截没生效
+    printf("  connect() returned %d (if you see this, interception didn't work)\n", ret);
+    fflush(stdout);
+    close(sock);
+}
+
 int main(int argc, char *argv[]) {
     signal(SIGCONT, sigcont_handler);
 
@@ -123,6 +170,12 @@ int main(int argc, char *argv[]) {
         break;
     case 5:
         test_signal();
+        break;
+    case 6:
+        test_unix_nscd_probe();
+        break;
+    case 7:
+        test_unix_other_path();
         break;
     case 0:
     default:

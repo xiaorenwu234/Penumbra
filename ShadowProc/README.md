@@ -20,9 +20,9 @@ internal-vs-external decision is made, and how an authorized effect is released.
 | Effect / mechanism | Hook (`SEC`) | Resource identity | Internal (exempt) vs external (intercept) | Release |
 |---|---|---|---|---|
 | TCP/UDP/IP connect | `lsm/socket_connect` | `sockaddr` family + addr | AF_INET/INET6 (incl. loopback) intercept; AF_UNSPEC/AF_NETLINK exempt | full release |
-| Datagram/stream send | `lsm/socket_sendmsg` | socket family + peer path | AF_UNIX system-socket prefixes exempt; else intercept | full release |
+| Datagram/stream send | `lsm/socket_sendmsg` | socket family + peer path | AF_UNIX policy-governed; else intercept | full release |
 | bind | `lsm/socket_bind` | `sockaddr` family + addr | same classification as connect | full release |
-| AF_UNIX connect/send | `lsm/socket_connect` / `sendmsg` | `sun_path` (incl. abstract) | runtime system-socket whitelist exempt; else intercept | full release |
+| AF_UNIX connect/send | `lsm/socket_connect` / `sendmsg` | `sun_path` (incl. abstract) | benign nscd probe paths exempt (`is_nscd_socket_probe`: `/var/run/nscd/socket`, `/run/nscd/socket`); else intercept | full release |
 | Exit-hold sentinel | `lsm/socket_connect` | `192.0.2.255:65535` | held until full release (`allowed_pids == 2`) | full release |
 | SysV shm | `lsm/shm_alloc_security`, `shm_associate`, `shm_shmat`, `shm_shmctl`, `fmod_ret shmdt` | IPC object | always external (cross-process) | full release |
 | POSIX shm (mmap) | `lsm/mmap_file` | file + prot + flags + owning cgroup | writable file-backed `MAP_SHARED` intercept unless positively **same-epoch** (same cgroup already owns the inode); RO or anon exempt; first map fail-closed | full release |

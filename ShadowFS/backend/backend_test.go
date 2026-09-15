@@ -1166,3 +1166,44 @@ func TestPrefixPromotionNeverSplitsAnSCC(t *testing.T) {
 		t.Fatalf("object A not fully published after the SCC drained: %d version(s) remain", aVersions)
 	}
 }
+
+// --- git link-unlink promote ordering (regression) ---
+//
+// Reproduces git's finalize_object_file pattern inside ONE epoch:
+//
+//	write tmp_obj -> link(tmp_obj, final) -> unlink(tmp_obj)
+//
+// tmp_obj's visible head is the OpWhiteout (git unlinks it right after the
+// link), so promoting tmp_obj first drops its OpWrite stage payload and the
+// later OpLink promote hits a permanent ENOENT (os.Link against a missing
+// target) that no fixpoint retry can repair -- the epoch never finalizes.
+// The link must promote while the payload is still staged: ensureLinkTarget
+// materializes tmp_obj from it, and the whiteout publishes last. tmp_obj_*
+// sorts before hex object names, so the pre-fix promote order walked
+// straight into the failure.
+func TestGitLinkUnlinkPromoteOrder(t *testing.T) {
+	b, orig, _ := newTestBackend(t)
+	dir := filepath.Join(orig, "objects")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(dir, "tmp_obj_rjeXX6")
+	final := filepath.Join(dir, "3545d504987dc3d1dcc180a0c82e2717317183")
+
+	stageWrite(t, b, "A", tmp, "blob")
+	if _, err := b.RecordLink("A", tmp, final); err != nil {
+		t.Fatalf("RecordLink(%s -> %s): %v", tmp, final, err)
+	}
+	if err := b.RecordUnlink("A", tmp); err != nil {
+		t.Fatalf("RecordUnlink(%s): %v", tmp, err)
+	}
+
+	mustCommitFinalized(t, b, "A")
+
+	if got := readFile(t, final); got != "blob" {
+		t.Fatalf("final content = %q, want %q", got, "blob")
+	}
+	if _, err := os.Lstat(tmp); !os.IsNotExist(err) {
+		t.Fatalf("tmp object still present after commit (err=%v), want unlinked", err)
+	}
+}

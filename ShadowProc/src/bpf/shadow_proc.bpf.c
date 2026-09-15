@@ -659,6 +659,56 @@ static __always_inline int net_addr_should_block(struct sockaddr *address, int a
     return 1;
 }
 
+// ─── Benign local name-service probe exemption ─────────────────────────
+// glibc's NSS resolves user/group names by probing the nscd cache socket
+// first: getpwuid()/getgrgid() call connect("/var/run/nscd/socket") before
+// falling back to reading /etc/passwd. ls -l, ps, chown, interactive bash
+// and script startup all trigger this. Inside the task rootfs nscd does not
+// exist (/var/run/nscd/ is absent), so the connect always fails with ENOENT
+// and can never exchange data with any peer: it has no external effect, and
+// fencing it only freezes the command for a Guard verdict while promoting a
+// containable operation into an escaping one.
+//
+// SCOPE: pathname AF_UNIX sockets only, full-path match (including the
+// terminating NUL) against the two well-known nscd locations. Abstract
+// sockets (sun_path[0] == '\0') and every other path keep strict fencing.
+static __always_inline int is_nscd_socket_probe(struct sockaddr *address,
+                                                int addrlen)
+{
+    // Short sockaddr cannot carry the full sun_path; not the probe shape.
+    if (addrlen < 23)
+        return 0;
+
+    __u16 family = 0;
+    bpf_probe_read_kernel(&family, sizeof(family), address);
+    if (family != AF_UNIX)
+        return 0;
+
+    // sun_path lives at offset 2. The LSM hook receives a sockaddr_storage
+    // kernel copy (128 bytes), safe to over-read.
+    char p[24] = {};
+    bpf_probe_read_kernel(p, sizeof(p), (void *)address + 2);
+
+    // "/var/run/nscd/socket"
+    if (p[0] == '/' && p[1] == 'v' && p[2] == 'a' && p[3] == 'r' &&
+        p[4] == '/' && p[5] == 'r' && p[6] == 'u' && p[7] == 'n' &&
+        p[8] == '/' && p[9] == 'n' && p[10] == 's' && p[11] == 'c' &&
+        p[12] == 'd' && p[13] == '/' && p[14] == 's' && p[15] == 'o' &&
+        p[16] == 'c' && p[17] == 'k' && p[18] == 'e' && p[19] == 't' &&
+        p[20] == '\0')
+        return 1;
+
+    // "/run/nscd/socket"
+    if (p[0] == '/' && p[1] == 'r' && p[2] == 'u' && p[3] == 'n' &&
+        p[4] == '/' && p[5] == 'n' && p[6] == 's' && p[7] == 'c' &&
+        p[8] == 'd' && p[9] == '/' && p[10] == 's' && p[11] == 'o' &&
+        p[12] == 'c' && p[13] == 'k' && p[14] == 'e' && p[15] == 't' &&
+        p[16] == '\0')
+        return 1;
+
+    return 0;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // LSM Hooks - Block syscall BEFORE execution, return -ERESTARTSYS
 // so kernel auto-restarts after SIGCONT
@@ -670,6 +720,12 @@ SEC("lsm/socket_connect")
 int BPF_PROG(shadow_socket_connect, struct socket *sock,
              struct sockaddr *address, int addrlen)
 {
+    // Benign local name-service probes are not external effects (see
+    // is_nscd_socket_probe above): let them fail with ENOENT untouched
+    // instead of freezing the command and forcing an escaping promotion.
+    if (is_nscd_socket_probe(address, addrlen))
+        return 0;
+
     // Check for exit-hold sentinel address FIRST: 192.0.2.255:65535.
     // This is a cooperative marker from libexithold.so (LD_PRELOAD) signalling
     // process completion. In the three-state model, the sentinel is handled

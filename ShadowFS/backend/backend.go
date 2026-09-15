@@ -2936,9 +2936,28 @@ func (b *Backend) tryPromoteAll() error {
 		// even if it made no filesystem writes — a pure-read epoch may still
 		// have process / network / output effects that policy must gate.
 		sccOf := b.sccMembership()
+		// Objects still referenced as a pending OpLink's LinkTarget must not
+		// promote yet (see tryPromoteObject); recomputed every iteration
+		// because links that promote drop out of the version store.
+		pendingLinkOwners := make(map[ObjectID]map[EpochID]struct{})
+		for _, chain := range b.versionsByObject {
+			for _, vid := range chain {
+				v := b.versionByID[vid]
+				if v == nil || v.Operation != OpLink ||
+					v.State == VPromoted || v.LinkTarget == "" {
+					continue
+				}
+				owners := pendingLinkOwners[v.LinkTarget]
+				if owners == nil {
+					owners = make(map[EpochID]struct{})
+					pendingLinkOwners[v.LinkTarget] = owners
+				}
+				owners[v.Owner] = struct{}{}
+			}
+		}
 		progress := false
 		for _, obj := range objects {
-			ran, err := b.tryPromoteObject(obj, sccOf)
+			ran, err := b.tryPromoteObject(obj, sccOf, pendingLinkOwners)
 			if ran {
 				progress = true
 			}
@@ -2990,10 +3009,35 @@ func (b *Backend) tryPromoteAll() error {
 // preserved, the involved owners are left in Finalizing with FinalizeErr set,
 // and (false, err) is returned. promoteVersion is idempotent, so RetryFinalize
 // re-runs the same promotion. Must be called with b.mu held.
-func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int) (bool, error) {
+func (b *Backend) tryPromoteObject(obj ObjectID, sccOf map[EpochID]int,
+	pendingLinkOwners map[ObjectID]map[EpochID]struct{}) (bool, error) {
 	chain := b.versionsByObject[obj]
 	if len(chain) == 0 {
 		return false, nil
+	}
+
+	// git finalize_object_file ordering: while a pending OpLink still
+	// references us as its LinkTarget, defer our own promotion. The link
+	// must publish while our OpWrite payload is still staged (it
+	// materializes the target via ensureLinkTarget); promoting us first
+	// would publish the whiteout, drop the payload and leave the link's
+	// os.Link permanently ENOENT. Only links owned by the same epochs as
+	// our whole chain defer us: across epochs the target's owner must
+	// finalize first (read-from gate), so deferring would deadlock instead
+	// of surfacing the link's error.
+	if linkOwners, ok := pendingLinkOwners[obj]; ok {
+		sameOwner := true
+		for _, vid := range chain {
+			if v := b.versionByID[vid]; v != nil {
+				if _, co := linkOwners[v.Owner]; !co {
+					sameOwner = false
+					break
+				}
+			}
+		}
+		if sameOwner {
+			return false, nil
+		}
 	}
 
 	// Longest promotable prefix (0 = nothing may publish yet).
