@@ -4,7 +4,7 @@
 Runs the SAME workloads as run_all.py (shared definitions in workloads.py)
 against a vanilla isolation stack, so Penumbra's speculative-execution
 overhead can be compared against what a plain single-mechanism design
-would cost. Two engines are available:
+would cost. Three engines are available:
 
   --engine try   (default, primary baseline)
       OSDI'26 `try`: run the epoch's command in a per-epoch overlay sandbox
@@ -13,6 +13,14 @@ would cost. Two engines are available:
       File-state isolation  overlay sandbox (try's native flow)
       Process-state         none (try's scope is file effects only)
 
+  --engine hs    (speculative shell-execution system baseline)
+      binpash/hs (dynamic-parallelizer): the epoch's command runs through
+      hs's executor path — fd_util + a try sandbox (hs's vendored try
+      branch) + strace tracing — and commits via hs's own commit entry
+      point (try -i /run/mount commit, copy semantics).
+      File-state isolation  try sandbox (hs's vendored branch, -i/-L)
+      Process-state         none (hs is file-effect speculation only)
+
   --engine criu  (fallback baseline, kept as a safety net)
       overlayfs + CRIU: upperdir scratch + CRIU dump at begin_epoch /
       restore at rollback.
@@ -20,23 +28,27 @@ would cost. Two engines are available:
       Process-state         CRIU checkpoint/restore of the session process
 
 Epoch phase mapping (timed identically to the Penumbra harness):
-  begin_epoch  -> try: fresh sandbox dir | criu: criu dump --leave-running
+  begin_epoch  -> try: fresh sandbox dir | hs: epoch dirs + env snapshot |
+                  criu: criu dump --leave-running
   session_run  -> command (bash -c, taskset-pinned) in the isolated view
-  commit       -> try: `try commit <sandbox>` | criu: promote upper->lower
-  rollback     -> try: drop the sandbox     | criu: criu restore + discard
+  commit       -> try: `try commit <sandbox>` | hs: hs commit_workspace |
+                  criu: promote upper->lower
+  rollback     -> try: drop the sandbox | hs: delete sandbox upperdirs |
+                  criu: criu restore + discard
 
-Results are written to engine-specific files so the two baselines never
-clobber each other: results/rq3_baseline_try.json and
-results/rq3_baseline_criu.json.
+Results are written to engine-specific files so the baselines never
+clobber each other: results/rq3_baseline_try.json,
+results/rq3_baseline_hs.json and results/rq3_baseline_criu.json.
 
 Usage:
     sudo SHADOW_RUN_RQ3_EXPERIMENTS=1 python3 run_baseline.py [options]
 
 Options:
-    --engine E         try (default) or criu / overlayfs+criu
+    --engine E         try (default), hs, or criu / overlayfs+criu
     --output-dir DIR   Output directory (default: ./results)
     --workload W       Run only workload W (1-10) or "all" (default: all)
     --root DIR         Engine root (default: /tmp/shadow-rq3-try for try,
+                       /tmp/shadow-rq3-hs for hs,
                        /tmp/shadow-rq3-baseline for criu)
     --skip-build       Skip benchmark compilation
     --quick            Use reduced repeat counts for quick testing
@@ -44,9 +56,13 @@ Options:
 Prerequisites:
     - Root privileges for the full runs (mount/umount; criu mode needs it
       unconditionally). Set RQ3_ALLOW_NONROOT=1 to bypass for functional
-      testing — the try engine itself works unprivileged (user namespaces).
+      testing — the try/hs engines themselves work unprivileged (user
+      namespaces).
     - try mode: `try` built via third_party/build_try.sh (a plain script;
       C tools compiled with gcc). Honors $TRY_BIN / $TRY_SRC.
+    - hs mode: the hs tree (default <RQ2>/hs, override $HS_ROOT) with its
+      deps/try submodule initialized and fd_util/try-utils compiled —
+      set it up with third_party/build_hs.sh.
     - criu mode: criu built via third_party/build_criu.sh (Ubuntu 24.04
       noble has no criu apt package; the engine also honors $CRIU_BIN)
     - NO Penumbra daemons needed — these baselines are fully standalone.
@@ -69,6 +85,9 @@ from framework.baseline_engine import (
 from framework.try_engine import (
     TryEngine, find_try_binary, find_try_utils_dir, smoke_test as try_smoke_test,
 )
+from framework.hs_engine import (
+    HsEngine, find_hs_root, smoke_test as hs_smoke_test,
+)
 from framework.harness import (
     WorkloadResult, BENCHMARKS_BIN, CPU_PIN,
 )
@@ -84,16 +103,18 @@ RUN_EXPERIMENTS = os.environ.get("SHADOW_RUN_RQ3_EXPERIMENTS") == "1"
 ALLOW_NONROOT = os.environ.get("RQ3_ALLOW_NONROOT") == "1"
 DEFAULT_ENGINE = "try"
 ENGINE_ALIASES = {"overlayfs+criu": "criu", "overlayfs": "criu"}
-ENGINE_DISPLAY = {"try": "try", "criu": "overlayfs+criu"}
+ENGINE_DISPLAY = {"try": "try", "criu": "overlayfs+criu", "hs": "hs"}
 DEFAULT_ROOTS = {"try": "/tmp/shadow-rq3-try",
-                 "criu": "/tmp/shadow-rq3-baseline"}
-# Engine-specific result files — never clobber the other baseline's data.
+                 "criu": "/tmp/shadow-rq3-baseline",
+                 "hs": "/tmp/shadow-rq3-hs"}
+# Engine-specific result files — never clobber another baseline's data.
 RESULT_FILES = {"try": "rq3_baseline_try.json",
-                "criu": "rq3_baseline_criu.json"}
+                "criu": "rq3_baseline_criu.json",
+                "hs": "rq3_baseline_hs.json"}
 
 
 def normalize_engine(name: str) -> str:
-    """Map CLI spellings onto canonical engine names ("try" / "criu")."""
+    """Map CLI spellings onto canonical engine names (try/hs/criu)."""
     return ENGINE_ALIASES.get(name.lower(), name.lower())
 
 
@@ -101,6 +122,8 @@ def engine_for(engine_name: str, root: str = None, verbose: bool = True):
     """Construct the selected baseline engine."""
     if engine_name == "try":
         return TryEngine(root or DEFAULT_ROOTS["try"], verbose=verbose)
+    if engine_name == "hs":
+        return HsEngine(root or DEFAULT_ROOTS["hs"], verbose=verbose)
     return OverlayCriuEngine(root or DEFAULT_ROOTS["criu"], verbose=verbose)
 
 
@@ -124,6 +147,30 @@ def check_prerequisites(engine_name: str):
                 f"try-commit/try-summary not found next to {try_bin} — "
                 "try would use its slow shell commit path; rebuild with: "
                 "bash experiments/rq3/third_party/build_try.sh")
+    elif engine_name == "hs":
+        hs_root = find_hs_root()
+        if hs_root is None:
+            errors.append(
+                "hs not found (neither $HS_ROOT, <RQ2>/hs nor "
+                "third_party/hs) — set it up with: "
+                "bash experiments/rq3/third_party/build_hs.sh")
+        else:
+            for rel, hint in (
+                    (("executor", "run_command.sh"),
+                     "hs source tree incomplete"),
+                    (("executor", "fd_util"),
+                     f"build it: make -C {hs_root}/executor"),
+                    (("jit_runtime", "pash_declare_vars.sh"),
+                     "hs source tree incomplete"),
+                    (("deps", "try", "try"),
+                     "init the submodule: git -c http.sslVerify=false "
+                     "submodule update --init deps/try"),
+                    (("deps", "try", "utils", "try-commit"),
+                     f"build it: make -C {hs_root}/deps/try/utils"),
+            ):
+                path = os.path.join(hs_root, *rel)
+                if not os.path.isfile(path):
+                    errors.append(f"{path} missing ({hint})")
     else:
         criu = find_criu_binary()
         if criu is None:
@@ -497,10 +544,11 @@ def compare_with_penumbra(output_dir: str, engine_name: str):
 def main():
     parser = argparse.ArgumentParser(
         description="RQ3 Baseline Experiment Runner "
-                    "(engine: try [default] / overlayfs+criu)",
+                    "(engine: try [default] / hs / overlayfs+criu)",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--engine", default=DEFAULT_ENGINE,
-                        help="Baseline engine: try (default, OSDI'26) or "
+                        help="Baseline engine: try (default, OSDI'26), "
+                             "hs (binpash/hs executor path) or "
                              "criu / overlayfs+criu (fallback)")
     parser.add_argument("--output-dir", default="./results",
                         help="Output directory")
@@ -536,6 +584,24 @@ def main():
                 smoke_errors.append("try binary not found")
             elif find_try_utils_dir(try_bin) is None:
                 smoke_errors.append("try-commit/try-summary not found")
+        elif engine_name == "hs":
+            # hs runs unprivileged too; the executor path needs fd_util
+            # compiled and the vendored try utils built.
+            hs_root = find_hs_root()
+            if hs_root is None:
+                smoke_errors.append(
+                    "hs not found (set HS_ROOT or place it at <RQ2>/hs)")
+            else:
+                for rel, hint in (
+                        (("executor", "fd_util"),
+                         "build it: make -C <hs>/executor"),
+                        (("deps", "try", "utils", "try-commit"),
+                         "build it: make -C <hs>/deps/try/utils"),
+                ):
+                    if not os.path.isfile(os.path.join(hs_root, *rel)):
+                        smoke_errors.append(
+                            f"missing {os.path.join(hs_root, *rel)} "
+                            f"({hint})")
         else:
             if os.geteuid() != 0 and not ALLOW_NONROOT:
                 smoke_errors.append("Must run as root (mount/umount/criu)")
@@ -548,6 +614,8 @@ def main():
             sys.exit(1)
         if engine_name == "try":
             sys.exit(0 if try_smoke_test(root) else 1)
+        if engine_name == "hs":
+            sys.exit(0 if hs_smoke_test(root) else 1)
         sys.exit(0 if smoke_test(root) else 1)
 
     errors = check_prerequisites(engine_name)

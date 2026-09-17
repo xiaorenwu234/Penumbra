@@ -9,6 +9,7 @@
 #   multi      实验 A：multi_agent_scaling.py（agent 数量 scaling）
 #   scaling    实验 A + 实验 B，依次跑完
 #   baseline / baseline-try  try (OSDI'26) 主基线对照实验（不需要守护进程）
+#   baseline-hs              binpash/hs 对照实验（不需要守护进程）
 #   baseline-criu            overlayfs + CRIU 备用基线（保留兜底，不需要守护进程）
 #   summarize  只汇总 results/ 下已有的 JSON（不需要守护进程）
 #
@@ -54,18 +55,23 @@ if [ "$WORKLOAD" = "summarize" ]; then
     exit $?
 fi
 
-# ─── baseline 分支：对照实验（try 为主 baseline，overlayfs+CRIU 为备用） ──────
+# ─── baseline 分支：对照实验（try 为主 baseline，hs 次之，overlayfs+CRIU 备用）──
 # 不需要 ShadowFS/ShadowProc/Orchestrator，完全独立运行；负载与 Penumbra 实验
 # 完全相同（共享 workloads.py）。
 #   baseline / baseline-try  → OSDI'26 try（主 baseline）
 #                              results/rq3_baseline_try.json
+#   baseline-hs              → binpash/hs（乱序投机 shell 执行系统，执行器路径）
+#                              results/rq3_baseline_hs.json
 #   baseline-criu            → overlayfs + CRIU（兜底备用，保留原实现）
 #                              results/rq3_baseline_criu.json
 case "$WORKLOAD" in
-    baseline|baseline-try|baseline-criu)
+    baseline|baseline-try|baseline-criu|baseline-hs)
         if [ "$WORKLOAD" = "baseline-criu" ]; then
             ENGINE="criu"
             ENGINE_DESC="overlayfs + CRIU (fallback)"
+        elif [ "$WORKLOAD" = "baseline-hs" ]; then
+            ENGINE="hs"
+            ENGINE_DESC="hs (binpash/hs, executor path)"
         else
             ENGINE="try"
             ENGINE_DESC="try (OSDI'26, primary)"
@@ -82,6 +88,31 @@ case "$WORKLOAD" in
                 echo "[baseline] 未找到 CRIU，从源码构建（一次性，需要几分钟）..."
                 bash "$EXP_RQ3/third_party/build_criu.sh" || {
                     echo "ERROR: CRIU 构建失败，请检查上方日志"
+                    exit 1
+                }
+            fi
+        elif [ "$ENGINE" = "hs" ]; then
+            # hs：需要 hs 源树 + deps/try 子模块（binpash/try 的 hs 分支）
+            # + gcc 编译的 fd_util / try-commit。搜索顺序与 HsEngine 一致。
+            hs_ready() {
+                local root
+                for root in "${HS_ROOT:-}" \
+                            "$RQ2_ROOT/hs" \
+                            "$EXP_RQ3/third_party/hs"; do
+                    if [ -n "$root" ] \
+                            && [ -f "$root/executor/run_command.sh" ] \
+                            && [ -x "$root/executor/fd_util" ] \
+                            && [ -x "$root/deps/try/try" ] \
+                            && [ -x "$root/deps/try/utils/try-commit" ]; then
+                        return 0
+                    fi
+                done
+                return 1
+            }
+            if ! hs_ready; then
+                echo "[baseline] 未找到已构建的 hs，执行构建..."
+                bash "$EXP_RQ3/third_party/build_hs.sh" || {
+                    echo "ERROR: hs 构建失败，请检查上方日志"
                     exit 1
                 }
             fi
