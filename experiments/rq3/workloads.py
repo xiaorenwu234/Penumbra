@@ -146,10 +146,10 @@ def build_workloads(orig_dir: str, mnt_dir: str) -> List[WorkloadSpec]:
     ))
 
     # ═══════════════════════════════════════════════════════════════════════
-    # W2: CPU-only computation at 10ms, 100ms, 1s
+    # W2: CPU-only computation, 10 ms – 1 s (4 points, ~3-10x per step)
     # ═══════════════════════════════════════════════════════════════════════
     cpu_bin = bin_path("w2_cpu")
-    for target_ms in [10, 100, 1000]:
+    for target_ms in [10, 100, 300, 1000]:
         specs.append(WorkloadSpec(
             wl_num=2, workload_id="W2", config=f"{target_ms}ms",
             params={"target_ms": target_ms},
@@ -164,8 +164,10 @@ def build_workloads(orig_dir: str, mnt_dir: str) -> List[WorkloadSpec]:
     read_bin = bin_path("w3_read")
     cleanup_work_dir(orig_dir)
 
-    # W3-a: Single read at different sizes
-    for size_label, size_bytes in [("4KiB", 4096), ("1MiB", 1048576),
+    # W3-a: Single read at different sizes — 5 points on a uniform 16x
+    # grid (4 KiB → 64 MiB) so the size axis has no 100x+ gaps.
+    for size_label, size_bytes in [("4KiB", 4096), ("64KiB", 65536),
+                                    ("1MiB", 1048576), ("16MiB", 16777216),
                                     ("64MiB", 67108864)]:
         fname = f"input_{size_label}.bin"
         create_file(orig_dir, fname, size_bytes)
@@ -188,7 +190,8 @@ def build_workloads(orig_dir: str, mnt_dir: str) -> List[WorkloadSpec]:
                 rf"bytes={size_bytes} checksum=\d+ repeats=1"),
         ))
 
-    # W3-b: Repeated read (1MiB × 100 times)
+    # W3-b: Repeated read (1MiB file × N) — 4 points spanning three
+    # decades (1 → 10 → 100 → 1000), same log grid as W6's write count.
     fname = "input_1MiB_repeat.bin"
     create_file(orig_dir, fname, 1048576)
 
@@ -196,24 +199,28 @@ def build_workloads(orig_dir: str, mnt_dir: str) -> List[WorkloadSpec]:
         if not os.path.exists(os.path.join(WORK_ORIG, fn)):
             create_file(orig_dir, fn, 1048576)
 
-    specs.append(WorkloadSpec(
-        wl_num=3, workload_id="W3b", config="repeat_read_1MiB_x100",
-        params={"file_size": 1048576, "repeat_count": 100,
-                "variant": "repeated_read"},
-        raw_cmd=[read_bin, os.path.join(WORK_ORIG, fname), "100"],
-        spec_command=f"{read_bin} {mnt_work_path(fname)} 100",
-        setup_fn=ensure_repeat_input,
-        # w3_read reports TOTAL bytes across all repeats (1 MiB × 100),
-        # not the single-pass size.
-        verify_fn=make_verify(r"bytes=104857600 checksum=\d+ repeats=100"),
-    ))
+    for count in [1, 10, 100, 1000]:
+        specs.append(WorkloadSpec(
+            wl_num=3, workload_id="W3b",
+            config=f"repeat_read_1MiB_x{count}",
+            params={"file_size": 1048576, "repeat_count": count,
+                    "variant": "repeated_read"},
+            raw_cmd=[read_bin, os.path.join(WORK_ORIG, fname), str(count)],
+            spec_command=f"{read_bin} {mnt_work_path(fname)} {count}",
+            setup_fn=ensure_repeat_input,
+            # w3_read reports TOTAL bytes across all repeats (1 MiB × N),
+            # not the single-pass size.
+            verify_fn=make_verify(
+                rf"bytes={1048576 * count} checksum=\d+ repeats={count}"),
+        ))
 
     # ═══════════════════════════════════════════════════════════════════════
-    # W4: Create new file (staging/upper write, no copy-up)
+    # W4: Create new file (staging/upper write, no copy-up) — 4 sizes,
+    # uniform 16x steps (4 KiB → 16 MiB)
     # ═══════════════════════════════════════════════════════════════════════
     write_bin = bin_path("w4_write_new")
-    for size_label, size_bytes in [("4KiB", 4096), ("1MiB", 1048576),
-                                    ("16MiB", 16777216)]:
+    for size_label, size_bytes in [("4KiB", 4096), ("64KiB", 65536),
+                                    ("1MiB", 1048576), ("16MiB", 16777216)]:
         fname = f"newfile_{size_label}.bin"
         fpath_orig = os.path.join(WORK_ORIG, fname)
 
@@ -233,12 +240,12 @@ def build_workloads(orig_dir: str, mnt_dir: str) -> List[WorkloadSpec]:
         ))
 
     # ═══════════════════════════════════════════════════════════════════════
-    # W5: Modify existing file (copy-up cost)
+    # W5: Modify existing file (copy-up cost) — 4 sizes, uniform 16x steps
     # ═══════════════════════════════════════════════════════════════════════
     overwrite_bin = bin_path("w5_overwrite")
     cleanup_work_dir(orig_dir)
-    for orig_label, orig_size in [("4KiB", 4096), ("1MiB", 1048576),
-                                   ("16MiB", 16777216)]:
+    for orig_label, orig_size in [("4KiB", 4096), ("64KiB", 65536),
+                                   ("1MiB", 1048576), ("16MiB", 16777216)]:
         fname = f"existing_{orig_label}.bin"
         create_file(orig_dir, fname, orig_size)
         fpath_orig = os.path.join(WORK_ORIG, fname)
@@ -361,8 +368,8 @@ def build_workloads(orig_dir: str, mnt_dir: str) -> List[WorkloadSpec]:
 
     # W9-b: N tool invocations inside ONE epoch — each invocation appends
     # one transcript entry. The entry-count axis is what differs from W9-a
-    # (which varies the per-entry size).
-    for entries in [10, 100, 1000]:
+    # (which varies the per-entry size). 4 points: 10 → 100 → 300 → 1000.
+    for entries in [10, 100, 300, 1000]:
         specs.append(WorkloadSpec(
             wl_num=9, workload_id="W9b", config=f"entries_x{entries}",
             params={"entries": entries, "per_entry_bytes": 1024,
