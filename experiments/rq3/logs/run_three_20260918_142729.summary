@@ -1,0 +1,7 @@
+RQ3 三系统串行实验 — 结束 2026-09-18 22:50:14
+  [1/3] Penumbra (all):      exit=0  log=/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/logs/rq3_penumbra_20260918_142729.log
+  [2/3] try  (baseline):     exit=0  log=/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/logs/rq3_try_20260918_142729.log
+  [3/3] hs   (baseline-hs):  exit=0  log=/home/xht/桌面/penumbra-work/RQ2/speculative_shadow/experiments/rq3/logs/rq3_hs_20260918_142729.log
+  结果: experiments/rq3/results/rq3.json
+        experiments/rq3/results/rq3_baseline_try.json
+        experiments/rq3/results/rq3_baseline_hs.json
